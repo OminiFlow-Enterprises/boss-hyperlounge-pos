@@ -449,6 +449,6 @@ export function getOrderDetail(ctx: AppContext, orderId: string) {
   const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId);
   if (!order) throw new AppError("Order not found", 404);
   const items = ctx.db.prepare("SELECT * FROM order_items WHERE order_id = ? AND voided = 0").all(orderId);
-  const kots = listKots(ctx).filter((k) => (k as { order_id: string }).order_id === orderId);
+  const kots = listKots(ctx).filter((k) => (k as unknown as { order_id: string }).order_id === orderId);
   return { order, items, kots };
 }

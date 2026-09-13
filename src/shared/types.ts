@@ -71,7 +71,7 @@ export interface PaymentLine {
   reference?: string;
 }
 
-export interface NavView =
+export type NavView =
   | "home"
   | "pos"
   | "tables"

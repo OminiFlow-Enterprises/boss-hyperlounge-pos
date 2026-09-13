@@ -302,7 +302,10 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
     invoice.tax ? `Tax ${formatINR(invoice.tax)}` : "",
     invoice.other_charges ? `Other ${formatINR(invoice.other_charges)}` : "",
     `TOTAL ${formatINR(invoice.grand_total)}`,
-    ...snap.payments.map((p) => `${(p as { method: string }).method} ${formatINR((p as { amount: number }).amount)}`),
+    ...snap.payments.map((p) => {
+      const pay = p as unknown as { method: string; amount: number };
+      return `${pay.method} ${formatINR(pay.amount)}`;
+    }),
   ].filter(Boolean);
   const result = await ctx.hardware.receipt.printReceipt({
     title: "BOSS HYPERLOUNGE",
