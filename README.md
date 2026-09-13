@@ -29,9 +29,13 @@ npm run build
 npm start
 ```
 
+Repo: https://github.com/OminiFlow-Enterprises/boss-hyperlounge-pos
+
 ## Deploy
 
-The GitHub repo is the source of truth. On Render, connect the repo — `render.yaml` builds and starts the POS. Docker:
+One-click on Render: [Deploy to Render](https://render.com/deploy?repo=https://github.com/OminiFlow-Enterprises/boss-hyperlounge-pos)
+
+`render.yaml` builds and starts the POS. Docker:
 
 ```bash
 docker build -t boss-hyperlounge-pos .
