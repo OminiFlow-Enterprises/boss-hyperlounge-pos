@@ -2,21 +2,38 @@ import { assertPermission } from "../../shared/permissions.js";
 import { AppError } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
-import { nowIso, uuid } from "../lib/ids.js";
+import { businessDayStart, nowIso, uuid } from "../lib/ids.js";
 import type { SplitType, TableStatus } from "../../shared/types.js";
+import { dayCloseHour } from "./settingsService.js";
 
 export function listFloors(ctx: AppContext) {
   return ctx.db.prepare("SELECT * FROM floors ORDER BY sort_order, name").all();
 }
 
+export function closeStaleDaySessions(ctx: AppContext) {
+  const cutoff = businessDayStart(new Date(), dayCloseHour(ctx)).toISOString();
+  const stale = ctx.db
+    .prepare(
+      `SELECT t.id FROM dining_tables t
+       JOIN table_sessions s ON s.id = t.current_session_id
+       WHERE s.opened_at < ? AND t.status != 'AVAILABLE'`,
+    )
+    .all(cutoff) as Array<{ id: string }>;
+  for (const row of stale) closeTable(ctx, row.id);
+  return stale.length;
+}
+
 export function listTables(ctx: AppContext) {
+  closeStaleDaySessions(ctx);
+  const cutoff = businessDayStart(new Date(), dayCloseHour(ctx)).toISOString();
   return ctx.db
     .prepare(
       `SELECT t.*, f.name AS floor_name, s.customer_id, s.card_id, s.waiter_id, s.id AS session_id,
-              cu.name AS customer_name, c.card_number, st.name AS waiter_name,
+              s.opened_at AS session_opened_at, cu.name AS customer_name, c.card_number, st.name AS waiter_name,
               (SELECT COALESCE(SUM(oi.qty * oi.unit_price), 0)
                  FROM orders o JOIN order_items oi ON oi.order_id = o.id
-                WHERE o.session_id = t.current_session_id AND oi.voided = 0) AS running_total
+                WHERE o.session_id = t.current_session_id AND oi.voided = 0
+                  AND o.created_at >= ?) AS running_total
        FROM dining_tables t
        JOIN floors f ON f.id = t.floor_id
        LEFT JOIN table_sessions s ON s.id = t.current_session_id
@@ -25,20 +42,48 @@ export function listTables(ctx: AppContext) {
        LEFT JOIN staff st ON st.id = s.waiter_id
        ORDER BY f.sort_order, t.code`,
     )
-    .all();
+    .all(cutoff);
 }
 
-export function getTableByCode(ctx: AppContext, code: string) {
-  const row = ctx.db.prepare("SELECT * FROM dining_tables WHERE code = ?").get(code) as
+export function findTableByCode(ctx: AppContext, code: string) {
+  return ctx.db.prepare("SELECT * FROM dining_tables WHERE code = ?").get(code.trim()) as
     | {
         id: string;
         code: string;
         status: TableStatus;
         current_session_id: string | null;
+        floor_id: string;
       }
     | undefined;
+}
+
+export function getTableByCode(ctx: AppContext, code: string) {
+  const row = findTableByCode(ctx, code);
   if (!row) throw new AppError(`Table ${code} not found`, 404);
   return row;
+}
+
+export function createTable(
+  ctx: AppContext,
+  input: { code: string; name?: string; floorId?: string; capacity?: number },
+) {
+  assertPermission(ctx.actor.role, "CREATE_ORDER");
+  const code = input.code.trim();
+  if (!code) throw new AppError("Table code is required");
+  const existing = findTableByCode(ctx, code);
+  if (existing) return getTable(ctx, existing.id);
+  const floor =
+    (input.floorId && (ctx.db.prepare("SELECT id FROM floors WHERE id = ?").get(input.floorId) as { id: string } | undefined)) ||
+    (ctx.db.prepare("SELECT id FROM floors ORDER BY sort_order, name LIMIT 1").get() as { id: string } | undefined);
+  if (!floor) throw new AppError("No floor configured");
+  const id = uuid();
+  ctx.db
+    .prepare(
+      "INSERT INTO dining_tables (id, floor_id, code, name, capacity, status) VALUES (?, ?, ?, ?, ?, 'AVAILABLE')",
+    )
+    .run(id, floor.id, code, input.name?.trim() || `Table ${code}`, input.capacity ?? 4);
+  audit(ctx, "TABLE_CREATE", "dining_table", id, null, null, code);
+  return getTable(ctx, id);
 }
 
 export function getTable(ctx: AppContext, tableId: string) {

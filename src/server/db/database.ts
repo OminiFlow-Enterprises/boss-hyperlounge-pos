@@ -76,6 +76,7 @@ export function resetDatabase(db: Database.Database): void {
     DROP TABLE IF EXISTS sessions;
     DROP TABLE IF EXISTS staff;
     DROP TABLE IF EXISTS terminals;
+    DROP TABLE IF EXISTS bookings;
     DROP TABLE IF EXISTS sequences;
     PRAGMA foreign_keys = ON;
   `);

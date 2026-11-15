@@ -444,3 +444,15 @@ CREATE TABLE IF NOT EXISTS sequences (
   name TEXT PRIMARY KEY,
   value INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS bookings (
+  id TEXT PRIMARY KEY,
+  reservation_no INTEGER NOT NULL,
+  mobile TEXT,
+  guest_name TEXT,
+  card_no TEXT,
+  advance INTEGER NOT NULL DEFAULT 0,
+  outlet TEXT NOT NULL DEFAULT 'THE BOSS CLUB',
+  mop TEXT,
+  created_at TEXT NOT NULL
+);

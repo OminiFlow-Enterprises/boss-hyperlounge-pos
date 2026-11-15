@@ -4,8 +4,8 @@ import type { Actor, BlockReason, CardBalances, LedgerType, PaymentMode } from "
 import { AppError, InsufficientBalanceError, PermissionError } from "../lib/errors.js";
 import { audit, enqueueSync } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
-import { idempotencyKey, nextNumber, nowIso, uuid } from "../lib/ids.js";
-import { spendBonusFirst } from "./settingsService.js";
+import { businessDayStart, idempotencyKey, nextNumber, nowIso, uuid } from "../lib/ids.js";
+import { dayCloseHour, spendBonusFirst } from "./settingsService.js";
 
 export interface CardRow {
   id: string;
@@ -107,6 +107,89 @@ function assertUsable(card: CardRow): void {
   if (card.status !== "ACTIVE") {
     throw new AppError(`Card cannot be used (${card.status})`, 409, "CARD_NOT_ACTIVE");
   }
+}
+
+export function expireOvernightBalance(ctx: AppContext, cardId: string, now = new Date()): CardBalances {
+  const cutoff = businessDayStart(now, dayCloseHour(ctx)).toISOString();
+  const already = ctx.db
+    .prepare("SELECT id FROM card_ledger WHERE card_id = ? AND type = 'EXPIRY' AND created_at >= ? LIMIT 1")
+    .get(cardId, cutoff) as { id: string } | undefined;
+  if (already) return balancesFromLedger(ctx, cardId);
+
+  const stale = ctx.db
+    .prepare(
+      `SELECT
+         COALESCE(SUM(CASE WHEN direction='CREDIT' THEN paid_amount ELSE -paid_amount END), 0) AS paid,
+         COALESCE(SUM(CASE WHEN direction='CREDIT' THEN bonus_amount ELSE -bonus_amount END), 0) AS bonus
+       FROM card_ledger WHERE card_id = ? AND created_at < ?`,
+    )
+    .get(cardId, cutoff) as { paid: number; bonus: number };
+  const current = balancesFromLedger(ctx, cardId);
+  const paid = Math.max(0, Math.min(stale.paid, current.paid));
+  const bonus = Math.max(0, Math.min(stale.bonus, current.bonus));
+  if (paid <= 0 && bonus <= 0) return current;
+
+  writeLedger(ctx, {
+    cardId,
+    type: "EXPIRY",
+    direction: "DEBIT",
+    paidAmount: paid,
+    bonusAmount: bonus,
+    reason: "Night close 6 AM — unused balance lapsed",
+    idempotencyKey: `exp:${cardId}:${cutoff}`,
+  });
+  return balancesFromLedger(ctx, cardId);
+}
+
+function mopToMode(mop?: string): PaymentMode {
+  const m = (mop || "").trim().toUpperCase();
+  if (m === "UPI") return "UPI";
+  if (m === "CARD") return "CARD";
+  return "CASH";
+}
+
+export function ensureCardAndCreditAdvance(
+  ctx: AppContext,
+  input: {
+    cardNumber: string;
+    guestName?: string;
+    mobile?: string;
+    amount: number;
+    paymentMode?: PaymentMode | string;
+    idempotencyKey?: string;
+  },
+) {
+  const cardNumber = input.cardNumber.trim();
+  if (!cardNumber) throw new AppError("Card number is required");
+  let card = findCardByScan(ctx, cardNumber);
+  if (!card) {
+    const mobile = (input.mobile || "").trim() || `card-${cardNumber}`;
+    const name = (input.guestName || "").trim() || "Guest";
+    try {
+      card = issueCard(ctx, {
+        customer: { name, mobile },
+        cardNumber,
+        cardTypeCode: "REGULAR",
+      });
+    } catch (err) {
+      if (err instanceof AppError && /already issued/i.test(err.message)) {
+        card = findCardByScan(ctx, cardNumber);
+      }
+      if (!card) throw err;
+    }
+  }
+  expireOvernightBalance(ctx, card.id);
+  if (input.amount > 0) {
+    rechargeCard(ctx, {
+      cardId: card.id,
+      amount: input.amount,
+      paymentMode: mopToMode(String(input.paymentMode ?? "CASH")),
+      applyBonus: false,
+      printReceipt: false,
+      idempotencyKey: input.idempotencyKey ?? idempotencyKey("adv"),
+    });
+  }
+  return getCard(ctx, card.id);
 }
 
 export function writeLedger(ctx: AppContext, input: LedgerWrite) {
@@ -315,6 +398,7 @@ export function rechargeCard(
 
   const card = getCard(ctx, input.cardId);
   assertUsable(card);
+  expireOvernightBalance(ctx, card.id);
   const key = input.idempotencyKey ?? idempotencyKey("rch");
 
   const result = ctx.db.transaction(() => {
@@ -399,6 +483,7 @@ export function purchaseOnCard(
   assertPositiveAmount(input.amount, "Purchase amount");
   const card = getCard(ctx, input.cardId);
   assertUsable(card);
+  expireOvernightBalance(ctx, card.id);
   const split = allocateSpend(ctx, card, input.amount);
   const txn = writeLedger(ctx, {
     cardId: card.id,
@@ -579,14 +664,34 @@ export function unblockCard(ctx: AppContext, cardId: string, reason: string) {
 }
 
 export function checkBalance(ctx: AppContext, query: string) {
-  const matches = searchCards(ctx, query);
-  if (!matches.length) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
-  const card = matches[0];
+  const q = query.trim();
+  if (!q) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
+  let card: CardRow | null = findCardByScan(ctx, q);
+  if (!card) {
+    card = searchCards(ctx, q)[0] ?? null;
+  }
+  if (!card) {
+    const booking = ctx.db
+      .prepare("SELECT * FROM bookings WHERE card_no = ? ORDER BY created_at DESC LIMIT 1")
+      .get(q) as { id: string; card_no: string; guest_name: string; mobile: string; advance: number; mop: string } | undefined;
+    if (booking && booking.advance > 0) {
+      card = ensureCardAndCreditAdvance(ctx, {
+        cardNumber: booking.card_no,
+        guestName: booking.guest_name,
+        mobile: booking.mobile,
+        amount: booking.advance,
+        paymentMode: booking.mop,
+        idempotencyKey: `adv:${booking.id}`,
+      });
+    }
+  }
+  if (!card) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
+  const ledger = expireOvernightBalance(ctx, card.id);
   const last = ctx.db
     .prepare("SELECT * FROM card_ledger WHERE card_id = ? ORDER BY created_at DESC LIMIT 1")
     .get(card.id);
-  const ledger = balancesFromLedger(ctx, card.id);
-  return { card: { ...card, ...{ paid_balance: ledger.paid, bonus_balance: ledger.bonus } }, last, balances: ledger };
+  const fresh = getCard(ctx, card.id);
+  return { card: { ...fresh, paid_balance: ledger.paid, bonus_balance: ledger.bonus }, last, balances: ledger };
 }
 
 export function cardLedger(

@@ -168,6 +168,7 @@ export function createApp(options: CreateAppOptions) {
 
   app.get("/api/floors", wrap((req, res) => res.json(tables.listFloors(req.ctx))));
   app.get("/api/tables", wrap((req, res) => res.json(tables.listTables(req.ctx))));
+  app.post("/api/tables", wrap((req, res) => res.json(tables.createTable(req.ctx, req.body ?? {}))));
   app.get("/api/tables/waiter", wrap((req, res) => res.json(tables.waiterTables(req.ctx, req.ctx.actor.staffId))));
   app.post("/api/tables/:id/open", wrap((req, res) => {
     res.json(tables.openTable(req.ctx, { tableId: req.params.id, ...req.body }));
@@ -261,6 +262,33 @@ export function createApp(options: CreateAppOptions) {
   app.get("/api/reports/sales", wrap((req, res) => {
     res.json(reports.salesReport(req.ctx, req.query.date ? String(req.query.date) : undefined));
   }));
+  app.get("/api/reports/item-wise", wrap((req, res) => {
+    res.json(reports.itemWiseSales(req.ctx, req.query.from ? String(req.query.from) : undefined, req.query.to ? String(req.query.to) : undefined));
+  }));
+  app.get("/api/reports/gst", wrap((req, res) => {
+    res.json(reports.gstSummary(req.ctx, req.query.from ? String(req.query.from) : undefined, req.query.to ? String(req.query.to) : undefined));
+  }));
+  app.get("/api/reports/settlement", wrap((req, res) => {
+    res.json(reports.settlementReport(
+      req.ctx,
+      req.query.from ? String(req.query.from) : undefined,
+      req.query.to ? String(req.query.to) : undefined,
+      req.query.outlet ? String(req.query.outlet) : undefined,
+    ));
+  }));
+  app.get("/api/reports/kots", wrap((req, res) => {
+    res.json(reports.kotReport(
+      req.ctx,
+      req.query.from ? String(req.query.from) : undefined,
+      req.query.to ? String(req.query.to) : undefined,
+      req.query.station ? String(req.query.station) : undefined,
+    ));
+  }));
+  app.get("/api/reports/bills", wrap((req, res) => {
+    res.json(reports.billReport(req.ctx, req.query.from ? String(req.query.from) : undefined, req.query.to ? String(req.query.to) : undefined));
+  }));
+  app.get("/api/bookings", wrap((req, res) => res.json(reports.listBookings(req.ctx))));
+  app.post("/api/bookings", wrap((req, res) => res.json(reports.saveBooking(req.ctx, req.body ?? {}))));
   app.post("/api/reports/day-close", wrap((req, res) => res.json(reports.dayClose(req.ctx, req.body.date))));
   app.get("/api/audit", wrap((req, res) => res.json(reports.listAudit(req.ctx))));
 

@@ -10,7 +10,10 @@ import {
   refundToCard,
   balancesFromLedger,
   checkBalance,
+  expireOvernightBalance,
 } from "../src/server/services/cardService.js";
+import { saveBooking } from "../src/server/services/reportService.js";
+import { businessDayStart } from "../src/server/lib/ids.js";
 import { InsufficientBalanceError } from "../src/server/lib/errors.js";
 import { createTestApp } from "./helpers.js";
 
@@ -153,5 +156,44 @@ describe("member cards", () => {
     const check = checkBalance(cashier, "9000000099");
     expect(check.card.card_number).toBe("HL-2099");
     expect(check.balances.usable).toBe(rupeesToPaise(100));
+  });
+
+  it("credits advance booking onto the card so billing can show the balance", () => {
+    const { ctx } = createTestApp();
+    const cashier = ctx("cashier");
+    const saved = saveBooking(cashier, {
+      guestName: "Aman",
+      mobile: "9876500001",
+      cardNo: "C1001",
+      advance: rupeesToPaise(1001),
+      mop: "CASH",
+    }) as { balances: { usable: number } };
+    expect(saved.balances.usable).toBe(rupeesToPaise(1001));
+    const check = checkBalance(cashier, "C1001");
+    expect(check.card.card_number).toBe("C1001");
+    expect(check.balances.usable).toBe(rupeesToPaise(1001));
+  });
+
+  it("lapses unused balance at 6 AM until the card is recharged again", () => {
+    const { ctx, db } = createTestApp();
+    const cashier = ctx("cashier");
+    const card = issueCard(cashier, {
+      customer: { name: "Night Guest", mobile: "9000000888" },
+      cardNumber: "NIGHT-1",
+      cardTypeCode: "REGULAR",
+    });
+    rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(1001), paymentMode: "CASH", applyBonus: false });
+    const beforeCutoff = new Date(businessDayStart().getTime() - 60 * 60 * 1000);
+    db.prepare("UPDATE card_ledger SET created_at = ? WHERE card_id = ?").run(beforeCutoff.toISOString(), card.id);
+
+    const check = checkBalance(cashier, "NIGHT-1");
+    expect(check.balances.usable).toBe(0);
+    expect(() =>
+      purchaseOnCard(cashier, { cardId: card.id, amount: rupeesToPaise(100), invoiceId: "inv" }),
+    ).toThrow(InsufficientBalanceError);
+
+    rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(500), paymentMode: "CASH", applyBonus: false });
+    expect(checkBalance(cashier, "NIGHT-1").balances.usable).toBe(rupeesToPaise(500));
+    expect(expireOvernightBalance(cashier, card.id).usable).toBe(rupeesToPaise(500));
   });
 });

@@ -156,6 +156,7 @@ export function seedFresh(db: Database.Database): SeedResult {
     ["cloud_sync_url", ""],
     ["offline_mode", "0"],
     ["insufficient_balance_actions", "recharge,split,cancel"],
+    ["day_close_hour", "6"],
   ];
   for (const [key, value] of settings) {
     db.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run(key, value);

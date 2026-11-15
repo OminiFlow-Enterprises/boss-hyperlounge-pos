@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { rupeesToPaise } from "../src/shared/money.js";
-import { openTable, transferTable, mergeTables, getTableByCode, splitTable } from "../src/server/services/tableService.js";
+import { openTable, transferTable, mergeTables, getTableByCode, splitTable, createTable } from "../src/server/services/tableService.js";
 import { addItem, createOrder, sendKot, getOrderDetail, reprintKot } from "../src/server/services/orderService.js";
 import { generateInvoice, settleInvoice, previewBill } from "../src/server/services/billingService.js";
 import { setSetting } from "../src/server/services/settingsService.js";
@@ -91,5 +91,15 @@ describe("tables, KOT and billing", () => {
     const reprint = hardware.kitchen.logs.find((l) => l.reprint);
     expect(reprint).toBeTruthy();
     expect((reprint?.payload as { reprint: boolean }).reprint).toBe(true);
+  });
+
+  it("creates a new table from a typed code and reuses the same code", () => {
+    const { ctx } = createTestApp();
+    const cashier = ctx("cashier");
+    const created = createTable(cashier, { code: "99", name: "Table 99" }) as { id: string; code: string };
+    expect(created.code).toBe("99");
+    const again = createTable(cashier, { code: "99" }) as { id: string };
+    expect(again.id).toBe(created.id);
+    expect(getTableByCode(cashier, "99").id).toBe(created.id);
   });
 });

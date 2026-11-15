@@ -33,3 +33,8 @@ export function getServiceCharge(ctx: AppContext): { pct: number; mode: ServiceC
 export function spendBonusFirst(ctx: AppContext): boolean {
   return getSetting(ctx, "spend_bonus_first", "1") === "1";
 }
+
+export function dayCloseHour(ctx: AppContext): number {
+  const n = Number(getSetting(ctx, "day_close_hour", "6"));
+  return Number.isFinite(n) && n >= 0 && n <= 23 ? n : 6;
+}

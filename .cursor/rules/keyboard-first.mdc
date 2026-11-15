@@ -1,0 +1,25 @@
+---
+description: All POS functions must work from the keyboard; mouse is optional.
+alwaysApply: true
+---
+
+# Keyboard-first POS
+
+Every billing and report action must be usable without a mouse.
+
+- Put a visible Tab order on Table No, Card No, Waiter, ItemName, and function keys.
+- Wire the labeled shortcuts: F1 Complim., F4 Packing, F5 Save, F7 KOT report, F8 Bill report, F9 table transfer, F10 Prepare Bill, F11 Settlement, F12 S. Report, Escape closes a dialog.
+- Enter confirms the focused field (select/create table, load card, add item, settle).
+- Alt+1 THE BOSS CLUB, Alt+2 RESTAURANT, Alt+3 NC, Alt+4 BAR.
+- Auto-focus Card No on THE BOSS CLUB and Table No on BAR / NC / RESTAURANT.
+- Table No is a combobox: pick an existing table or type a new code and press Enter to create it. THE BOSS CLUB does not ask Table No; it asks Card No. BAR, NC, and RESTAURANT ask Table No.
+- Do not add a flow that only works by clicking.
+
+```tsx
+// BAD
+<button onClick={prepareBill}>Prepare Bill</button>
+
+// GOOD
+<button onClick={prepareBill}>Prepare Bill (F10)</button>
+// and F10 in the window keydown handler calls prepareBill()
+```
