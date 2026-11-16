@@ -164,13 +164,20 @@ button { cursor: default; }
 }
 
 .hdr {
-  flex: 0 0 auto;
-  display: grid;
-  grid-template-columns: 42px 168px 48px 56px 58px 88px;
-  gap: 4px 6px;
+  flex: 1 1 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   align-items: center;
-  align-content: start;
 }
+.hdr .pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 700;
+}
+.hdr .pair input.win { width: 148px; }
+.hdr .pair input.win.green { width: 88px; }
 .hdr .lbl { text-align: left; }
 .hdr .kot-text {
   height: 21px;
