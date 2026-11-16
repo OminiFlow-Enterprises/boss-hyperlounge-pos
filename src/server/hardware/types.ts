@@ -22,7 +22,7 @@ export interface KotPrintPayload {
   waiter?: string;
   station: "KITCHEN" | "BAR";
   reprint: boolean;
-  items: Array<{ qty: number; name: string; notes?: string | null }>;
+  items: Array<{ qty: number; name: string; notes?: string | null; rate?: number; price?: number }>;
   createdAt: string;
 }
 

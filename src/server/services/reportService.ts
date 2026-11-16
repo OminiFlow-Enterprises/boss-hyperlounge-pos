@@ -1,5 +1,6 @@
 import { assertPermission } from "../../shared/permissions.js";
 import type { AppContext } from "../lib/context.js";
+import { AppError } from "../lib/errors.js";
 import { nowIso, todayDate, uuid } from "../lib/ids.js";
 import { audit } from "../lib/audit.js";
 import * as cards from "./cardService.js";
@@ -210,32 +211,181 @@ export function gstSummary(ctx: AppContext, from?: string, to?: string) {
   return { from: range.start, to: range.end, ...inv, mop };
 }
 
-export function settlementReport(ctx: AppContext, from?: string, to?: string, outlet?: string) {
+export function settlementReport(
+  ctx: AppContext,
+  from?: string,
+  to?: string,
+  outlet?: string,
+  filters?: { mop?: string; billNo?: string; account?: string; user?: string; settledOnly?: boolean },
+) {
   assertPermission(ctx.actor.role, "VIEW_REPORTS");
   const range = dateRange(from, to);
+  const where = ["p.created_at BETWEEN ? AND ?"];
+  const args: Array<string | number> = [range.from, range.to];
+  if (outlet) {
+    where.push("COALESCE(t.outlet, 'BAR') = ?");
+    args.push(outlet);
+  }
+  const mop = filters?.mop && filters.mop !== "Select" ? filters.mop : "";
+  if (mop === "CASH") where.push("p.method = 'CASH'");
+  else if (mop === "PREPAID CARD") where.push("p.method = 'MEMBER_CARD'");
+  else if (mop === "BANK TRANSFER") where.push("p.method IN ('CARD','UPI')");
+  if (filters?.billNo?.trim()) {
+    where.push("i.invoice_number LIKE ?");
+    args.push(`%${filters.billNo.trim()}%`);
+  }
+  if (filters?.account && filters.account !== "Select") {
+    where.push("COALESCE(p.reference, '') = ?");
+    args.push(filters.account);
+  }
+  if (filters?.user && filters.user !== "Select") {
+    where.push("s.name = ?");
+    args.push(filters.user);
+  }
+  if (filters?.settledOnly) where.push("i.status = 'PAID'");
   const rows = ctx.db
     .prepare(
-      `SELECT i.invoice_number AS bill_no, t.code AS table_no, i.created_at AS voucher_date,
-              i.grand_total AS settled, i.status, i.discount AS allowance,
-              COALESCE(p.method, '') AS mop, s.name AS username, cu.name AS guest
-       FROM invoices i
+      `SELECT p.id AS payment_id, p.receipt_no, p.voucher_no, p.remark,
+              i.id AS invoice_id, i.invoice_number AS bill_no, i.grand_total AS bill_amount,
+              COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
+              p.created_at AS voucher_date, p.amount AS settled, i.status, i.discount AS allowance,
+              p.method AS method, COALESCE(p.reference, '') AS account,
+              s.name AS username, w.name AS waiter, cu.name AS guest,
+              COALESCE(t.outlet, 'BAR') AS outlet_name
+       FROM payments p
+       JOIN invoices i ON i.id = p.invoice_id
        JOIN dining_tables t ON t.id = i.table_id
-       LEFT JOIN payments p ON p.invoice_id = i.id
        LEFT JOIN staff s ON s.id = i.cashier_id
        LEFT JOIN customers cu ON cu.id = i.customer_id
-       WHERE i.created_at BETWEEN ? AND ?
-       ORDER BY i.created_at`,
+       LEFT JOIN table_sessions ts ON ts.id = i.session_id
+       LEFT JOIN staff w ON w.id = ts.waiter_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY p.created_at, i.invoice_number`,
     )
-    .all(range.from, range.to);
-  const totals = ctx.db
+    .all(...args) as Array<Record<string, unknown>>;
+  const seen = new Set<string>();
+  let allowance = 0;
+  const totals = { CASH: 0, CARD: 0, UPI: 0, MEMBER_CARD: 0 };
+  for (const row of rows) {
+    const method = String(row.method || "");
+    const amount = Number(row.settled) || 0;
+    if (method === "CASH") totals.CASH += amount;
+    else if (method === "MEMBER_CARD") totals.MEMBER_CARD += amount;
+    else if (method === "UPI") totals.UPI += amount;
+    else totals.CARD += amount;
+    const id = String(row.invoice_id || "");
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      allowance += Number(row.allowance) || 0;
+    }
+  }
+  const users = ctx.db
+    .prepare(`SELECT name FROM staff WHERE active = 1 ORDER BY name`)
+    .all() as Array<{ name: string }>;
+  return {
+    from: range.start,
+    to: range.end,
+    outlet: outlet || "THE BOSS CLUB",
+    rows,
+    totals: [
+      { method: "CASH", amount: totals.CASH },
+      { method: "CARD", amount: totals.CARD },
+      { method: "UPI", amount: totals.UPI },
+      { method: "MEMBER_CARD", amount: totals.MEMBER_CARD },
+    ],
+    allowance,
+    users: users.map((u) => u.name),
+  };
+}
+
+function settlementRow(ctx: AppContext, paymentId: string) {
+  return ctx.db
     .prepare(
-      `SELECT p.method AS method, COALESCE(SUM(p.amount),0) AS amount
-       FROM payments p JOIN invoices i ON i.id = p.invoice_id
-       WHERE p.created_at BETWEEN ? AND ?
-       GROUP BY p.method`,
+      `SELECT p.id AS payment_id, p.receipt_no, p.voucher_no, COALESCE(p.remark, '') AS remark,
+              p.method, p.amount, COALESCE(p.reference, '') AS account, p.created_at AS voucher_date,
+              p.member_card_id, p.ledger_id,
+              i.id AS invoice_id, i.invoice_number AS bill_no, i.grand_total AS bill_amount,
+              i.discount AS allowance, i.status, i.order_id,
+              COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
+              COALESCE(t.outlet, 'BAR') AS outlet_name,
+              cu.name AS guest,
+              (SELECT COALESCE(SUM(amount), 0) FROM payments WHERE invoice_id = i.id) AS paid
+       FROM payments p
+       JOIN invoices i ON i.id = p.invoice_id
+       JOIN dining_tables t ON t.id = i.table_id
+       LEFT JOIN customers cu ON cu.id = i.customer_id
+       WHERE p.id = ?`,
     )
-    .all(range.from, range.to) as Array<{ method: string; amount: number }>;
-  return { from: range.start, to: range.end, outlet: outlet || "THE BOSS CLUB", rows, totals };
+    .get(paymentId) as Record<string, unknown> | undefined;
+}
+
+export function settlementDetail(ctx: AppContext, paymentId: string) {
+  assertPermission(ctx.actor.role, "VIEW_REPORTS");
+  const row = settlementRow(ctx, paymentId);
+  if (!row) throw new AppError("Settlement not found", 404);
+  return row;
+}
+
+function applyPaidStatus(ctx: AppContext, invoiceId: string, orderId: string, grand: number, paid: number) {
+  if (paid >= grand && grand > 0) {
+    ctx.db.prepare("UPDATE invoices SET status = 'PAID', paid_at = COALESCE(paid_at, ?) WHERE id = ?").run(nowIso(), invoiceId);
+    ctx.db.prepare("UPDATE orders SET status = 'PAID' WHERE id = ?").run(orderId);
+    return;
+  }
+  ctx.db.prepare("UPDATE invoices SET status = ?, paid_at = NULL WHERE id = ?").run(paid > 0 ? "PARTIAL" : "UNPAID", invoiceId);
+  ctx.db.prepare("UPDATE orders SET status = 'SETTLING' WHERE id = ? AND status = 'PAID'").run(orderId);
+}
+
+export function updateSettlement(
+  ctx: AppContext,
+  paymentId: string,
+  input: { method?: string; amount?: number; account?: string; remark?: string },
+) {
+  assertPermission(ctx.actor.role, "SETTLE_BILL");
+  const mode = String(input.method || "CASH");
+  const method = mode === "BANK TRANSFER" ? "CARD" : mode === "PREPAID CARD" ? "MEMBER_CARD" : mode === "CASH" ? "CASH" : "";
+  if (!method) throw new AppError("Select payment mode");
+  const amount = Number(input.amount);
+  if (!Number.isInteger(amount) || amount <= 0) throw new AppError("Enter settle amount");
+  const account = String(input.account || "").trim();
+  if (method === "CARD" && (!account || account === "Select" || account === "Cash.")) throw new AppError("Select bank name");
+
+  return ctx.db.transaction(() => {
+    const row = settlementRow(ctx, paymentId);
+    if (!row) throw new AppError("Settlement not found", 404);
+    const current = String(row.method || "");
+    if (current === "MEMBER_CARD" && (method !== "MEMBER_CARD" || amount !== Number(row.amount))) {
+      throw new AppError("Prepaid card settlement cannot be changed");
+    }
+    if (method === "MEMBER_CARD" && current !== "MEMBER_CARD") {
+      throw new AppError("Prepaid card settlement cannot be added here");
+    }
+    const others = Number(row.paid) - Number(row.amount);
+    if (others + amount > Number(row.bill_amount)) throw new AppError("Amount exceeds bill");
+    const storedAccount = method === "CASH" ? (account || "Cash.") : method === "CARD" ? account : String(row.account || "");
+    ctx.db
+      .prepare("UPDATE payments SET method = ?, amount = ?, reference = ?, remark = ? WHERE id = ?")
+      .run(method, amount, storedAccount, String(input.remark ?? ""), paymentId);
+    applyPaidStatus(ctx, String(row.invoice_id), String(row.order_id), Number(row.bill_amount), others + amount);
+    audit(ctx, "SETTLEMENT_UPDATE", "payment", paymentId, null, row.amount, { method, amount, account: storedAccount });
+    return settlementRow(ctx, paymentId);
+  })();
+}
+
+export function deleteSettlement(ctx: AppContext, paymentId: string) {
+  assertPermission(ctx.actor.role, "SETTLE_BILL");
+  return ctx.db.transaction(() => {
+    const row = settlementRow(ctx, paymentId);
+    if (!row) throw new AppError("Settlement not found", 404);
+    if (String(row.method) === "MEMBER_CARD" && row.ledger_id) {
+      throw new AppError("Prepaid card settlement cannot be deleted here");
+    }
+    ctx.db.prepare("DELETE FROM payments WHERE id = ?").run(paymentId);
+    const paid = Number(row.paid) - Number(row.amount);
+    applyPaidStatus(ctx, String(row.invoice_id), String(row.order_id), Number(row.bill_amount), paid);
+    audit(ctx, "SETTLEMENT_DELETE", "payment", paymentId, null, row.amount, row.bill_no);
+    return { ok: true };
+  })();
 }
 
 export function kotReport(ctx: AppContext, from?: string, to?: string, station?: string) {
@@ -286,6 +436,8 @@ export function saveBooking(
   const no = max.n + 1;
   const cardNo = (body.cardNo ?? "").trim();
   const advance = body.advance ?? 0;
+  if (!/^\d{4}$/.test(cardNo)) throw new AppError("Card No must be 4 digits");
+  if (!(advance > 10000)) throw new AppError("Advance must be greater than 100.00");
   ctx.db
     .prepare(
       `INSERT INTO bookings (id, reservation_no, mobile, guest_name, card_no, advance, outlet, mop, created_at)

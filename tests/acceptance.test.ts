@@ -75,19 +75,19 @@ describe("BOSS Hyperlounge acceptance workflow", () => {
     expect(getTableByCode(cashier, "12").status).toBe("BILL_REQUESTED");
 
     const bill = previewBill(cashier, order.id);
-    expect(bill.grandTotal).toBe(rupeesToPaise(4200));
     expect(bill.foodTotal).toBe(rupeesToPaise(2200));
     expect(bill.drinksTotal).toBe(rupeesToPaise(2000));
+    expect(bill.grandTotal).toBe(rupeesToPaise(4670));
 
     const invoice = generateInvoice(cashier, order.id) as { id: string; grand_total: number };
     const paid = settleInvoice(cashier, invoice.id, [
-      { method: "MEMBER_CARD", amount: rupeesToPaise(4200), memberCardId: card.id },
+      { method: "MEMBER_CARD", amount: invoice.grand_total, memberCardId: card.id },
     ]);
     expect(paid.complete).toBe(true);
     expect((paid.invoice as { status: string }).status).toBe("PAID");
 
     const remaining = balancesFromLedger(cashier, card.id);
-    expect(remaining.usable).toBe(rupeesToPaise(800));
+    expect(remaining.usable).toBe(rupeesToPaise(5000) - invoice.grand_total);
     expect(getTableByCode(cashier, "12").status).toBe("AVAILABLE");
     expect(hardware.receipt.logs.filter((l) => l.kind === "receipt").length).toBeGreaterThanOrEqual(2);
 
@@ -106,7 +106,7 @@ describe("BOSS Hyperlounge acceptance workflow", () => {
 
     const sales = salesReport(owner);
     expect(sales.invoices).toHaveLength(1);
-    expect((sales.invoices[0] as { grand_total: number }).grand_total).toBe(rupeesToPaise(4200));
+    expect((sales.invoices[0] as { grand_total: number }).grand_total).toBe(rupeesToPaise(4670));
 
     const pending = db.prepare("SELECT COUNT(*) AS n FROM sync_queue WHERE status='PENDING'").get() as { n: number };
     expect(pending.n).toBeGreaterThan(0);

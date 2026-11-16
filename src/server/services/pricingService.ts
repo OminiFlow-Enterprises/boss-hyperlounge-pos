@@ -24,6 +24,7 @@ export function resolvePrice(
   productId: string,
   cardTypeId: string | null,
   at = new Date(),
+  outlet?: string | null,
 ): PriceResolution {
   const product = ctx.db
     .prepare("SELECT id, name, station, base_price, tax_rate FROM products WHERE id = ? AND active = 1")
@@ -31,6 +32,12 @@ export function resolvePrice(
     | { id: string; name: string; station: "KITCHEN" | "BAR"; base_price: number; tax_rate: number }
     | undefined;
   if (!product) throw new Error("Product not found");
+  if (outlet) {
+    const dept = ctx.db
+      .prepare("SELECT rate FROM product_dept_rates WHERE product_id = ? AND dept = ? AND enabled = 1")
+      .get(productId, outlet) as { rate: number } | undefined;
+    if (dept && dept.rate > 0) product.base_price = dept.rate;
+  }
 
   const dow = at.getDay() === 0 ? 7 : at.getDay();
   const nowMin = currentMinutes(at);

@@ -1,0 +1,24 @@
+---
+description: THE BOSS POS must feel like a Windows native desktop app, not a website.
+alwaysApply: true
+---
+
+# Windows-native POS
+
+This is a clone of a WinForms desktop POS. Every screen must feel like a native Windows app (THE BOSS / RID Infotech), not a browser product.
+
+- Keep Tahoma / MS Sans Serif, 11px, mostly Bold. Face color `#f0f0f0`, selection `#0078d7`, yellow header bars, green input boxes.
+- Caption bar, menubar, 1px gray borders, square corners, flat Win32 buttons. No rounded pills, Material cards, box-shadows, or web hover-only chrome.
+- `cursor: default` on buttons. Do not use pointer-finger cursors or large web focus rings.
+- Controls behave like Windows: Tab order, Enter confirms, Escape closes, F-keys.
+- Item lookup is a generic Win32 combobox: type to filter, first match is selected (blue highlight and selected suffix in the edit), Enter accepts, Up/Down move the selection. Do not invent a custom web autocomplete.
+- Match screenshot layout and fonts. Do not “modernize” spacing, typography, or color.
+- Dialogs look like Win32: caption, ✕, Enter to OK, Escape to cancel. Menus are nested flyouts, not hamburger / router pages.
+
+```tsx
+// BAD — website
+<button className="rounded-xl shadow-md hover:bg-blue-600 text-white">Save</button>
+
+// GOOD — WinForms
+<button className="fn" onClick={printKot}>Save (F5)</button>
+```

@@ -15,7 +15,7 @@ export type LedgerType =
 
 export type LedgerDirection = "CREDIT" | "DEBIT";
 
-export type PaymentMode = "CASH" | "UPI" | "CARD" | "MEMBER_CARD" | "OTHER";
+export type PaymentMode = "CASH" | "UPI" | "PAYTM" | "CARD" | "MEMBER_CARD" | "OTHER";
 
 export type TableStatus =
   | "AVAILABLE"

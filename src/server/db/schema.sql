@@ -124,12 +124,14 @@ CREATE TABLE IF NOT EXISTS floors (
 CREATE TABLE IF NOT EXISTS dining_tables (
   id TEXT PRIMARY KEY,
   floor_id TEXT NOT NULL REFERENCES floors(id),
-  code TEXT NOT NULL UNIQUE,
+  code TEXT NOT NULL,
   name TEXT NOT NULL,
   capacity INTEGER NOT NULL DEFAULT 4,
   status TEXT NOT NULL DEFAULT 'AVAILABLE',
   current_session_id TEXT,
-  merged_into_table_id TEXT
+  merged_into_table_id TEXT,
+  outlet TEXT NOT NULL DEFAULT 'BAR',
+  UNIQUE(outlet, code)
 );
 
 CREATE TABLE IF NOT EXISTS table_sessions (
@@ -140,7 +142,8 @@ CREATE TABLE IF NOT EXISTS table_sessions (
   waiter_id TEXT REFERENCES staff(id),
   status TEXT NOT NULL DEFAULT 'OPEN',
   opened_at TEXT NOT NULL,
-  closed_at TEXT
+  closed_at TEXT,
+  outlet TEXT NOT NULL DEFAULT 'BAR'
 );
 
 CREATE TABLE IF NOT EXISTS checkins (
@@ -198,7 +201,38 @@ CREATE TABLE IF NOT EXISTS products (
   tax_rate REAL NOT NULL DEFAULT 0,
   track_inventory INTEGER NOT NULL DEFAULT 1,
   unit TEXT NOT NULL DEFAULT 'pc',
-  active INTEGER NOT NULL DEFAULT 1
+  active INTEGER NOT NULL DEFAULT 1,
+  sales_group TEXT NOT NULL DEFAULT '',
+  item_group TEXT NOT NULL DEFAULT '',
+  cost_price INTEGER NOT NULL DEFAULT 0,
+  is_veg INTEGER NOT NULL DEFAULT 1,
+  stock_item TEXT NOT NULL DEFAULT '',
+  allow_complimentary INTEGER NOT NULL DEFAULT 0,
+  hide_in_web INTEGER NOT NULL DEFAULT 0,
+  name_hindi TEXT NOT NULL DEFAULT '',
+  mix_item INTEGER NOT NULL DEFAULT 0,
+  logo TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS sales_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS item_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS product_dept_rates (
+  product_id TEXT NOT NULL REFERENCES products(id),
+  dept TEXT NOT NULL,
+  rate INTEGER NOT NULL DEFAULT 0,
+  hsn TEXT NOT NULL DEFAULT '',
+  inclusive INTEGER NOT NULL DEFAULT 0,
+  discount INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (product_id, dept)
 );
 
 CREATE TABLE IF NOT EXISTS product_prices (
@@ -375,6 +409,9 @@ CREATE TABLE IF NOT EXISTS payments (
   member_card_id TEXT,
   ledger_id TEXT,
   reference TEXT,
+  remark TEXT NOT NULL DEFAULT '',
+  receipt_no INTEGER,
+  voucher_no INTEGER,
   created_at TEXT NOT NULL
 );
 
@@ -410,6 +447,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action, created_at);
+CREATE INDEX IF NOT EXISTS idx_orders_session ON orders(session_id);
+CREATE INDEX IF NOT EXISTS idx_orders_table ON orders(table_id);
+CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
+CREATE INDEX IF NOT EXISTS idx_invoices_created ON invoices(created_at);
+CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
+CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at);
 
 CREATE TABLE IF NOT EXISTS sync_queue (
   id TEXT PRIMARY KEY,

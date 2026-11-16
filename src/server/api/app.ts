@@ -16,6 +16,7 @@ import * as sync from "../services/syncService.js";
 import * as staff from "../services/staffService.js";
 import * as inventory from "../services/inventoryService.js";
 import * as settings from "../services/settingsService.js";
+import * as items from "../services/itemService.js";
 
 declare global {
   namespace Express {
@@ -180,12 +181,27 @@ export function createApp(options: CreateAppOptions) {
   app.post("/api/tables/transfer", wrap((req, res) => {
     res.json(tables.transferTable(req.ctx, req.body.fromTableId, req.body.toTableId, req.body.reason));
   }));
+  app.get("/api/tables/:id/items", wrap((req, res) => res.json(tables.listTableItems(req.ctx, req.params.id))));
+  app.post("/api/tables/item-transfer", wrap((req, res) => {
+    res.json(tables.transferItems(
+      req.ctx,
+      req.body.fromTableId,
+      req.body.toTableId,
+      req.body.itemIds ?? [],
+      req.body.reason,
+    ));
+  }));
   app.post("/api/tables/merge", wrap((req, res) => {
     res.json(tables.mergeTables(req.ctx, req.body.sourceTableId, req.body.targetTableId));
   }));
   app.post("/api/tables/split", wrap((req, res) => res.json(tables.splitTable(req.ctx, req.body))));
 
   app.get("/api/products", wrap((req, res) => res.json(staff.listProducts(req.ctx))));
+  app.get("/api/items/master", wrap((req, res) => res.json(items.listItemMaster(req.ctx))));
+  app.post("/api/items", wrap((req, res) => res.json(items.createItem(req.ctx, req.body ?? {}))));
+  app.put("/api/items/:id", wrap((req, res) => res.json(items.updateItem(req.ctx, req.params.id, req.body ?? {}))));
+  app.delete("/api/items/:id", wrap((req, res) => res.json(items.deleteItem(req.ctx, req.params.id))));
+  app.post("/api/item-groups", wrap((req, res) => res.json(items.addItemGroup(req.ctx, req.body?.name ?? ""))));
   app.get("/api/orders", wrap((req, res) => res.json(orders.listOrders(req.ctx))));
   app.get("/api/orders/:id", wrap((req, res) => res.json(orders.getOrderDetail(req.ctx, req.params.id))));
   app.post("/api/orders", wrap((req, res) => res.json(orders.createOrder(req.ctx, req.body.tableId))));
@@ -222,6 +238,9 @@ export function createApp(options: CreateAppOptions) {
     res.json(billing.generateInvoice(req.ctx, req.body.orderId, req.body));
   }));
   app.get("/api/invoices", wrap((req, res) => res.json(billing.listInvoices(req.ctx))));
+  app.get("/api/tables/:id/invoice", wrap((req, res) => {
+    res.json(billing.getOpenInvoiceByTable(req.ctx, req.params.id));
+  }));
   app.get("/api/invoices/:id", wrap((req, res) => res.json(billing.getInvoice(req.ctx, req.params.id))));
   app.post("/api/invoices/:id/pay", wrap((req, res) => {
     res.json(billing.settleInvoice(req.ctx, req.params.id, req.body.lines, req.body));
@@ -274,7 +293,29 @@ export function createApp(options: CreateAppOptions) {
       req.query.from ? String(req.query.from) : undefined,
       req.query.to ? String(req.query.to) : undefined,
       req.query.outlet ? String(req.query.outlet) : undefined,
+      {
+        mop: req.query.mop ? String(req.query.mop) : undefined,
+        billNo: req.query.bill ? String(req.query.bill) : undefined,
+        account: req.query.account ? String(req.query.account) : undefined,
+        user: req.query.user ? String(req.query.user) : undefined,
+        settledOnly: req.query.settled === "1",
+      },
     ));
+  }));
+  app.get("/api/reports/settlement/:paymentId", wrap((req, res) => {
+    res.json(reports.settlementDetail(req.ctx, req.params.paymentId));
+  }));
+  app.put("/api/reports/settlement/:paymentId", wrap((req, res) => {
+    const body = req.body ?? {};
+    res.json(reports.updateSettlement(req.ctx, req.params.paymentId, {
+      method: body.method,
+      amount: Number(body.amount),
+      account: body.account,
+      remark: body.remark,
+    }));
+  }));
+  app.delete("/api/reports/settlement/:paymentId", wrap((req, res) => {
+    res.json(reports.deleteSettlement(req.ctx, req.params.paymentId));
   }));
   app.get("/api/reports/kots", wrap((req, res) => {
     res.json(reports.kotReport(

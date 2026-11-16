@@ -1,27 +1,62 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError } from "./api";
 import { formatINR } from "../shared/money";
 import type { NavView, PaymentMode, StaffRole } from "../shared/types";
 import { ReportHost } from "./Reports";
+import { ConfirmAsk, ItemTransferDialog, PrepareBillDialog, PrepareTablePick, SettleDialog, TransferDialog } from "./BillDialogs";
+import { ItemMasterDialog } from "./ItemMaster";
 
 type Actor = { staffId: string; staffName: string; role: StaffRole; terminalId: string; terminalName: string };
 type Table = {
   id: string; code: string; name: string; status: string; floor_name: string; floor_id: string;
   current_session_id: string | null; customer_name?: string; card_number?: string; running_total?: number;
-  session_opened_at?: string;
+  session_opened_at?: string; outlet?: string;
 };
-type Product = { id: string; name: string; station: string; base_price: number; sku: string };
+
+type Dept = "CLUB" | "RESTAURANT" | "NC" | "BAR";
+
+function deptOutlet(d: Dept) {
+  return d === "CLUB" ? "THE BOSS CLUB" : d;
+}
+type Product = {
+  id: string; name: string; station: string; base_price: number; sku: string;
+  item_group?: string;
+  dept_rates?: Record<string, { rate: number; enabled: number }>;
+};
+
+const TAB_ITEM_GROUPS: Record<Dept, string[] | null> = {
+  BAR: ["BAR", "BEVERAGE"],
+  RESTAURANT: ["FOOD"],
+  CLUB: ["EV CAFE", "EV FOOD", "SPL", "SPL1"],
+  NC: null,
+};
+
+function priceForOutlet(p: Product, outletName: string) {
+  const row = p.dept_rates?.[outletName];
+  if (!row || Number(row.enabled) === 0) return p.base_price;
+  return Number(row.rate) > 0 ? Number(row.rate) : p.base_price;
+}
+
+function onThisTab(p: Product, dept: Dept) {
+  const group = (p.item_group || "").trim().toUpperCase();
+  if (!group) return true;
+  const allowed = TAB_ITEM_GROUPS[dept];
+  if (!allowed) return true;
+  return allowed.some((name) => name.toUpperCase() === group);
+}
 type Card = {
   id: string; card_number: string; customer_name: string; mobile: string; paid_balance: number;
   bonus_balance: number; status: string; card_type_code: string; last_used_at?: string;
 };
-type OrderItem = { id: string; name: string; qty: number; unit_price: number; station: string; notes?: string; kot_id?: string };
+type OrderItem = {
+  id: string; product_id?: string; sku?: string; name: string; qty: number;
+  unit_price: number; station: string; notes?: string; kot_id?: string;
+};
 type Invoice = {
   id: string; invoice_number: string; grand_total: number; food_total: number; drinks_total: number;
   service_charge: number; discount: number; tax: number; other_charges: number; status: string; table_id: string;
 };
 
-type Dept = "CLUB" | "RESTAURANT" | "NC" | "BAR";
 type AppView = NavView | "login" | "billing";
 type MenuLeaf = { label: string; view: AppView; outlet?: string };
 type MenuNode = { label: string; children?: MenuLeaf[]; view?: AppView; outlet?: string };
@@ -134,6 +169,27 @@ export function App() {
     setSub(null);
   }
 
+  useEffect(() => {
+    function keys(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      if (document.querySelector(".su-dlg, .confirm-dlg")) return;
+      if (view === "billing" || view === "advance-booking" || view === "card-block") {
+        if (view === "billing" && menu) {
+          e.preventDefault();
+          e.stopPropagation();
+          setMenu(null);
+          setSub(null);
+        }
+        return;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      go("billing");
+    }
+    window.addEventListener("keydown", keys, true);
+    return () => window.removeEventListener("keydown", keys, true);
+  }, [view, menu]);
+
   if (!bootstrap) {
     return (
       <div className="winapp">
@@ -154,7 +210,7 @@ export function App() {
       <header className="caption">
         <div className="caption-icon" />
         <div className="caption-title">
-          Organisation : THE BOSS&nbsp;&nbsp;&nbsp;&nbsp;Session :2026-27&nbsp;&nbsp;&nbsp;&nbsp;Version : A202117070RIDInfotech&nbsp;&nbsp;&nbsp;&nbsp;- [{deptLabel}]
+          Organisation : THE BOSS&nbsp;&nbsp;&nbsp;&nbsp;Session :2026-27&nbsp;&nbsp;&nbsp;&nbsp;Version : 1.0.0&nbsp;&nbsp;&nbsp;&nbsp;- [{deptLabel}]
         </div>
         <div className="caption-btns">
           <button type="button">─</button>
@@ -260,7 +316,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
   onRefresh: () => void;
   onInvoice: (inv: any) => void;
   onMessage: (m: string) => void;
-  onOpenView: (v: AppView) => void;
+  onOpenView: (v: AppView, nextOutlet?: string) => void;
 }) {
   const [now, setNow] = useState(new Date());
   const [tableId, setTableId] = useState("");
@@ -269,18 +325,39 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
   const tableRef = useRef<HTMLInputElement>(null);
   const cardRef = useRef<HTMLInputElement>(null);
   const itemRef = useRef<HTMLInputElement>(null);
+  const qtyRef = useRef<HTMLInputElement>(null);
+  const remarkRef = useRef<HTMLInputElement>(null);
+  const kotBtnRef = useRef<HTMLButtonElement>(null);
+  const gridBodyRef = useRef<HTMLDivElement>(null);
+  const dropRef = useRef<HTMLDivElement>(null);
   const [detail, setDetail] = useState<any>(null);
   const [dept, setDept] = useState<Dept>(outlet === "THE BOSS CLUB" ? "CLUB" : outlet === "RESTAURANT" ? "RESTAURANT" : outlet === "NC" ? "NC" : "BAR");
   const clubMode = dept === "CLUB";
-  const [manualKot, setManualKot] = useState(false);
   const [mobile, setMobile] = useState("");
   const [guest, setGuest] = useState("");
   const [cardNo, setCardNo] = useState("");
   const [cardBal, setCardBal] = useState("0.00");
-  const [sel, setSel] = useState(0);
+  const [sel, setSel] = useState(-1);
+  const [focusEntry, setFocusEntry] = useState(0);
   const [remark, setRemark] = useState("");
   const [payOpen, setPayOpen] = useState(false);
+  const [pickOpen, setPickOpen] = useState<"bill" | "settle" | null>(null);
+  const [billOrder, setBillOrder] = useState<{ orderId: string; table: Table } | null>(null);
+  const [settleInv, setSettleInv] = useState<{ invoiceId: string; table: Table } | null>(null);
+  const [settleTables, setSettleTables] = useState<Table[]>([]);
+  const [askExit, setAskExit] = useState(false);
+  const [xferOpen, setXferOpen] = useState(false);
+  const [itemXferOpen, setItemXferOpen] = useState(false);
+  const [itemMasterOpen, setItemMasterOpen] = useState(false);
   const [waiter, setWaiter] = useState("A");
+  const [itemQuery, setItemQuery] = useState("");
+  const [qtyStr, setQtyStr] = useState("1");
+  const [pending, setPending] = useState<Product | null>(null);
+  const [nameLocked, setNameLocked] = useState(false);
+  const [listOpen, setListOpen] = useState(false);
+  const [pick, setPick] = useState(0);
+  const [itemListSel, setItemListSel] = useState(0);
+  const [dropPos, setDropPos] = useState({ top: 0, left: 58 });
   const amt = (n: number) => (n / 100).toFixed(2);
 
   useEffect(() => {
@@ -301,17 +378,47 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
   }, [dept]);
 
   const table = tables.find((t) => t.id === tableId);
-  const items: OrderItem[] = detail?.items ?? [];
-  const kotNo = detail?.kots?.[0]?.kot_number?.replace(/\D/g, "") || detail?.order?.order_number?.replace(/\D/g, "") || "";
+  const allItems: OrderItem[] = detail?.items ?? [];
+  const items: OrderItem[] = allItems.filter((it) => !it.kot_id);
+  const tableItemList = useMemo(() => {
+    const map = new Map<string, { code: string; name: string; qty: number }>();
+    for (const it of (detail?.items ?? []) as OrderItem[]) {
+      if (!it.kot_id) continue;
+      const key = it.product_id || it.name;
+      const code = it.sku || products.find((p) => p.id === it.product_id)?.sku || "";
+      const cur = map.get(key);
+      if (cur) cur.qty += it.qty;
+      else map.set(key, { code, name: it.name, qty: it.qty });
+    }
+    return [...map.values()];
+  }, [detail, products]);
+  const kotNo = String(detail?.kots?.[0]?.kot_number ?? "").replace(/\D/g, "");
 
-  const filtered = products.filter((p) => {
-    if (dept === "BAR") return p.station === "BAR";
-    if (dept === "RESTAURANT" || dept === "CLUB") return p.station === "KITCHEN";
-    return true;
-  });
+  const catalog = useMemo(() => {
+    const outletName = deptOutlet(dept);
+    return products
+      .filter((p) => {
+        if (!onThisTab(p, dept)) return false;
+        const row = p.dept_rates?.[outletName];
+        if (!row) return true;
+        return Number(row.enabled) !== 0;
+      })
+      .map((p) => ({ ...p, base_price: priceForOutlet(p, outletName) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [products, dept]);
+
+  const matches = useMemo(() => {
+    const v = itemQuery.trim().toLowerCase();
+    if (!v) return [];
+    const starts = catalog.filter((p) => p.name.toLowerCase().startsWith(v));
+    if (starts.length) return starts;
+    return catalog.filter((p) => p.name.toLowerCase().includes(v));
+  }, [catalog, itemQuery]);
 
   async function loadOrder(id: string) {
-    setDetail(await api.get(`/api/orders/${id}`));
+    const d = await api.get<any>(`/api/orders/${id}`);
+    setDetail(d);
+    return d;
   }
 
   async function selectTable(id: string, code?: string) {
@@ -320,10 +427,11 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
     const t = tables.find((x) => x.id === id);
     try {
       if (!t || t.status === "AVAILABLE") {
-        await api.post(`/api/tables/${id}/open`, {}).catch(() => null);
+        await api.post(`/api/tables/${id}/open`, { outlet: deptOutlet(dept) }).catch(() => null);
       }
       const order = await api.post<any>("/api/orders", { tableId: id });
       setOrderId(order.id);
+      setItemListSel(0);
       await loadOrder(order.id);
       if (t?.customer_name) setGuest(t.customer_name);
       if (t?.card_number) setCardNo(t.card_number);
@@ -334,20 +442,50 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
     }
   }
 
+  function switchDept(next: Dept) {
+    if (next === dept) return;
+    setDept(next);
+    setOrderId(null);
+    setDetail(null);
+    setTableId("");
+    setTableCode("");
+    setPending(null);
+    setNameLocked(false);
+    setItemQuery("");
+    setQtyStr("1");
+    setRemark("");
+    setListOpen(false);
+    setPick(0);
+    setItemListSel(0);
+    setCardNo("");
+    setCardBal("0.00");
+    setSel(-1);
+    setTimeout(() => {
+      if (next === "CLUB") cardRef.current?.focus();
+      else tableRef.current?.focus();
+    }, 0);
+  }
+
   async function ensureOpenByCode(code: string) {
     const raw = code.trim();
-    if (!raw) {
-      onMessage(clubMode ? "Enter Card No first" : "Select Table No first");
+    if (clubMode && !cardNo.trim()) {
+      onMessage("Enter Card No first");
+      cardRef.current?.focus();
       return null;
     }
+    if (!raw) {
+      onMessage("Select Table No first");
+      return null;
+    }
+    const out = deptOutlet(dept);
     const current = tables.find((x) => x.id === tableId);
-    if (orderId && current && current.code.toLowerCase() === raw.toLowerCase()) {
+    if (orderId && current && current.code.toLowerCase() === raw.toLowerCase() && (current.outlet || "BAR") === out) {
       itemRef.current?.focus();
       return current;
     }
     try {
-      let t = tables.find((x) => x.code.toLowerCase() === raw.toLowerCase());
-      if (!t) t = await api.post<Table>("/api/tables", { code: raw, name: `Table ${raw}` });
+      let t = tables.find((x) => x.code.toLowerCase() === raw.toLowerCase() && (x.outlet || "BAR") === out);
+      if (!t) t = await api.post<Table>("/api/tables", { code: raw, name: `Table ${raw}`, outlet: out });
       await selectTable(t.id, t.code);
       return t;
     } catch (e) {
@@ -361,181 +499,505 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
     setCardNo(q);
     if (!v) {
       setCardBal("0.00");
-      return;
+      if (clubMode) onMessage("Enter Card No first");
+      return false;
     }
     try {
       const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(v)}`);
       setCardBal(amt(b.balances.usable));
       if (b.card.customer_name) setGuest(b.card.customer_name);
       if (b.card.mobile && !String(b.card.mobile).startsWith("card-")) setMobile(b.card.mobile);
-      if (clubMode) await ensureOpenByCode(v);
+      return true;
     } catch {
       setCardBal("0.00");
-      if (clubMode) onMessage("Enter a valid Card No");
+      onMessage("Card not found");
+      return false;
     }
   }
 
-  async function addItem(product: Product) {
+  function placeDrop() {
+    const body = gridBodyRef.current;
+    const entry = body?.querySelector(".igrid-row.entry") as HTMLElement | null;
+    if (!body || !entry) return;
+    const b = body.getBoundingClientRect();
+    const r = entry.getBoundingClientRect();
+    setDropPos({
+      top: Math.max(0, r.bottom - b.top - 1),
+      left: 58,
+    });
+  }
+
+  function listForPick() {
+    return matches;
+  }
+
+  function parseQty(raw: string) {
+    const n = Math.trunc(Number(raw));
+    if (!Number.isFinite(n) || n === 0) return null;
+    return n;
+  }
+
+  function movePick(delta: number) {
+    const list = listForPick();
+    if (!list.length) return;
+    const cur = Math.min(Math.max(0, pick), list.length - 1);
+    const next = Math.min(list.length - 1, Math.max(0, cur + delta));
+    const p = list[next];
+    setPick(next);
+    if (itemQuery.trim()) setListOpen(true);
+    if (p && nameLocked) {
+      setPending(p);
+      setItemQuery(p.name);
+    }
+  }
+
+  function bumpQty(delta: number) {
+    setQtyStr((q) => {
+      const cur = Number(q);
+      const from = Number.isFinite(cur) && cur !== 0 ? cur : 1;
+      const next = from + delta;
+      if (next === 0) return delta > 0 ? "1" : "-1";
+      return String(next);
+    });
+  }
+
+  function movePending(delta: number) {
+    if (!nameLocked && pending) setNameLocked(true);
+    if (!pending && catalog[pick]) {
+      setPending(catalog[pick]);
+      setItemQuery(catalog[pick].name);
+      setNameLocked(true);
+    }
+    movePick(delta);
+    setSel(items.length);
+  }
+
+  function moveRow(delta: number) {
+    const last = items.length;
+    const cur = sel < 0 || sel > last ? last : sel;
+    const next = Math.min(last, Math.max(0, cur + delta));
+    setSel(next);
+    if (next === last) {
+      if (pending) {
+        qtyRef.current?.focus();
+        qtyRef.current?.select();
+      } else itemRef.current?.focus();
+      gridBodyRef.current?.querySelector(".igrid-row.entry")?.scrollIntoView({ block: "nearest" });
+    } else {
+      const row = gridBodyRef.current?.querySelectorAll(".igrid-row:not(.entry)")[next] as HTMLElement | undefined;
+      row?.focus();
+      row?.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function focusQty() {
+    setTimeout(() => {
+      qtyRef.current?.focus();
+      qtyRef.current?.select();
+    }, 0);
+  }
+
+  function chooseItem(product: Product) {
+    const list = catalog;
+    const idx = list.findIndex((p) => p.id === product.id);
+    setPick(idx < 0 ? 0 : idx);
+    setPending(product);
+    setItemQuery(product.name);
+    setNameLocked(true);
+    setListOpen(false);
+    setQtyStr("1");
+    focusQty();
+  }
+
+  async function addItem(product: Product, qty = 1, next: "item" | "none" = "item") {
     if (clubMode && !cardNo.trim()) {
       onMessage("Enter Card No first");
       cardRef.current?.focus();
-      return;
-    }
-    if (!clubMode && !orderId) {
-      onMessage("Select Table No first");
-      tableRef.current?.focus();
-      return;
+      return false;
     }
     if (!orderId) {
-      onMessage(clubMode ? "Enter Card No first" : "Select Table No first");
+      onMessage("Select Table No first");
+      tableRef.current?.focus();
+      return false;
+    }
+    const n = Number.isInteger(qty) && qty !== 0 ? qty : parseQty(String(qty)) ?? 1;
+    if (n > 0 && cardNo.trim()) {
+      try {
+        const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(cardNo.trim())}`);
+        const usable = Number(b.balances?.usable ?? 0);
+        const line = product.base_price * n;
+        const running = (table?.running_total as number)
+          || allItems.reduce((s, i) => s + i.qty * i.unit_price, 0)
+          || 0;
+        if (usable < running + line) {
+          onMessage(`Insufficient amount  Card balance : ${(usable / 100).toFixed(2)}`);
+          return false;
+        }
+        setCardBal(amt(usable));
+      } catch {
+        onMessage("Card not found");
+        return false;
+      }
+    }
+    try {
+      await api.post(`/api/orders/${orderId}/items`, { productId: product.id, qty: n, notes: remark || undefined });
+      setPending(null);
+      setNameLocked(false);
+      setItemQuery("");
+      setQtyStr("1");
+      setListOpen(false);
+      const d = await loadOrder(orderId);
+      setSel((d.items ?? []).filter((it: OrderItem) => !it.kot_id).length);
+      onRefresh();
+      if (next === "item") setFocusEntry((x) => x + 1);
+      return true;
+    } catch (e) {
+      onMessage(e instanceof Error ? e.message : "Could not add item");
+      return false;
+    }
+  }
+
+  async function commitQty() {
+    if (!pending) {
+      itemRef.current?.focus();
       return;
     }
-    await api.post(`/api/orders/${orderId}/items`, { productId: product.id, qty: 1, notes: remark || undefined });
-    setRemark("");
-    await loadOrder(orderId);
-    onRefresh();
+    const n = parseQty(qtyStr) ?? 1;
+    const ok = await addItem(pending, n, "item");
+    if (ok) {
+      setTimeout(() => itemRef.current?.focus(), 0);
+    }
   }
 
   async function printKot() {
-    if (!orderId) return;
+    let id = orderId;
+    if (pending) {
+      const n = parseQty(qtyStr) ?? 1;
+      const ok = await addItem(pending, n, "none");
+      if (!ok) return;
+      id = orderId;
+    }
+    if (!id) {
+      onMessage("No items to print");
+      return;
+    }
     try {
-      await api.post(`/api/orders/${orderId}/send-kot`);
-      await loadOrder(orderId);
+      await api.post(`/api/orders/${id}/send-kot`);
+      await loadOrder(id);
+      setRemark("");
+      setPending(null);
+      setItemQuery("");
+      setQtyStr("1");
+      setNameLocked(false);
+      setListOpen(false);
+      onRefresh();
       onMessage("KOT printed");
+      setFocusEntry((x) => x + 1);
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "KOT failed");
     }
   }
 
-  async function prepareBill() {
-    if (!orderId) return;
-    if (table) await api.post(`/api/tables/${table.id}/request-bill`).catch(() => null);
-    setPayOpen(true);
+  function goMainBilling() {
+    setPayOpen(false);
+    setPickOpen(null);
+    setBillOrder(null);
+    setSettleInv(null);
+    setXferOpen(false);
+    setItemXferOpen(false);
+    setListOpen(false);
+    setPending(null);
+    setNameLocked(false);
+    setItemQuery("");
+    setQtyStr("1");
+    setRemark("");
+    setPick(0);
+    setItemListSel(0);
+    setOrderId(null);
+    setDetail(null);
+    setTableId("");
+    setTableCode("");
+    setCardNo("");
+    setCardBal("0.00");
+    setGuest("");
+    setMobile("");
+    setSel(-1);
+    onRefresh();
+    setTimeout(() => {
+      if (dept === "CLUB") cardRef.current?.focus();
+      else tableRef.current?.focus();
+    }, 0);
   }
 
+  async function abandonPunch() {
+    if (orderId) {
+      const current = items;
+      for (const it of current) {
+        await api.post(`/api/order-items/${it.id}/cancel`, { reason: "ESC" }).catch(() => null);
+      }
+    }
+    goMainBilling();
+  }
+
+  function isDraft() {
+    return items.length > 0 || Boolean(pending) || Boolean(itemQuery.trim()) || Boolean(remark.trim());
+  }
+
+  function requestExit() {
+    if (isDraft()) setAskExit(true);
+    else void abandonPunch();
+  }
+
+  const runningForBill = tables.filter((t) => {
+    if ((t.outlet || "BAR") !== deptOutlet(dept)) return false;
+    if (t.status === "AVAILABLE" || t.status === "PAYMENT_PENDING") return false;
+    return ((t.running_total as number) || 0) > 0 || t.id === tableId;
+  });
+
+  function prepareBill() {
+    if (!runningForBill.length) {
+      onMessage("No running table");
+      return;
+    }
+    setListOpen(false);
+    setPickOpen("bill");
+  }
+
+  async function openBillForTable(t: Table) {
+    try {
+      const order = await api.post<any>("/api/orders", { tableId: t.id });
+      setPickOpen(null);
+      setBillOrder({ orderId: order.id, table: t });
+    } catch (e) {
+      onMessage(e instanceof Error ? e.message : "Could not prepare bill");
+    }
+  }
+
+  async function openSettleForTable(t: Table) {
+    try {
+      const snap = await api.get<any>(`/api/tables/${t.id}/invoice`);
+      setPickOpen(null);
+      setSettleInv({ invoiceId: snap.invoice.id, table: t });
+    } catch (e) {
+      onMessage(e instanceof Error ? e.message : "No bill to settle");
+    }
+  }
+
+  async function openSettlement() {
+    setListOpen(false);
+    const byStatus = tables.filter((t) => t.status === "PAYMENT_PENDING" && (t.outlet || "BAR") === deptOutlet(dept));
+    if (byStatus.length) {
+      setSettleTables(byStatus);
+      setPickOpen("settle");
+      return;
+    }
+    try {
+      const invoices = await api.get<any[]>("/api/invoices");
+      const open = invoices.filter((i) => i.status === "UNPAID" || i.status === "PARTIAL");
+      const mapped: Table[] = [];
+      for (const inv of open) {
+        const t = tables.find((x) => x.id === inv.table_id);
+        if (t && (t.outlet || "BAR") !== deptOutlet(dept)) continue;
+        const row = t ?? { id: inv.table_id, code: inv.table_code, status: "PAYMENT_PENDING", name: inv.table_code, floor_name: "", floor_id: "", current_session_id: null, outlet: deptOutlet(dept) };
+        if (!mapped.some((x) => x.id === row.id)) mapped.push(row);
+      }
+      if (!mapped.length) {
+        onMessage("No printed bill to settle");
+        return;
+      }
+      setSettleTables(mapped);
+      setPickOpen("settle");
+    } catch (e) {
+      onMessage(e instanceof Error ? e.message : "No printed bill to settle");
+    }
+  }
+
+  useLayoutEffect(() => {
+    if (listOpen) placeDrop();
+  }, [listOpen, itemQuery, items.length, pick]);
+
   useEffect(() => {
+    if (!listOpen) return;
+    const el = dropRef.current?.querySelector(".on") as HTMLElement | null;
+    el?.scrollIntoView({ block: "nearest" });
+  }, [listOpen, pick]);
+
+  useEffect(() => {
+    const n = listForPick().length;
+    if (pick >= n) setPick(n ? n - 1 : 0);
+  }, [matches.length, catalog.length, pending, nameLocked]);
+
+  useLayoutEffect(() => {
+    if (!focusEntry) return;
+    itemRef.current?.focus();
+    gridBodyRef.current?.querySelector(".igrid-row.entry")?.scrollIntoView({ block: "nearest" });
+  }, [focusEntry, items.length]);
+
+  useEffect(() => {
+    function isF11(ev: KeyboardEvent) {
+      return ev.key === "F11" || ev.code === "F11" || ev.keyCode === 122;
+    }
+    function isF10(ev: KeyboardEvent) {
+      return ev.key === "F10" || ev.code === "F10" || ev.keyCode === 121;
+    }
     function keys(e: KeyboardEvent) {
-      if (e.altKey && e.key === "1") { e.preventDefault(); setDept("CLUB"); }
-      if (e.altKey && e.key === "2") { e.preventDefault(); setDept("RESTAURANT"); }
-      if (e.altKey && e.key === "3") { e.preventDefault(); setDept("NC"); }
-      if (e.altKey && e.key === "4") { e.preventDefault(); setDept("BAR"); }
-      if (e.key === "Escape") { e.preventDefault(); setPayOpen(false); }
+      if (askExit) return;
+      if (itemMasterOpen) {
+        if (e.key.startsWith("F") && e.key.length > 1) e.preventDefault();
+        return;
+      }
+      const fn = e.code || e.key;
+      if (isF11(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (settleInv) return;
+        if (billOrder) return;
+        if (pickOpen === "settle") return;
+        if (xferOpen || itemXferOpen) return;
+        void openSettlement();
+        return;
+      }
+      if (e.key === "F9" || e.code === "F9") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!pickOpen && !billOrder && !settleInv && !xferOpen && !itemXferOpen) setXferOpen(true);
+        return;
+      }
+      if (isF10(e) || fn === "F10") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!pickOpen && !billOrder && !settleInv && !xferOpen && !itemXferOpen) prepareBill();
+        return;
+      }
+      if (e.altKey && e.key === "1") { e.preventDefault(); switchDept("CLUB"); }
+      if (e.altKey && e.key === "2") { e.preventDefault(); switchDept("RESTAURANT"); }
+      if (e.altKey && e.key === "3") { e.preventDefault(); switchDept("NC"); }
+      if (e.altKey && e.key === "4") { e.preventDefault(); switchDept("BAR"); }
+      if (e.key === "F3" || e.code === "F3") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!pickOpen && !billOrder && !settleInv && !xferOpen && !itemXferOpen) setItemMasterOpen(true);
+        return;
+      }
+      if (pickOpen || billOrder || settleInv || xferOpen || itemXferOpen) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (payOpen) setPayOpen(false);
+        else requestExit();
+      }
       if (e.key === "F1") { e.preventDefault(); onMessage("Complimentary"); }
       if (e.key === "F4") { e.preventDefault(); onMessage("Packing"); }
-      if (e.key === "F5" || e.key === "F16") { e.preventDefault(); printKot(); }
+      if (e.key === "F5" || e.key === "F6" || e.key === "F16") { e.preventDefault(); void printKot(); }
       if (e.key === "F7") { e.preventDefault(); onOpenView("kot-report"); }
       if (e.key === "F8") { e.preventDefault(); onOpenView("bill-report"); }
-      if (e.key === "F9") { e.preventDefault(); onOpenView("tables"); }
-      if (e.key === "F10") { e.preventDefault(); prepareBill(); }
-      if (e.key === "F11") { e.preventDefault(); setPayOpen(true); }
-      if (e.key === "F12") { e.preventDefault(); onOpenView("gst-report"); }
-      if (e.key === "F3") { e.preventDefault(); }
+      if (e.key === "F12") { e.preventDefault(); onOpenView("settlement-report", deptOutlet(dept)); }
     }
-    window.addEventListener("keydown", keys);
-    return () => window.removeEventListener("keydown", keys);
+    function up(e: KeyboardEvent) {
+      if (isF11(e)) e.preventDefault();
+    }
+    window.addEventListener("keydown", keys, true);
+    window.addEventListener("keyup", up, true);
+    return () => {
+      window.removeEventListener("keydown", keys, true);
+      window.removeEventListener("keyup", up, true);
+    };
   });
 
   const dayStart = new Date();
   if (dayStart.getHours() < 6) dayStart.setDate(dayStart.getDate() - 1);
   dayStart.setHours(6, 0, 0, 0);
   const occupied = tables.filter((t) => {
+    if ((t.outlet || "BAR") !== deptOutlet(dept)) return false;
     if (t.status === "AVAILABLE") return false;
     if (!(((t.running_total as number) || 0) > 0 || t.id === tableId)) return false;
     if (t.session_opened_at && new Date(t.session_opened_at) < dayStart) return false;
     return true;
   });
-  const listTotal = occupied.reduce((s, t) => s + ((t.running_total as number) || 0), 0);
+  const estimateRows = occupied;
+  const listTotal = estimateRows.reduce((s, t) => s + ((t.running_total as number) || 0), 0);
   const grand = items.reduce((s, i) => s + i.qty * i.unit_price, 0);
+  const tableEstimate = (table?.running_total as number)
+    || allItems.reduce((s, i) => s + i.qty * i.unit_price, 0)
+    || grand;
+  const showTableItems = Boolean(tableId) && table?.status !== "PAYMENT_PENDING";
 
   return (
     <div className="billing">
       <div className="billing-main">
         <div className="header-row">
           <div className="hdr">
-            <span className="lbl">Add Table</span>
-            <input className="win" tabIndex={-1} />
-            <span /><span /><span /><span />
-
             <span className="lbl">Date</span>
             <input className="win" value={formatWinDate(now)} readOnly tabIndex={-1} />
-            <span>KOT</span>
-            <input className="win" value={kotNo} readOnly tabIndex={-1} />
-            <span>Table No</span>
-            {clubMode ? (
-              <input className="win" value="" placeholder="—" disabled tabIndex={-1} title="THE BOSS CLUB uses Card No, not Table No" />
-            ) : (
-              <div className="combo">
+            <span className="lbl">KOT No</span>
+            <span className="kot-text">{kotNo}</span>
+            {clubMode && (
+              <>
+                <span>Card No</span>
                 <input
-                  ref={tableRef}
+                  ref={cardRef}
                   className="win green"
-                  list="table-master"
-                  value={tableCode}
-                  placeholder="Select or type new"
+                  value={cardNo}
                   tabIndex={1}
-                  onChange={(e) => setTableCode(e.target.value)}
+                  autoFocus
+                  onChange={(e) => setCardNo(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      ensureOpenByCode(tableCode);
-                    }
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    void loadCard(cardNo).then((ok) => {
+                      if (!ok) { cardRef.current?.focus(); return; }
+                      tableRef.current?.focus();
+                      tableRef.current?.select();
+                    });
                   }}
-                  onBlur={() => { if (tableCode.trim()) ensureOpenByCode(tableCode); }}
                 />
-                <datalist id="table-master">
-                  {tables.map((t) => <option key={t.id} value={t.code} />)}
-                </datalist>
-              </div>
+              </>
             )}
-
-            <span className="lbl">Waiter</span>
-            <select
-              className="win waiter"
-              value={waiter}
-              tabIndex={2}
-              onChange={(e) => setWaiter(e.target.value)}
+            <span>Table No</span>
+            <input
+              ref={tableRef}
+              className="win green"
+              value={tableCode}
+              tabIndex={clubMode ? 2 : 1}
+              autoFocus={!clubMode}
+              onChange={(e) => setTableCode(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  (clubMode ? cardRef : itemRef).current?.focus();
+                  ensureOpenByCode(tableCode);
                 }
               }}
-            >
-              <option>A</option><option>B</option><option>C</option><option>D</option>
-            </select>
-            <label className="chk"><input type="checkbox" checked={manualKot} onChange={(e) => setManualKot(e.target.checked)} /> Manual Kot</label>
-            <select className="win green col6" tabIndex={-1} />
-
-            <span className="lbl">Mob. No.</span>
-            <input className="win" value={mobile} onChange={(e) => setMobile(e.target.value)} />
-            <span>Name</span>
-            <input className="win span3" value={guest} onChange={(e) => setGuest(e.target.value)} />
+            />
           </div>
 
           <div className="dept-box">
             <div className="dept-yellow">{dept}</div>
             <div className="dept-body">
-              <button type="button" className={`dept-btn ${dept === "CLUB" ? "active" : ""}`} title="Alt+1" onClick={() => setDept("CLUB")}>THE BOSS<br />CLUB</button>
-              <button type="button" className={`dept-btn ${dept === "RESTAURANT" ? "active" : ""}`} title="Alt+2" onClick={() => setDept("RESTAURANT")}>RESTAURAN<br />T</button>
-              <button type="button" className={`dept-btn ${dept === "NC" ? "active" : ""}`} title="Alt+3" onClick={() => setDept("NC")}>NC</button>
-              <button type="button" className={`dept-btn ${dept === "BAR" ? "active" : ""}`} title="Alt+4" onClick={() => setDept("BAR")}>BAR</button>
+              <button type="button" className={`dept-btn ${dept === "CLUB" ? "active" : ""}`} title="Alt+1" onClick={() => switchDept("CLUB")}>THE BOSS<br />CLUB</button>
+              <button type="button" className={`dept-btn ${dept === "RESTAURANT" ? "active" : ""}`} title="Alt+2" onClick={() => switchDept("RESTAURANT")}>RESTAURAN<br />T</button>
+              <button type="button" className={`dept-btn ${dept === "NC" ? "active" : ""}`} title="Alt+3" onClick={() => switchDept("NC")}>NC</button>
+              <button type="button" className={`dept-btn ${dept === "BAR" ? "active" : ""}`} title="Alt+4" onClick={() => switchDept("BAR")}>BAR</button>
               <div className="card-pane">
                 <span>Card No. :</span>
-                <input
-                  ref={cardRef}
-                  className="win"
-                  style={{ width: 70 }}
-                  value={cardNo}
-                  tabIndex={clubMode ? 1 : 3}
-                  placeholder={clubMode ? "required" : ""}
-                  onChange={(e) => setCardNo(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void loadCard(cardNo).then(() => itemRef.current?.focus());
-                    }
-                  }}
-                  onBlur={() => { if (cardNo.trim()) void loadCard(cardNo); }}
-                />
+                {clubMode ? (
+                  <input className="win" style={{ width: 70 }} value={cardNo} readOnly tabIndex={-1} />
+                ) : (
+                  <input
+                    ref={cardRef}
+                    className="win"
+                    style={{ width: 70 }}
+                    value={cardNo}
+                    tabIndex={3}
+                    title="Balance check"
+                    onChange={(e) => setCardNo(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void loadCard(cardNo);
+                      }
+                    }}
+                    onBlur={() => { if (cardNo.trim()) void loadCard(cardNo); }}
+                  />
+                )}
                 <span>{cardBal}</span>
               </div>
             </div>
@@ -549,190 +1011,394 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
             <div>Rate</div>
             <div>Qty</div>
           </div>
-          <div className="igrid-body">
+          <div className="igrid-body" ref={gridBodyRef}>
             {items.map((it, i) => (
-              <div key={it.id} className="igrid-row" onClick={() => setSel(i)}>
+              <div
+                key={it.id}
+                className="igrid-row"
+                tabIndex={0}
+                onClick={() => setSel(i)}
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    moveRow(-1);
+                  } else if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    moveRow(1);
+                  } else if (e.key === "Enter") {
+                    e.preventDefault();
+                    itemRef.current?.focus();
+                  }
+                }}
+              >
                 <div>{i + 1}</div>
                 <div className={`cell-name ${sel === i ? "sel" : ""}`}>{it.name}{it.notes ? ` (${it.notes})` : ""}</div>
                 <div>{amt(it.unit_price)}</div>
                 <div>{it.qty}</div>
               </div>
             ))}
-            <div className="igrid-row" onClick={() => setSel(items.length)}>
+            <div className="igrid-row entry" onClick={() => setSel(items.length)}>
               <div>{items.length + 1}</div>
-              <div className={`cell-name ${sel === items.length ? "sel" : ""}`}>
+              <div className={`cell-name ${nameLocked && !listOpen ? "" : "sel"}`}>
                 <input
                   ref={itemRef}
-                  list="item-master"
+                  autoComplete="off"
+                  spellCheck={false}
                   tabIndex={4}
+                  style={{ width: "100%" }}
+                  value={itemQuery}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setItemQuery(v);
+                    setNameLocked(false);
+                    setPending(null);
+                    setPick(0);
+                    setListOpen(v.trim().length > 0);
+                  }}
+                  onFocus={() => {
+                    if (nameLocked) return;
+                    if (itemQuery.trim()) setListOpen(true);
+                  }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") {
+                    if (e.key === "Backspace" && nameLocked) {
                       e.preventDefault();
-                      const v = (e.target as HTMLInputElement).value.trim().toLowerCase();
-                      const p = filtered.find((x) => x.name.toLowerCase() === v || x.name.toLowerCase().startsWith(v));
-                      if (p) {
-                        void addItem(p);
-                        (e.target as HTMLInputElement).value = "";
+                      e.stopPropagation();
+                      setNameLocked(false);
+                      setListOpen(false);
+                      return;
+                    }
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      movePick(1);
+                    } else if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      movePick(-1);
+                    } else if (e.key === "Enter" || e.key === "Tab") {
+                      const list = listForPick();
+                      const chosen = list[pick] ?? list[0];
+                      if (chosen && (itemQuery.trim() || listOpen)) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        chooseItem(chosen);
+                      } else if (pending) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        focusQty();
+                      } else if (!itemQuery.trim()) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setListOpen(false);
+                        remarkRef.current?.focus();
                       }
                     }
                   }}
                 />
-                <datalist id="item-master">
-                  {filtered.map((p) => <option key={p.id} value={p.name} />)}
-                </datalist>
               </div>
-              <div />
-              <div />
+              <div>{pending ? amt(pending.base_price) : ""}</div>
+              <div className="cell-qty">
+                {pending && (
+                  <input
+                    ref={qtyRef}
+                    autoComplete="off"
+                    inputMode="numeric"
+                    tabIndex={5}
+                    value={qtyStr}
+                    onChange={(e) => setQtyStr(e.target.value.replace(/[^\d-]/g, "").replace(/(?!^)-/g, ""))}
+                    onFocus={(e) => e.target.select()}
+                    onKeyDown={(e) => {
+                      if (e.key === "ArrowLeft") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        movePending(-1);
+                      } else if (e.key === "ArrowRight") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        movePending(1);
+                      } else if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        movePending(-1);
+                      } else if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        movePending(1);
+                      } else if (e.key === "+" || e.key === "=") {
+                        e.preventDefault();
+                        bumpQty(1);
+                      } else if (e.key === "-" || e.key === "_") {
+                        e.preventDefault();
+                        bumpQty(-1);
+                      } else if (e.key === "Backspace") {
+                        const el = e.currentTarget;
+                        const allSelected = el.selectionStart === 0 && el.selectionEnd === el.value.length;
+                        if (allSelected || qtyStr === "1" || qtyStr === "-1" || qtyStr === "") {
+                          e.preventDefault();
+                          itemRef.current?.focus();
+                        }
+                      } else if (e.key === "Enter") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        void commitQty();
+                      }
+                    }}
+                  />
+                )}
+              </div>
             </div>
+            {listOpen && listForPick().length > 0 && (
+              <div
+                ref={dropRef}
+                className="item-drop"
+                style={{ top: dropPos.top, left: dropPos.left }}
+                onMouseDown={(e) => e.preventDefault()}
+              >
+                {listForPick().map((p, i) => (
+                  <div
+                    key={p.id}
+                    className={i === pick ? "on" : ""}
+                    onMouseEnter={() => setPick(i)}
+                    onClick={() => chooseItem(p)}
+                  >
+                    {p.name}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
-
         <div className="fn-box">
-          <div className="remark">Remark : <input className="win" value={remark} onChange={(e) => setRemark(e.target.value)} /></div>
+          <div className="remark">Remark : <input
+            ref={remarkRef}
+            className="win"
+            tabIndex={6}
+            value={remark}
+            onChange={(e) => setRemark(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === "Tab") {
+                e.preventDefault();
+                e.stopPropagation();
+                kotBtnRef.current?.focus();
+              }
+            }}
+          /></div>
           <div className="fn-row">
             <button className="fn" onClick={prepareBill}>Prepare Bill (F10)</button>
-            <button className="fn" onClick={() => setPayOpen(true)}>Settlement (F11)</button>
-            <button className="fn" onClick={printKot}>Print KOT (F16)</button>
+            <button className="fn" onClick={openSettlement}>Settlement (F11)</button>
+            <button
+              ref={kotBtnRef}
+              className="fn"
+              tabIndex={7}
+              onClick={() => void printKot()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void printKot();
+                }
+              }}
+            >Print KOT (F16)</button>
             <button className="fn" onClick={printKot}>Save (F5)</button>
             <button className="fn" onClick={() => onMessage("Packing")}>Packing (F4)</button>
             <button className="fn" onClick={() => onMessage("Complimentary")}>F1 Complim.</button>
             <button className="fn" onClick={() => onOpenView("kot")}>Hold KOT</button>
-            <button className="fn" onClick={() => { setOrderId(null); setDetail(null); setTableId(""); }}>Exit</button>
+            <button className="fn" onClick={requestExit}>Exit</button>
           </div>
           <div className="fn-row">
             <button className="fn" onClick={() => onOpenView("kot-report")}>KOT Rep. (F7)</button>
             <button className="fn" onClick={() => onOpenView("bill-report")}>Bill Rep. (F8)</button>
-            <button className="fn" onClick={() => onOpenView("gst-report")}>S. Report (F12)</button>
-            <button className="fn">Item transfer</button>
-            <button className="fn">T. Transfer (F9)</button>
-            <button className="fn">Create Item (F3)</button>
+            <button className="fn" onClick={() => onOpenView("settlement-report", deptOutlet(dept))}>S. Report (F12)</button>
+            <button className="fn" onClick={() => setItemXferOpen(true)}>Item transfer</button>
+            <button className="fn" onClick={() => setXferOpen(true)}>T. Transfer (F9)</button>
+            <button className="fn" onClick={() => setItemMasterOpen(true)}>Create Item (F3)</button>
             <button className="fn" onClick={() => onOpenView("kot")}>Load Hold</button>
             <button className="fn">Table</button>
           </div>
         </div>
       </div>
 
-      <aside className="estimate">
-        <div className="estimate-head">Table Estimate [F10 Prepare Bill]</div>
-        <table>
-          <colgroup><col className="c1" /><col className="c2" /><col /></colgroup>
-          <thead>
-            <tr>
-              <th>TableNo</th>
-              <th>Estimate</th>
-              <th>Bill/Settle</th>
-            </tr>
-          </thead>
-          <tbody>
-            {occupied.map((t) => {
-              const settle = t.status === "PAYMENT_PENDING";
-              const cls = t.id === tableId ? "sel" : settle ? "settle" : "occ";
-              return (
-                <tr
-                  key={t.id}
-                  className={cls}
-                  tabIndex={0}
-                  onClick={() => selectTable(t.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      void selectTable(t.id, t.code);
-                    }
-                  }}
-                >
-                  <td>{t.code}</td>
-                  <td>{settle ? amt((t.running_total as number) || 0) : Math.round(((t.running_total as number) || 0) / 100)}</td>
-                  <td>{settle ? "Settlement" : "Bill"}</td>
+      <aside className={`estimate ${showTableItems ? "item-list" : ""}`}>
+        {showTableItems ? (
+          <>
+            <div className="estimate-head">Table No. Items List</div>
+            <table>
+              <colgroup><col className="c-code" /><col /><col className="c-qty" /></colgroup>
+              <thead>
+                <tr>
+                  <th>Code</th>
+                  <th>ItemName</th>
+                  <th>Qty</th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        <div className="estimate-fill" />
-        <div className="estimate-total">Total Amount : {amt(listTotal || grand)}</div>
+              </thead>
+              <tbody>
+                {tableItemList.map((row, i) => (
+                  <tr
+                    key={`${row.code}-${row.name}`}
+                    className={i === itemListSel ? "on" : ""}
+                    tabIndex={0}
+                    onClick={() => setItemListSel(i)}
+                    onKeyDown={(e) => {
+                      if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        setItemListSel((s) => Math.min(tableItemList.length - 1, s + 1));
+                      } else if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        setItemListSel((s) => Math.max(0, s - 1));
+                      }
+                    }}
+                  >
+                    <td>{row.code}</td>
+                    <td>{row.name}</td>
+                    <td className="qty">{row.qty}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="estimate-fill" />
+            <div className="estimate-total">Estimate: {Math.round((tableEstimate || 0) / 100)}</div>
+          </>
+        ) : (
+          <>
+            <div className="estimate-head">Table Estimate [F10 Prepare Bill]</div>
+            <table>
+              <colgroup><col className="c1" /><col className="c2" /><col /></colgroup>
+              <thead>
+                <tr>
+                  <th>TableNo</th>
+                  <th>Estimate</th>
+                  <th>Bill/Settle</th>
+                </tr>
+              </thead>
+              <tbody>
+                {estimateRows.map((t) => {
+                  const settle = t.status === "PAYMENT_PENDING";
+                  const cls = t.id === tableId ? "sel" : settle ? "settle" : "occ";
+                  return (
+                    <tr
+                      key={t.id}
+                      className={cls}
+                      tabIndex={0}
+                    onClick={() => {
+                      if (settle) void openSettleForTable(t);
+                      else void openBillForTable(t);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        if (settle) void openSettleForTable(t);
+                        else void openBillForTable(t);
+                      }
+                    }}
+                    >
+                      <td>{t.code}</td>
+                      <td>{settle ? amt((t.running_total as number) || 0) : Math.round(((t.running_total as number) || 0) / 100)}</td>
+                      <td>{settle ? "Settlement" : "Bill"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div className="estimate-fill" />
+            <div className="estimate-total">Total Amount : {amt(listTotal || grand)}</div>
+          </>
+        )}
       </aside>
 
-      {payOpen && orderId && (
-        <PayDialog
-          orderId={orderId}
-          cardNo={cardNo}
-          onClose={() => setPayOpen(false)}
-          onInvoice={onInvoice}
-          onDone={() => { setPayOpen(false); setOrderId(null); setDetail(null); setTableId(""); onRefresh(); }}
+      {askExit && (
+        <ConfirmAsk
+          message="Exit without save?"
+          onYes={() => { setAskExit(false); void abandonPunch(); }}
+          onNo={() => setAskExit(false)}
+        />
+      )}
+      {xferOpen && (
+        <TransferDialog
+          tables={tables}
+          outlet={deptOutlet(dept)}
+          currentCode={tableCode}
+          onClose={() => setXferOpen(false)}
+          onDone={(fromCode, to) => {
+            setXferOpen(false);
+            onRefresh();
+            onMessage(`Transferred ${fromCode} to ${to.code}`);
+            if (tableCode.toLowerCase() === fromCode.toLowerCase()) {
+              setTableId(to.id);
+              setTableCode(to.code);
+              void selectTable(to.id, to.code);
+            }
+          }}
           onMessage={onMessage}
         />
       )}
-    </div>
-  );
-}
-
-function PayDialog({ orderId, cardNo, onClose, onInvoice, onDone, onMessage }: {
-  orderId: string; cardNo: string; onClose: () => void; onInvoice: (inv: any) => void;
-  onDone: () => void; onMessage: (m: string) => void;
-}) {
-  const [bill, setBill] = useState<any>(null);
-  const [method, setMethod] = useState<PaymentMode>("CASH");
-  const busy = useRef(false);
-  useEffect(() => {
-    api.post("/api/invoices/preview", { orderId }).then(setBill).catch((e) => onMessage(e.message));
-  }, [orderId]);
-  useEffect(() => {
-    function keys(e: KeyboardEvent) {
-      if (e.key === "Escape") { e.preventDefault(); onClose(); }
-      if (e.key === "Enter") { e.preventDefault(); void settle(); }
-      if (e.key === "1") setMethod("CASH");
-      if (e.key === "2") setMethod("UPI");
-      if (e.key === "3") setMethod("CARD");
-      if (e.key === "4") setMethod("MEMBER_CARD");
-    }
-    window.addEventListener("keydown", keys);
-    return () => window.removeEventListener("keydown", keys);
-  });
-
-  async function settle() {
-    if (busy.current || !bill) return;
-    busy.current = true;
-    try {
-      const invoice = await api.post<any>("/api/invoices/generate", { orderId });
-      onInvoice(invoice);
-      let memberCardId: string | undefined;
-      if (method === "MEMBER_CARD" && cardNo && cardNo !== "0000") {
-        const found = await api.get<Card[]>(`/api/cards?q=${encodeURIComponent(cardNo)}`);
-        memberCardId = found[0]?.id;
-      }
-      const result = await api.post<any>(`/api/invoices/${invoice.id}/pay`, {
-        lines: [{ method, amount: bill.grandTotal, memberCardId }],
-        printReceipt: true,
-      });
-      if (result.complete) onDone();
-      else onMessage("Partial payment");
-    } catch (e) {
-      if (e instanceof ApiError && e.details) {
-        const d = e.details as { required: number; available: number; shortfall: number };
-        onMessage(`INSUFFICIENT CARD BALANCE — Required ${formatINR(d.required)} Available ${formatINR(d.available)} Shortfall ${formatINR(d.shortfall)}`);
-      } else onMessage(e instanceof Error ? e.message : "Payment failed");
-    } finally {
-      busy.current = false;
-    }
-  }
-
-  return (
-    <div className="dialog" style={{ inset: "80px 180px", minHeight: 240 }}>
-      <div className="dialog-cap">Settlement (F11)<button type="button" onClick={onClose}>✕</button></div>
-      <div className="dialog-body">
-        {bill && (
-          <>
-            <p>Food {formatINR(bill.foodTotal)} &nbsp; Drinks {formatINR(bill.drinksTotal)} &nbsp; Service {formatINR(bill.serviceCharge)}</p>
-            <p><b>Grand Total {formatINR(bill.grandTotal)}</b></p>
-            <div className="btn-row">
-              {(["CASH", "UPI", "CARD", "MEMBER_CARD"] as PaymentMode[]).map((m, i) => (
-                <button key={m} type="button" className="fn" style={method === m ? { background: "#ffff00" } : {}} onClick={() => setMethod(m)}>{i + 1} {m.replace("_", " ")}</button>
-              ))}
-            </div>
-            <button type="button" className="fn wide" style={{ marginTop: 12 }} onClick={settle}>Bill / Settle (Enter)</button>
-          </>
-        )}
-      </div>
+      {itemXferOpen && (
+        <ItemTransferDialog
+          tables={tables}
+          outlet={deptOutlet(dept)}
+          currentCode={tableCode}
+          onClose={() => setItemXferOpen(false)}
+          onDone={(_fromCode, to) => {
+            onMessage(`Items transferred to ${to.code}`);
+            goMainBilling();
+          }}
+          onMessage={onMessage}
+        />
+      )}
+      {pickOpen && (
+        <PrepareTablePick
+          title={pickOpen === "settle" ? "Settlement" : "Prepare Bill"}
+          tables={pickOpen === "settle" ? settleTables : runningForBill}
+          onPick={(t) => void (pickOpen === "settle" ? openSettleForTable(t) : openBillForTable(t))}
+          onClose={() => setPickOpen(null)}
+        />
+      )}
+      {billOrder && (
+        <PrepareBillDialog
+          orderId={billOrder.orderId}
+          table={billOrder.table}
+          outlet={deptOutlet(dept)}
+          waiter={waiter}
+          guest={guest}
+          mobile={mobile}
+          onClose={() => setBillOrder(null)}
+          onPrinted={(inv) => {
+            onInvoice(inv);
+            setBillOrder(null);
+            setOrderId(null);
+            setDetail(null);
+            setTableId("");
+            setTableCode("");
+            onRefresh();
+            onMessage("Bill printed");
+          }}
+          onMessage={onMessage}
+        />
+      )}
+      {settleInv && (
+        <SettleDialog
+          invoiceId={settleInv.invoiceId}
+          table={settleInv.table}
+          outlet={deptOutlet(dept)}
+          cardNo={cardNo}
+          onClose={() => setSettleInv(null)}
+          onDone={() => {
+            setSettleInv(null);
+            setOrderId(null);
+            setDetail(null);
+            setTableId("");
+            setTableCode("");
+            onRefresh();
+            onMessage("Settled");
+          }}
+          onMessage={onMessage}
+        />
+      )}
+      {itemMasterOpen && (
+        <ItemMasterDialog
+          onClose={() => setItemMasterOpen(false)}
+          onSaved={() => onRefresh()}
+        />
+      )}
     </div>
   );
 }

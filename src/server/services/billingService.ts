@@ -3,7 +3,7 @@ import { formatINR } from "../../shared/money.js";
 import { AppError, InsufficientBalanceError } from "../lib/errors.js";
 import { audit, enqueueSync } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
-import { idempotencyKey, nextNumber, nowIso, uuid } from "../lib/ids.js";
+import { idempotencyKey, nextNumber, nextSequence, nowIso, uuid } from "../lib/ids.js";
 import type { PaymentLine, ServiceChargeMode } from "../../shared/types.js";
 import { purchaseOnCard, refundToCard, getCard } from "./cardService.js";
 import { closeTable, getTable, setTableStatus } from "./tableService.js";
@@ -30,13 +30,24 @@ export interface BillPreview {
     qty: number;
     unit_price: number;
     amount: number;
+    tax_rate: number;
+    tax: number;
   }>;
+  totalQty: number;
+  discountPct: number;
+  roundOff: number;
 }
 
 export function previewBill(
   ctx: AppContext,
   orderId: string,
-  options: { discount?: number; otherCharges?: number; serviceChargePct?: number; serviceChargeMode?: ServiceChargeMode } = {},
+  options: {
+    discount?: number;
+    discountPct?: number;
+    otherCharges?: number;
+    serviceChargePct?: number;
+    serviceChargeMode?: ServiceChargeMode;
+  } = {},
 ): BillPreview {
   const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId) as
     | { id: string; session_id: string; table_id: string }
@@ -44,7 +55,13 @@ export function previewBill(
   if (!order) throw new AppError("Order not found", 404);
   const table = getTable(ctx, order.table_id);
   const items = ctx.db
-    .prepare("SELECT * FROM order_items WHERE order_id = ? AND voided = 0")
+    .prepare(
+      `SELECT oi.*, p.tax_rate AS product_tax_rate
+         FROM order_items oi
+         LEFT JOIN products p ON p.id = oi.product_id
+        WHERE oi.order_id = ? AND oi.voided = 0
+        ORDER BY oi.rowid`,
+    )
     .all(orderId) as Array<{
     id: string;
     name: string;
@@ -52,32 +69,44 @@ export function previewBill(
     qty: number;
     unit_price: number;
     tax_rate: number;
+    product_tax_rate: number | null;
   }>;
   if (!items.length) throw new AppError("Bill has no items");
 
-  const mapped = items.map((i) => ({
-    id: i.id,
-    name: i.name,
-    station: i.station,
-    qty: i.qty,
-    unit_price: i.unit_price,
-    amount: i.qty * i.unit_price,
-    tax_rate: i.tax_rate,
-  }));
+  const mapped = items.map((i) => {
+    const lineTax = Number(i.tax_rate);
+    const tax_rate = Number.isFinite(lineTax) ? lineTax : Number(i.product_tax_rate) || 0;
+    const amount = i.qty * i.unit_price;
+    return {
+      id: i.id,
+      name: i.name,
+      station: i.station,
+      qty: i.qty,
+      unit_price: i.unit_price,
+      amount,
+      tax_rate,
+      tax: Math.round(amount * (tax_rate / 100)),
+    };
+  });
   const foodTotal = mapped.filter((i) => i.station === "KITCHEN").reduce((s, i) => s + i.amount, 0);
   const drinksTotal = mapped.filter((i) => i.station === "BAR").reduce((s, i) => s + i.amount, 0);
   const subtotal = foodTotal + drinksTotal;
-  const tax = mapped.reduce((s, i) => s + Math.round(i.amount * (i.tax_rate / 100)), 0);
+  const tax = mapped.reduce((s, i) => s + i.tax, 0);
   const configured = getServiceCharge(ctx);
   const pct = options.serviceChargePct ?? configured.pct;
   const mode = options.serviceChargeMode ?? configured.mode;
-  const discount = options.discount ?? 0;
+  const discountPct = options.discountPct ?? (subtotal ? ((options.discount ?? 0) / subtotal) * 100 : 0);
+  const discount = options.discount != null
+    ? options.discount
+    : Math.round(subtotal * ((options.discountPct ?? 0) / 100));
   const otherCharges = options.otherCharges ?? 0;
   const afterDiscount = Math.max(0, subtotal - discount);
   const serviceCharge =
     mode === "INCLUSIVE" ? Math.round(afterDiscount - afterDiscount / (1 + pct / 100)) : Math.round((afterDiscount * pct) / 100);
-  const grandTotal =
+  const unrounded =
     mode === "INCLUSIVE" ? afterDiscount + tax + otherCharges : afterDiscount + serviceCharge + tax + otherCharges;
+  const grandTotal = Math.round(unrounded / 100) * 100;
+  const roundOff = grandTotal - unrounded;
 
   return {
     orderId: order.id,
@@ -91,7 +120,10 @@ export function previewBill(
     serviceChargePct: pct,
     serviceChargeMode: mode,
     discount,
+    discountPct,
     otherCharges,
+    roundOff,
+    totalQty: mapped.reduce((s, i) => s + i.qty, 0),
     grandTotal,
     items: mapped,
   };
@@ -100,18 +132,15 @@ export function previewBill(
 export function generateInvoice(
   ctx: AppContext,
   orderId: string,
-  options: { discount?: number; otherCharges?: number; serviceChargePct?: number; reason?: string } = {},
+  options: { discount?: number; discountPct?: number; otherCharges?: number; serviceChargePct?: number; reason?: string } = {},
 ) {
   assertPermission(ctx.actor.role, "SETTLE_BILL");
-  if ((options.discount ?? 0) > 0) {
-    const preview = previewBill(ctx, orderId, options);
-    if (options.discount! > preview.foodTotal + preview.drinksTotal * 0.2) {
+  const preview = previewBill(ctx, orderId, options);
+  if ((preview.discount ?? 0) > 0) {
+    if (preview.discount > preview.foodTotal + preview.drinksTotal * 0.2) {
       assertPermission(ctx.actor.role, "LARGE_DISCOUNT");
     }
-    audit(ctx, "DISCOUNT", "order", orderId, options.reason ?? "discount", 0, options.discount);
-  }
-  if (options.serviceChargePct != null) {
-    assertPermission(ctx.actor.role, "SERVICE_CHARGE_OVERRIDE");
+    audit(ctx, "DISCOUNT", "order", orderId, options.reason ?? "discount", 0, preview.discount);
   }
 
   const existing = ctx.db
@@ -119,7 +148,7 @@ export function generateInvoice(
     .get(orderId);
   if (existing) return existing;
 
-  const bill = previewBill(ctx, orderId, options);
+  const bill = preview;
   const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId) as {
     customer_id: string | null;
     card_id: string | null;
@@ -236,10 +265,11 @@ export function settleInvoice(
         }
       }
       const paymentId = uuid();
+      const account = line.reference ?? (line.method === "CASH" ? "Cash." : null);
       ctx.db
         .prepare(
-          `INSERT INTO payments (id, invoice_id, method, amount, member_card_id, ledger_id, reference, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO payments (id, invoice_id, method, amount, member_card_id, ledger_id, reference, remark, receipt_no, voucher_no, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)`,
         )
         .run(
           paymentId,
@@ -248,7 +278,9 @@ export function settleInvoice(
           line.amount,
           line.memberCardId ?? invoice.card_id ?? null,
           ledgerId,
-          line.reference ?? null,
+          account,
+          nextSequence(ctx.db, "settlement_receipt", 32901),
+          nextSequence(ctx.db, "settlement_voucher", 47201),
           nowIso(),
         );
       paid += line.amount;
@@ -369,6 +401,18 @@ export function cancelInvoice(ctx: AppContext, invoiceId: string, reason: string
   ctx.db.prepare("UPDATE invoices SET status = 'CANCELLED' WHERE id = ?").run(invoiceId);
   audit(ctx, "INVOICE_CANCEL", "invoice", invoiceId, reason, snap.invoice, "CANCELLED");
   return getInvoice(ctx, invoiceId);
+}
+
+export function getOpenInvoiceByTable(ctx: AppContext, tableId: string) {
+  const row = ctx.db
+    .prepare(
+      `SELECT id FROM invoices
+        WHERE table_id = ? AND status IN ('UNPAID','PARTIAL')
+        ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(tableId) as { id: string } | undefined;
+  if (!row) throw new AppError("No bill to settle", 404);
+  return getInvoice(ctx, row.id);
 }
 
 export function listInvoices(ctx: AppContext) {

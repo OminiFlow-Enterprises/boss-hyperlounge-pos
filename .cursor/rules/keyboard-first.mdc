@@ -5,14 +5,22 @@ alwaysApply: true
 
 # Keyboard-first POS
 
-Every billing and report action must be usable without a mouse.
+Every billing and report action must be usable without a mouse. The app must also feel like a Windows native WinForms POS (see `windows-native.mdc`), not a website.
 
 - Put a visible Tab order on Table No, Card No, Waiter, ItemName, and function keys.
-- Wire the labeled shortcuts: F1 Complim., F4 Packing, F5 Save, F7 KOT report, F8 Bill report, F9 table transfer, F10 Prepare Bill, F11 Settlement, F12 S. Report, Escape closes a dialog.
+- Wire the labeled shortcuts: F1 Complim., F3 Create Item (Item Master: add, edit, delete), F4 Packing, F5 Save, F7 KOT report, F8 Bill report, F9 table transfer, F10 Prepare Bill, F11 Settlement, F12 S. Report. Escape blanks Table/Card No and the item list and does not save. Escape closes Item Master.
 - Enter confirms the focused field (select/create table, load card, add item, settle).
 - Alt+1 THE BOSS CLUB, Alt+2 RESTAURANT, Alt+3 NC, Alt+4 BAR.
-- Auto-focus Card No on THE BOSS CLUB and Table No on BAR / NC / RESTAURANT.
-- Table No is a combobox: pick an existing table or type a new code and press Enter to create it. THE BOSS CLUB does not ask Table No; it asks Card No. BAR, NC, and RESTAURANT ask Table No.
+- Default focus is Card No on THE BOSS CLUB (Enter loads the card and moves to Table No; Enter on Table No opens the table and moves to ItemName). Default focus is Table No on BAR, NC, and RESTAURANT; Enter then moves to ItemName.
+- Enter on a highlighted item moves to Remark (optional). Enter on Qty saves that line (qty default 1, or -1 to reduce a running order) and opens a new ItemName row. Enter on Remark focuses Print KOT (F16). Enter on Print KOT saves, prints the KOT, and stays on the billing screen.
+- Item lookup stays blank until a letter is typed. Do not prefill the full catalog. After Print KOT the punch grid clears; already-sent items stay on the right-hand Table No. Items List, not in the punch grid.
+- When no table is open, the right pane is Table Estimate. After Table No Enter on a running table, the right pane is Table No. Items List (Code, ItemName, Qty) with Estimate at the bottom. Punch -1 qty of an item and Print KOT to modify/reduce a running order.
+- F10 Prepare Bill first lists running tables (Up/Down, Enter). After a table is chosen, the Restaurant Bill dialog opens with focus on Discount (%). Enter on Discount moves to Print Bill (F10). Print Bill generates the invoice and the table shows as Settlement (green) on the estimate list.
+- F11 Settlement first lists tables that already have a printed bill (Up/Down, Enter), same picker as F10. Enter opens Restaurant Settlement, identical to clicking Settlement on the estimate list. Settled Amount is the current payment (green). Balance Amount is what remains. Payment modes are CASH, BANK TRANSFER, and PREPAID CARD. CASH has no extra account field. BANK TRANSFER asks for bank name (Bank payment, BOOK MY SHOW, COUPON, DINEOUT, DISTRICT, EAZYDINNER, HDFC, PAYTM, ZOMATO, PARTYPAL, INDUS, MOBIKWIK). PREPAID CARD asks for Card No; if the card balance is below the settle amount, show Insufficient amount with the card’s current balance. Save (F2) posts that amount. Stay on the dialog until the balance is 0; split a bill across modes on the same screen.
+- On Qty, Left/Right and Up/Down move the blue highlight to the previous/next item in the open list. The name and rate update; Qty stays.
+- Backspace after a chosen item does not wipe the name: the item stays and turns black. Further Backspace deletes one character at a time. Backspace on Qty (when 1 is selected) returns to ItemName with the item still there.
+- Item lookup is a Windows combobox: type a letter (e.g. K) to list matching items. The edit field shows only what was typed; the first match is selected once in the list (blue). Do not also fill that name into the edit field. Enter takes it. Up/Down move the selection.
+- Table No is typed and confirmed with Enter on THE BOSS CLUB, BAR, NC, and RESTAURANT. Do not use a dropdown on the main billing Table No. THE BOSS CLUB asks Card No and Table No. BAR / NC / RESTAURANT keep Card No in the department pane for balance check. If a card is entered and its balance is below the item amount, show Insufficient amount with the card’s current balance.
 - Do not add a flow that only works by clicking.
 
 ```tsx

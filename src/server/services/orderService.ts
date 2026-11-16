@@ -61,15 +61,47 @@ export function createOrder(ctx: AppContext, tableId: string) {
   return ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(id);
 }
 
+function productQty(
+  ctx: AppContext,
+  orderId: string,
+  productId: string,
+  notes: string,
+  sentOnly: boolean,
+) {
+  const row = ctx.db
+    .prepare(
+      `SELECT COALESCE(SUM(qty), 0) AS qty FROM order_items
+       WHERE order_id = ? AND product_id = ? AND voided = 0
+         AND IFNULL(notes,'') = ? ${sentOnly ? "AND kot_id IS NOT NULL" : ""}`,
+    )
+    .get(orderId, productId, notes) as { qty: number };
+  return row.qty;
+}
+
+function voidOrderItem(ctx: AppContext, itemId: string) {
+  ctx.db.prepare("UPDATE order_items SET voided = 1, status = 'VOID' WHERE id = ?").run(itemId);
+}
+
+function priceWithTax(unitPrice: number, taxRate: number) {
+  const rate = Number(taxRate) || 0;
+  return unitPrice + Math.round((unitPrice * rate) / 100);
+}
+
 export function addItem(
   ctx: AppContext,
   input: { orderId: string; productId: string; qty: number; notes?: string; at?: Date },
 ) {
   assertPermission(ctx.actor.role, "CREATE_ORDER");
-  if (!Number.isInteger(input.qty) || input.qty <= 0) throw new AppError("Quantity must be a positive integer");
-  const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(input.orderId) as
-    | { id: string; card_id: string | null; status: string }
-    | undefined;
+  if (!Number.isInteger(input.qty) || input.qty === 0) throw new AppError("Quantity must be a non-zero integer");
+  const order = ctx.db
+    .prepare(
+      `SELECT o.id, o.card_id, o.status, COALESCE(s.outlet, t.outlet, 'BAR') AS outlet
+         FROM orders o
+         JOIN dining_tables t ON t.id = o.table_id
+         LEFT JOIN table_sessions s ON s.id = o.session_id
+        WHERE o.id = ?`,
+    )
+    .get(input.orderId) as { id: string; card_id: string | null; status: string; outlet: string } | undefined;
   if (!order || order.status === "PAID" || order.status === "CANCELLED") {
     throw new AppError("Order cannot accept items");
   }
@@ -82,17 +114,36 @@ export function addItem(
     cardTypeId = card?.card_type_id ?? null;
   }
 
-  const price = resolvePrice(ctx, input.productId, cardTypeId, input.at ?? new Date());
+  const deptRate = ctx.db
+    .prepare("SELECT enabled FROM product_dept_rates WHERE product_id = ? AND dept = ?")
+    .get(input.productId, order.outlet) as { enabled: number } | undefined;
+  if (deptRate && !deptRate.enabled) throw new AppError("Item is not sold in this department");
+  const price = resolvePrice(ctx, input.productId, cardTypeId, input.at ?? new Date(), order.outlet);
+  const notes = input.notes ?? "";
   const existing = ctx.db
     .prepare(
       `SELECT * FROM order_items
        WHERE order_id = ? AND product_id = ? AND IFNULL(notes,'') = ? AND kot_id IS NULL AND voided = 0`,
     )
-    .get(order.id, input.productId, input.notes ?? "") as { id: string; qty: number } | undefined;
+    .get(order.id, input.productId, notes) as { id: string; qty: number } | undefined;
 
   if (existing) {
-    ctx.db.prepare("UPDATE order_items SET qty = qty + ? WHERE id = ?").run(input.qty, existing.id);
+    const next = existing.qty + input.qty;
+    if (next === 0) {
+      voidOrderItem(ctx, existing.id);
+      return ctx.db.prepare("SELECT * FROM order_items WHERE id = ?").get(existing.id);
+    }
+    if (next < 0 && productQty(ctx, order.id, input.productId, notes, true) < -next) {
+      throw new AppError("Cannot reduce more than ordered qty");
+    }
+    ctx.db.prepare("UPDATE order_items SET qty = ? WHERE id = ?").run(next, existing.id);
     return ctx.db.prepare("SELECT * FROM order_items WHERE id = ?").get(existing.id);
+  }
+
+  if (input.qty < 0) {
+    if (productQty(ctx, order.id, input.productId, notes, true) < -input.qty) {
+      throw new AppError("Cannot reduce more than ordered qty");
+    }
   }
 
   const id = uuid();
@@ -217,17 +268,22 @@ export async function sendKot(ctx: AppContext, orderId: string) {
     | undefined;
   if (!order) throw new AppError("Order not found", 404);
 
-  const pending = ctx.db
-    .prepare("SELECT * FROM order_items WHERE order_id = ? AND kot_id IS NULL AND voided = 0")
-    .all(orderId) as Array<{
+  type PendingItem = {
     id: string;
     product_id: string;
     name: string;
     station: Station;
     qty: number;
     notes: string | null;
-  }>;
-  if (!pending.length) throw new AppError("No new items to send to kitchen/bar");
+    unit_price: number;
+    tax_rate: number;
+  };
+  const pending = ctx.db
+    .prepare("SELECT * FROM order_items WHERE order_id = ? AND kot_id IS NULL AND voided = 0")
+    .all(orderId) as PendingItem[];
+  const additions = pending.filter((i) => i.qty > 0);
+  const reductions = pending.filter((i) => i.qty < 0);
+  if (!additions.length && !reductions.length) throw new AppError("No new items to send to kitchen/bar");
 
   const existingKots = ctx.db.prepare("SELECT COUNT(*) AS n FROM kots WHERE order_id = ? AND type IN ('NEW','ADDITION')").get(orderId) as {
     n: number;
@@ -239,23 +295,28 @@ export async function sendKot(ctx: AppContext, orderId: string) {
     : undefined;
 
   const created = [];
-  for (const station of ["KITCHEN", "BAR"] as Station[]) {
-    const items = pending.filter((i) => i.station === station);
-    if (!items.length) continue;
+
+  async function printStationKot(
+    station: Station,
+    type: "NEW" | "ADDITION" | "CANCEL",
+    items: Array<{
+      orderItemId: string;
+      productId: string;
+      name: string;
+      qty: number;
+      notes?: string | null;
+      unitPrice?: number;
+      taxRate?: number;
+    }>,
+  ) {
     const kot = createKot(ctx, {
       orderId: order.id,
       sessionId: order.session_id,
       tableId: order.table_id,
       waiterId: order.waiter_id,
       station,
-      type: kotType,
-      items: items.map((i) => ({
-        orderItemId: i.id,
-        productId: i.product_id,
-        name: i.name,
-        qty: i.qty,
-        notes: i.notes,
-      })),
+      type,
+      items,
     });
     created.push(kot);
     const print = await printerForStation(ctx.hardware, station).printKOT({
@@ -264,7 +325,13 @@ export async function sendKot(ctx: AppContext, orderId: string) {
       waiter: waiter?.name,
       station,
       reprint: false,
-      items: items.map((i) => ({ qty: i.qty, name: i.name, notes: i.notes })),
+      items: items.map((i) => ({
+        qty: type === "CANCEL" ? -i.qty : i.qty,
+        name: i.name,
+        notes: i.notes,
+        rate: i.unitPrice,
+        price: i.unitPrice == null ? undefined : priceWithTax(i.unitPrice, i.taxRate ?? 0),
+      })),
       createdAt: kot.created_at,
     });
     if (!print.ok) {
@@ -273,6 +340,83 @@ export async function sendKot(ctx: AppContext, orderId: string) {
         kot: kot.kot_number,
       });
     }
+  }
+
+  if (reductions.length) {
+    const cancelByStation: Record<Station, Array<{
+      orderItemId: string;
+      productId: string;
+      name: string;
+      qty: number;
+      notes?: string | null;
+      unitPrice?: number;
+      taxRate?: number;
+    }>> = {
+      KITCHEN: [],
+      BAR: [],
+    };
+    for (const red of reductions) {
+      let need = -red.qty;
+      const sent = ctx.db
+        .prepare(
+          `SELECT * FROM order_items
+           WHERE order_id = ? AND product_id = ? AND voided = 0 AND kot_id IS NOT NULL
+             AND IFNULL(notes,'') = ?
+           ORDER BY rowid`,
+        )
+        .all(orderId, red.product_id, red.notes ?? "") as Array<{
+        id: string;
+        product_id: string;
+        name: string;
+        station: Station;
+        qty: number;
+        notes: string | null;
+        unit_price: number;
+        tax_rate: number;
+      }>;
+      for (const item of sent) {
+        if (need <= 0) break;
+        const take = Math.min(item.qty, need);
+        if (take === item.qty) voidOrderItem(ctx, item.id);
+        else ctx.db.prepare("UPDATE order_items SET qty = qty - ? WHERE id = ?").run(take, item.id);
+        restoreStock(ctx, item.product_id, take, `CXL:${red.id}`);
+        cancelByStation[item.station].push({
+          orderItemId: item.id,
+          productId: item.product_id,
+          name: item.name,
+          qty: take,
+          notes: item.notes,
+          unitPrice: item.unit_price,
+          taxRate: item.tax_rate,
+        });
+        need -= take;
+      }
+      if (need > 0) throw new AppError("Cannot reduce more than ordered qty");
+      voidOrderItem(ctx, red.id);
+    }
+    for (const station of ["KITCHEN", "BAR"] as Station[]) {
+      const items = cancelByStation[station];
+      if (!items.length) continue;
+      await printStationKot(station, "CANCEL", items);
+    }
+  }
+
+  for (const station of ["KITCHEN", "BAR"] as Station[]) {
+    const items = additions.filter((i) => i.station === station);
+    if (!items.length) continue;
+    await printStationKot(
+      station,
+      kotType,
+      items.map((i) => ({
+        orderItemId: i.id,
+        productId: i.product_id,
+        name: i.name,
+        qty: i.qty,
+        notes: i.notes,
+        unitPrice: i.unit_price,
+        taxRate: i.tax_rate,
+      })),
+    );
   }
 
   audit(ctx, "KOT_SEND", "order", orderId, null, null, created.map((k) => k.kot_number));
@@ -342,10 +486,19 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
       }
     | undefined;
   if (!kot) throw new AppError("KOT not found", 404);
-  const items = ctx.db.prepare("SELECT qty, name, notes FROM kot_items WHERE kot_id = ?").all(kotId) as Array<{
+  const items = ctx.db
+    .prepare(
+      `SELECT ki.qty, ki.name, ki.notes, oi.unit_price, oi.tax_rate
+         FROM kot_items ki
+         LEFT JOIN order_items oi ON oi.id = ki.order_item_id
+        WHERE ki.kot_id = ?`,
+    )
+    .all(kotId) as Array<{
     qty: number;
     name: string;
     notes: string | null;
+    unit_price: number | null;
+    tax_rate: number | null;
   }>;
   const table = getTable(ctx, kot.table_id);
   const waiter = kot.waiter_id
@@ -362,7 +515,13 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
     waiter: waiter?.name,
     station: kot.station,
     reprint: true,
-    items,
+    items: items.map((i) => ({
+      qty: i.qty,
+      name: i.name,
+      notes: i.notes,
+      rate: i.unit_price ?? undefined,
+      price: i.unit_price == null ? undefined : priceWithTax(i.unit_price, i.tax_rate ?? 0),
+    })),
     createdAt: kot.created_at,
   });
   return { ok: print.ok, error: print.error, reprint: true };
@@ -448,7 +607,17 @@ export function listOrders(ctx: AppContext) {
 export function getOrderDetail(ctx: AppContext, orderId: string) {
   const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId);
   if (!order) throw new AppError("Order not found", 404);
-  const items = ctx.db.prepare("SELECT * FROM order_items WHERE order_id = ? AND voided = 0").all(orderId);
-  const kots = listKots(ctx).filter((k) => (k as unknown as { order_id: string }).order_id === orderId);
+  const items = ctx.db
+    .prepare(
+      `SELECT oi.*, p.sku
+         FROM order_items oi
+         LEFT JOIN products p ON p.id = oi.product_id
+        WHERE oi.order_id = ? AND oi.voided = 0
+        ORDER BY oi.rowid`,
+    )
+    .all(orderId);
+  const kots = ctx.db
+    .prepare("SELECT * FROM kots WHERE order_id = ? ORDER BY created_at DESC")
+    .all(orderId);
   return { order, items, kots };
 }

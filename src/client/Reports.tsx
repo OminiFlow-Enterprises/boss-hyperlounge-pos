@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { api } from "./api";
+import { parseRupeesInput } from "../shared/money";
 import type { NavView } from "../shared/types";
+import { ConfirmAsk } from "./BillDialogs";
 
 const OUTLETS = ["BAR", "CAFE", "NC", "RESTAURANT", "THE BOSS CLUB"];
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -395,35 +397,298 @@ export function GridReport({ title, endpoint, columns, onExit }: {
   );
 }
 
+const SETTLE_ACCOUNTS = [
+  "Select", "Bank payment", "BOOK MY SHOW", "COUPON", "DINEOUT", "DISTRICT",
+  "EAZYDINNER", "HDFC", "PAYTM", "ZOMATO", "PARTYPAL", "INDUS", "MOBIKWIK",
+];
+
+const BANK_ACCOUNTS = SETTLE_ACCOUNTS.filter((a) => a !== "Select");
+
+function mopName(method?: string) {
+  if (method === "CASH") return "CASH";
+  if (method === "MEMBER_CARD") return "PREPAID CARD";
+  if (method === "CARD" || method === "UPI") return "BANK TRANSFER";
+  return method || "";
+}
+
+function modeLabel(method?: string) {
+  if (method === "MEMBER_CARD") return "PREPAID CARD";
+  if (method === "CARD" || method === "UPI") return "BANK TRANSFER";
+  return "CASH";
+}
+
+function mopCell(method?: string, account?: string) {
+  const mode = mopName(method);
+  const acct = method === "CASH" ? (account || "Cash").replace(/\.$/, "") : account || "";
+  return acct ? `${mode} (${acct})` : mode;
+}
+
+function clock(d: Date) {
+  let h = d.getHours();
+  const ap = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  return { h, ap };
+}
+
+function stampGrid(iso?: string) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const { h, ap } = clock(d);
+  return `${pad(d.getDate())}/${MONTHS[d.getMonth()]}/${d.getFullYear()} ${h}:${pad(d.getMinutes())} ${ap}`;
+}
+
+function stampDialog(iso?: string) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const { h, ap } = clock(d);
+  return `${pad(d.getDate())}-${MONTHS[d.getMonth()]}-${d.getFullYear()} ${pad(h)}:${pad(d.getMinutes())} ${ap}`;
+}
+
+function SettlementUpdateDialog({
+  paymentId,
+  outlet,
+  bills,
+  onSwitch,
+  onClose,
+  onChanged,
+}: {
+  paymentId: string;
+  outlet: string;
+  bills: Array<{ payment_id: string; bill_no: string }>;
+  onSwitch: (id: string) => void;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [row, setRow] = useState<any>(null);
+  const [mode, setMode] = useState("CASH");
+  const [amount, setAmount] = useState("");
+  const [account, setAccount] = useState("Cash.");
+  const [remark, setRemark] = useState("");
+  const [err, setErr] = useState("");
+  const [askDelete, setAskDelete] = useState(false);
+  const amtRef = useRef<HTMLInputElement>(null);
+  const billRef = useRef<HTMLSelectElement>(null);
+  const close = useRef(onClose);
+  const saveRef = useRef<() => void>(() => {});
+  close.current = onClose;
+
+  useEffect(() => {
+    let gone = false;
+    api.get<any>(`/api/reports/settlement/${paymentId}`).then((next) => {
+      if (gone) return;
+      setRow(next);
+      const label = modeLabel(next.method);
+      setMode(label);
+      setAmount(rupees(next.amount));
+      setAccount(label === "CASH" ? (next.account || "Cash.") : label === "BANK TRANSFER" ? (next.account || "Bank payment") : "Prepaid Card");
+      setRemark(next.remark || "");
+      setErr("");
+      setTimeout(() => { amtRef.current?.focus(); amtRef.current?.select(); }, 0);
+    }).catch((e) => { if (!gone) setErr(e.message); });
+    return () => { gone = true; };
+  }, [paymentId]);
+
+  async function save() {
+    setErr("");
+    let paise = 0;
+    try { paise = parseRupeesInput(amount || "0"); } catch { setErr("Enter settle amount"); return; }
+    if (paise <= 0) { setErr("Enter settle amount"); return; }
+    try {
+      const next = await api.put<any>(`/api/reports/settlement/${paymentId}`, { method: mode, amount: paise, account, remark });
+      setRow(next);
+      setAmount(rupees(next.amount));
+      onChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Update failed");
+    }
+  }
+  saveRef.current = () => void save();
+
+  async function remove() {
+    setAskDelete(false);
+    try {
+      await api.del(`/api/reports/settlement/${paymentId}`);
+      onChanged();
+      onClose();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Delete failed");
+    }
+  }
+
+  useEffect(() => {
+    function keys(e: KeyboardEvent) {
+      if (document.querySelector(".confirm-dlg")) return;
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close.current(); }
+      if (e.key === "F2") { e.preventDefault(); e.stopPropagation(); saveRef.current(); }
+      if (e.key === "F4") { e.preventDefault(); e.stopPropagation(); setAskDelete(true); }
+    }
+    window.addEventListener("keydown", keys, true);
+    return () => window.removeEventListener("keydown", keys, true);
+  }, []);
+
+  const accounts = mode === "BANK TRANSFER" ? BANK_ACCOUNTS : mode === "PREPAID CARD" ? ["Prepaid Card"] : ["Cash."];
+  const entered = (() => { try { return parseRupeesInput(amount || "0"); } catch { return Number(row?.amount) || 0; } })();
+  const balance = Math.max(0, Number(row?.bill_amount || 0) - (Number(row?.paid || 0) - Number(row?.amount || 0) + entered));
+
+  return (
+    <div className="su-dlg">
+      <div className="dialog-cap">
+        <span className="cap-dot" />
+        Restaurant Settlement - {outlet}
+        <span className="cap-btns">
+          <button type="button" tabIndex={-1}>–</button>
+          <button type="button" tabIndex={-1}>□</button>
+          <button type="button" onClick={onClose}>✕</button>
+        </span>
+      </div>
+      <div className="su-body">
+        <div className="su-grid">
+          <div className="su-row"><span>Bill No. :</span>
+            <span className="su-bill">
+              <select ref={billRef} className="win" value={paymentId} onChange={(e) => onSwitch(e.target.value)}>
+                {bills.map((b) => <option key={b.payment_id} value={b.payment_id}>{b.bill_no}</option>)}
+              </select>
+              <button type="button" className="su-more" tabIndex={-1} onClick={() => billRef.current?.focus()}>▾</button>
+            </span>
+          </div>
+          <div className="su-row"><span>Date :</span><input className="win" readOnly value={stampDialog(row?.voucher_date)} /></div>
+          <div className="su-row"><span>Guest Name :</span><input className="win" readOnly value={row?.guest || ""} /></div>
+          <div className="su-row"><span>Table No :</span><input className="win" readOnly value={row?.table_no || ""} /></div>
+          <div className="su-row"><span>Voucher/Receipt :</span><input className="win" readOnly value={row?.receipt_no ?? ""} /></div>
+          <div className="su-row"><span>Bill Amount :</span><input className="win" readOnly value={rupees(row?.bill_amount)} /></div>
+          <div className="su-row"><span>Allowance :</span><input className="win" readOnly value={rupees(row?.allowance)} /></div>
+          <div className="su-row"><span>Payment Mode :</span>
+            <select className="win" value={mode} onChange={(e) => {
+              const next = e.target.value;
+              setMode(next);
+              setAccount(next === "CASH" ? "Cash." : next === "PREPAID CARD" ? "Prepaid Card" : (BANK_ACCOUNTS.includes(account) ? account : "Bank payment"));
+            }}>
+              <option>CASH</option>
+              <option>BANK TRANSFER</option>
+              <option>PREPAID CARD</option>
+            </select>
+          </div>
+          <div className="su-row"><span>Settled Amount :</span>
+            <input ref={amtRef} className="win green" value={amount} onChange={(e) => setAmount(e.target.value)} onFocus={(e) => e.target.select()} onKeyDown={(e) => {
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              void save();
+            }} />
+          </div>
+          <div className="su-row"><span>Cash Account :</span>
+            <select className="win" value={accounts.includes(account) ? account : accounts[0]} onChange={(e) => setAccount(e.target.value)}>
+              {accounts.map((a) => <option key={a}>{a}</option>)}
+            </select>
+          </div>
+          <div className="su-row"><span>Balance Amount :</span><input className="win" readOnly value={rupees(balance)} /></div>
+          <div />
+          <div className="su-row"><span>Remark :</span><input className="win" value={remark} onChange={(e) => setRemark(e.target.value)} /></div>
+        </div>
+        {err && <div className="su-err">{err}</div>}
+        <div className="su-foot">
+          <span className="su-vno">Voucher No : {row?.voucher_no ?? ""}</span>
+          <button type="button" className="fn" onClick={() => { if (row?.invoice_id) void api.post(`/api/invoices/${row.invoice_id}/print`).catch(() => null); }}>Print</button>
+          <button type="button" className="fn" onClick={() => void save()}>Update (F2)</button>
+          <button type="button" className="fn" onClick={() => setAskDelete(true)}>Delete (F4)</button>
+          <button type="button" className="fn" onClick={onClose}>Exit</button>
+        </div>
+      </div>
+      {askDelete && (
+        <ConfirmAsk message="Delete this settlement?" onYes={() => void remove()} onNo={() => setAskDelete(false)} />
+      )}
+    </div>
+  );
+}
+
 export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) {
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
-  const [data, setData] = useState<any>({ rows: [], totals: [] });
-  async function load() {
-    setData(await api.get(`/api/reports/settlement?from=${from}&to=${to}&outlet=${encodeURIComponent(outlet || "THE BOSS CLUB")}`));
+  const [outletName, setOutletName] = useState(outlet || "THE BOSS CLUB");
+  const [mop, setMop] = useState("Select");
+  const [bill, setBill] = useState("");
+  const [account, setAccount] = useState("Select");
+  const [user, setUser] = useState("Select");
+  const [settled, setSettled] = useState(false);
+  const [data, setData] = useState<any>({ rows: [], totals: [], users: [], allowance: 0 });
+  const [sel, setSel] = useState<string | null>(null);
+  const [editId, setEditId] = useState<string | null>(null);
+
+  useEffect(() => { setOutletName(outlet || "THE BOSS CLUB"); }, [outlet]);
+
+  async function load(nextOutlet = outletName) {
+    const q = new URLSearchParams({
+      from, to, outlet: nextOutlet, mop, bill, account, user, settled: settled ? "1" : "0",
+    });
+    setData(await api.get(`/api/reports/settlement?${q}`));
   }
-  useEffect(() => { load().catch(() => null); }, []);
+  useEffect(() => { load(outlet || "THE BOSS CLUB").catch(() => null); }, [outlet]);
+  useEffect(() => {
+    const rows = data.rows || [];
+    if (!rows.length) { setSel(null); return; }
+    if (!rows.some((r: any) => r.payment_id === sel)) setSel(rows[0].payment_id);
+  }, [data]);
+  useEffect(() => {
+    function keys(e: KeyboardEvent) {
+      if (editId) return;
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      const rows = data.rows || [];
+      if (!rows.length) return;
+      const idx = Math.max(0, rows.findIndex((r: any) => r.payment_id === sel));
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const next = e.key === "ArrowDown" ? Math.min(rows.length - 1, idx + 1) : Math.max(0, idx - 1);
+        setSel(rows[next].payment_id);
+      }
+      if (e.key === "Enter" && sel) {
+        e.preventDefault();
+        setEditId(sel);
+      }
+    }
+    window.addEventListener("keydown", keys);
+    return () => window.removeEventListener("keydown", keys);
+  });
+
   const tot = (m: string) => (data.totals || []).find((t: any) => t.method === m)?.amount || 0;
-  const grand = (data.totals || []).reduce((s: number, t: any) => s + t.amount, 0);
+  const bank = tot("CARD") + tot("UPI");
+  const grand = tot("CASH") + bank + tot("MEMBER_CARD");
+  const users: string[] = data.users || [];
+
   return (
     <div className="set-page">
       <div className="set-filter">
-        <div className="set-grid">
-          <b>Select Filter</b>
-          <span />
-          <label>Outlet : <input className="win" value={outlet || "THE BOSS CLUB"} readOnly /></label>
-          <label>Date From : <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
-          <label>MOP : <select className="win"><option>Select</option><option>CASH</option><option>UPI</option><option>CARD</option></select></label>
-          <div className="set-btns">
-            <button className="fn" onClick={load}>Show</button>
-            <button className="fn" onClick={() => window.print()}>Print</button>
-            <button className="fn" onClick={onExit}>Exit</button>
+        <div className="set-fields">
+          <div className="set-title">Select Filter</div>
+          <div className="set-row">
+            <label>Outlet : <select className="win" value={outletName} onChange={(e) => setOutletName(e.target.value)}>
+              {OUTLETS.map((o) => <option key={o}>{o}</option>)}
+            </select></label>
+            <label>Date From : <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+            <label>MOP : <select className="win" value={mop} onChange={(e) => setMop(e.target.value)}>
+              <option>Select</option><option>CASH</option><option>BANK TRANSFER</option><option>PREPAID CARD</option>
+            </select></label>
           </div>
-          <label>Bill No. : <input className="win" /></label>
-          <label>To Date : <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
-          <label>Accounts : <select className="win"><option /></select></label>
-          <label>User : <select className="win"><option>Select</option></select></label>
-          <label><input type="checkbox" /> Settlement</label>
+          <div className="set-row">
+            <label>Bill No. : <input className="win" value={bill} onChange={(e) => setBill(e.target.value)} /></label>
+            <label>To Date : <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+            <label>Accounts : <select className="win" value={account} onChange={(e) => setAccount(e.target.value)}>
+              {SETTLE_ACCOUNTS.map((a) => <option key={a}>{a}</option>)}
+            </select></label>
+          </div>
+          <div className="set-row">
+            <label>User : <select className="win" value={user} onChange={(e) => setUser(e.target.value)}>
+              <option>Select</option>
+              {users.map((name) => <option key={name}>{name}</option>)}
+            </select></label>
+            <label className="set-check"><input type="checkbox" checked={settled} onChange={(e) => setSettled(e.target.checked)} /> Settlement</label>
+          </div>
+        </div>
+        <div className="set-btns">
+          <button className="fn" onClick={() => void load()}>Show</button>
+          <button className="fn" onClick={() => window.print()}>Print</button>
+          <button className="fn" onClick={onExit}>Exit</button>
         </div>
       </div>
       <div className="set-grid-wrap">
@@ -434,29 +699,47 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
             </tr>
           </thead>
           <tbody>
-            {(data.rows || []).map((r: any, i: number) => (
-              <tr key={i}>
-                <td>SALE</td><td /><td /><td>{r.voucher_date}</td><td>{r.bill_no}</td>
-                <td>{r.table_no}</td><td /><td /><td>{inr(r.settled)}</td><td>{inr(r.allowance)}</td>
-                <td /><td>{r.mop}</td><td>{r.username}</td><td>{inr(r.settled)}</td><td>{r.bill_no}</td>
-                <td>{r.status}</td><td>0</td><td>{outlet || "THE BOSS CLUB"}</td><td>FNB</td><td /><td>{r.mop}</td>
-              </tr>
-            ))}
+            {(data.rows || []).map((r: any) => {
+              const mode = mopCell(r.method, r.account);
+              return (
+                <tr
+                  key={r.payment_id}
+                  className={r.payment_id === sel ? "on" : ""}
+                  onClick={() => setSel(r.payment_id)}
+                  onDoubleClick={() => setEditId(r.payment_id)}
+                >
+                  <td>SALE</td><td /><td>{r.receipt_no}</td><td>{stampGrid(r.voucher_date)}</td><td>{r.bill_no}</td>
+                  <td>{r.table_no}</td><td /><td>{r.waiter}</td><td className="num">{inr(r.settled)}</td><td className="num">{inr(r.allowance)}</td>
+                  <td>{r.remark || "----"}</td><td>{mode}</td><td>{r.username}</td><td className="num">{inr(r.settled)}</td><td>{r.voucher_no}</td>
+                  <td>{r.status}</td><td>0</td><td>{r.outlet_name || outletName}</td><td>FNB</td><td /><td>{mode}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
       <div className="set-totals">
         <label>Total Cash : <input className="win" readOnly value={rupees(tot("CASH"))} /></label>
         <label>Cheque/D.D. : <input className="win" readOnly value="0.00" /></label>
-        <label>Credit Card : <input className="win" readOnly value={rupees(tot("CARD"))} /></label>
+        <label>Credit Card : <input className="win" readOnly value="0.00" /></label>
         <label>B.T.C. : <input className="win" readOnly value="0.00" /></label>
         <label>Room Credit : <input className="win" readOnly value="0.00" /></label>
-        <label>Bank Transfer : <input className="win" readOnly value={rupees(tot("UPI"))} /></label>
+        <label>Bank Transfer : <input className="win" readOnly value={rupees(bank)} /></label>
         <label>Wallet : <input className="win" readOnly value="0.00" /></label>
-        <label>Allowance : <input className="win" readOnly value="0.00" /></label>
+        <label>Allowance : <input className="win" readOnly value={rupees(data.allowance)} /></label>
         <label>Prepaid Card : <input className="win" readOnly value={rupees(tot("MEMBER_CARD"))} /></label>
         <label>Total Amount : <input className="win" readOnly value={rupees(grand)} /></label>
       </div>
+      {editId && (
+        <SettlementUpdateDialog
+          paymentId={editId}
+          outlet={outletName}
+          bills={(data.rows || []).map((r: any) => ({ payment_id: r.payment_id, bill_no: r.bill_no }))}
+          onSwitch={setEditId}
+          onClose={() => setEditId(null)}
+          onChanged={() => { void load(); }}
+        />
+      )}
     </div>
   );
 }
@@ -512,6 +795,22 @@ export function BookingReport({ onExit }: { onExit: () => void }) {
 export function CardBlock({ onExit }: { onExit: () => void }) {
   const [q, setQ] = useState("");
   const [msg, setMsg] = useState("");
+  const [askExit, setAskExit] = useState(false);
+  function requestExit() {
+    if (q.trim()) setAskExit(true);
+    else onExit();
+  }
+  useEffect(() => {
+    function keys(e: globalThis.KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      if (askExit) return;
+      e.preventDefault();
+      e.stopPropagation();
+      requestExit();
+    }
+    window.addEventListener("keydown", keys, true);
+    return () => window.removeEventListener("keydown", keys, true);
+  });
   async function block() {
     try {
       const found = await api.get<any[]>(`/api/cards?q=${encodeURIComponent(q)}`);
@@ -528,34 +827,137 @@ export function CardBlock({ onExit }: { onExit: () => void }) {
       <input className="win cb-input" value={q} onChange={(e) => setQ(e.target.value)} />
       <div className="cb-btns">
         <button className="fn" onClick={block}>Block Card</button>
-        <button className="fn" onClick={onExit}>Exit</button>
+        <button className="fn" onClick={requestExit}>Exit</button>
       </div>
       {msg && <p className="meta" style={{ padding: 8 }}>{msg}</p>}
+      {askExit && (
+        <ConfirmAsk
+          message="Exit without save?"
+          onYes={() => { setAskExit(false); onExit(); }}
+          onNo={() => setAskExit(false)}
+        />
+      )}
     </div>
   );
 }
 
 export function AdvanceBooking({ onExit }: { onExit: () => void }) {
-  const [form, setForm] = useState({ mobile: "", guestName: "", cardNo: "", advance: "", outlet: "THE BOSS CLUB", mop: "Select" });
+  const blank = { cardNo: "", advance: "0.00", outlet: "THE BOSS CLUB", mop: "Select" };
+  const [form, setForm] = useState(blank);
   const [no, setNo] = useState(430);
   const [msg, setMsg] = useState("");
+  const [ok, setOk] = useState(false);
+  const [askExit, setAskExit] = useState(false);
+  const cardRef = useRef<HTMLInputElement>(null);
+  const advanceRef = useRef<HTMLInputElement>(null);
+  const outletRef = useRef<HTMLSelectElement>(null);
+  const mopRef = useRef<HTMLSelectElement>(null);
+  const saveRef = useRef<HTMLButtonElement>(null);
+
   useEffect(() => {
+    cardRef.current?.focus();
     api.get<any[]>("/api/bookings").then((rows) => {
       const max = rows.reduce((m, r) => Math.max(m, r.reservation_no || 0), 429);
       setNo(max + 1);
     }).catch(() => null);
   }, []);
-  async function save() {
-    const row = await api.post<any>("/api/bookings", {
-      ...form,
-      advance: Math.round(Number(form.advance || 0) * 100),
-      mop: form.mop === "Select" ? "" : form.mop,
-    });
-    const bal = row.balances?.usable != null ? (row.balances.usable / 100).toFixed(2) : form.advance;
-    setMsg(`Saved reservation ${row.reservation_no} · Card ${form.cardNo} balance ${bal}`);
-    setNo(row.reservation_no + 1);
-    setForm({ mobile: "", guestName: "", cardNo: "", advance: "", outlet: "THE BOSS CLUB", mop: "Select" });
+
+  function fail(text: string, el?: HTMLInputElement | HTMLSelectElement | HTMLButtonElement | null, select = false) {
+    setOk(false);
+    setMsg(text);
+    el?.focus();
+    if (select && el && "select" in el) el.select();
+    return false;
   }
+
+  function advanceValue() {
+    const n = Number(form.advance);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function formatAdvance(raw = form.advance) {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n.toFixed(2) : "0.00";
+  }
+
+  function checkCard() {
+    if (!/^\d{4}$/.test(form.cardNo)) return fail("Card No must be 4 digits", cardRef.current);
+    return true;
+  }
+  function checkAdvance() {
+    const n = advanceValue();
+    if (!(n > 100)) return fail("Advance must be greater than 100.00", advanceRef.current, true);
+    return true;
+  }
+
+  function onEnter(guard: () => boolean, next: () => void) {
+    return (e: KeyboardEvent<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (!guard()) return;
+      setMsg("");
+      next();
+    };
+  }
+
+  function setAdvance(raw: string) {
+    let s = raw.replace(/[^\d.]/g, "");
+    const first = s.indexOf(".");
+    if (first >= 0) s = s.slice(0, first + 1) + s.slice(first + 1).replace(/\./g, "");
+    const [w, d] = s.split(".");
+    s = d != null ? `${w}.${d.slice(0, 2)}` : w;
+    setForm({ ...form, advance: s });
+  }
+
+  async function save() {
+    if (!checkCard() || !checkAdvance()) return;
+    try {
+      const amt = formatAdvance();
+      const row = await api.post<any>("/api/bookings", {
+        cardNo: form.cardNo,
+        advance: Math.round(Number(amt) * 100),
+        outlet: form.outlet,
+        mop: form.mop === "Select" ? "" : form.mop,
+      });
+      setOk(true);
+      setMsg(`Saved reservation ${row.reservation_no}`);
+      setNo((row.reservation_no || no) + 1);
+      setForm(blank);
+      setTimeout(() => cardRef.current?.focus(), 0);
+    } catch (e) {
+      fail(e instanceof Error ? e.message : "Save failed");
+    }
+  }
+
+  function clear() {
+    setMsg("");
+    setOk(false);
+    setForm(blank);
+    cardRef.current?.focus();
+  }
+
+  function isDraft() {
+    return form.cardNo.length > 0 || Number(form.advance) > 0 || form.mop !== "Select";
+  }
+
+  function requestExit() {
+    if (isDraft()) setAskExit(true);
+    else onExit();
+  }
+
+  useEffect(() => {
+    function keys(e: globalThis.KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      if (askExit) return;
+      e.preventDefault();
+      e.stopPropagation();
+      requestExit();
+    }
+    window.addEventListener("keydown", keys, true);
+    return () => window.removeEventListener("keydown", keys, true);
+  });
+
   return (
     <div className="adv-page">
       <aside className="adv-side" />
@@ -564,23 +966,28 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
           <span>Reservation No : &nbsp; {no}</span>
           <span>Date : {dmy()} {new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
         </div>
-        <label>Mobile No <input className="win green" value={form.mobile} onChange={(e) => setForm({ ...form, mobile: e.target.value })} /></label>
-        <label>Guest Name <input className="win" value={form.guestName} onChange={(e) => setForm({ ...form, guestName: e.target.value })} /></label>
-        <label>Card No <input className="win" value={form.cardNo} onChange={(e) => setForm({ ...form, cardNo: e.target.value })} /></label>
-        <label>Advance <input className="win" value={form.advance} onChange={(e) => setForm({ ...form, advance: e.target.value })} /></label>
-        <label>Outlet <select className="win" value={form.outlet} onChange={(e) => setForm({ ...form, outlet: e.target.value })}>
+        <label>Card No <input ref={cardRef} className="win green" tabIndex={1} autoFocus inputMode="numeric" maxLength={4} value={form.cardNo} onChange={(e) => setForm({ ...form, cardNo: e.target.value.replace(/\D/g, "").slice(0, 4) })} onKeyDown={onEnter(checkCard, () => advanceRef.current?.focus())} /></label>
+        <label>Advance <input ref={advanceRef} className="win" tabIndex={2} inputMode="decimal" value={form.advance} onChange={(e) => setAdvance(e.target.value)} onFocus={(e) => e.target.select()} onBlur={() => setForm((f) => ({ ...f, advance: formatAdvance(f.advance) }))} onKeyDown={onEnter(() => { const okAmt = checkAdvance(); if (okAmt) setForm((f) => ({ ...f, advance: formatAdvance(f.advance) })); return okAmt; }, () => outletRef.current?.focus())} /></label>
+        <label>Outlet <select ref={outletRef} className="win" tabIndex={3} value={form.outlet} onChange={(e) => setForm({ ...form, outlet: e.target.value })} onKeyDown={onEnter(() => true, () => mopRef.current?.focus())}>
           <option>THE BOSS CLUB</option><option>BAR</option><option>RESTAURANT</option><option>NC</option>
         </select></label>
-        <label>MOP <span className="mop-row"><select className="win" value={form.mop} onChange={(e) => setForm({ ...form, mop: e.target.value })}>
+        <label>MOP <span className="mop-row"><select ref={mopRef} className="win" tabIndex={4} value={form.mop} onChange={(e) => setForm({ ...form, mop: e.target.value })} onKeyDown={onEnter(() => true, () => saveRef.current?.focus())}>
           <option>Select</option><option>CASH</option><option>UPI</option><option>CARD</option>
         </select></span></label>
-        <button className="fn adv-save" onClick={save}>Save</button>
-        {msg && <p className="ok">{msg}</p>}
+        <button ref={saveRef} className="fn adv-save" tabIndex={5} onClick={() => void save()} onKeyDown={onEnter(() => true, () => void save())}>Save</button>
+        {msg && <p className={ok ? "ok" : "flash"}>{msg}</p>}
       </div>
       <div className="adv-foot">
-        <button className="fn">Clear/New</button>
-        <button className="fn" onClick={onExit}>Exit</button>
+        <button className="fn" onClick={clear}>Clear/New</button>
+        <button className="fn" onClick={requestExit}>Exit</button>
       </div>
+      {askExit && (
+        <ConfirmAsk
+          message="Exit without save?"
+          onYes={() => { setAskExit(false); onExit(); }}
+          onNo={() => setAskExit(false)}
+        />
+      )}
     </div>
   );
 }

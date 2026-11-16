@@ -5,6 +5,7 @@ import type { AppContext } from "../lib/context.js";
 import { nowIso, uuid } from "../lib/ids.js";
 import { hashPin, verifyPin } from "../db/seed.js";
 import type { Actor, StaffRole } from "../../shared/types.js";
+import { deptRatesByProduct } from "./itemService.js";
 
 export function login(ctx: AppContext, username: string, pin: string, terminalId: string): Actor {
   const staff = ctx.db
@@ -53,14 +54,17 @@ export function createStaff(
 }
 
 export function listProducts(ctx: AppContext) {
-  return ctx.db
+  const rows = ctx.db
     .prepare(
-      `SELECT p.*, c.name AS category_name
+      `SELECT p.id, p.sku, p.name, p.category_id, p.station, p.base_price, p.tax_rate,
+              p.item_group, p.sales_group, p.track_inventory, p.unit, p.active, c.name AS category_name
        FROM products p JOIN categories c ON c.id = p.category_id
        WHERE p.active = 1
        ORDER BY p.station, p.name`,
     )
-    .all();
+    .all() as Array<Record<string, unknown>>;
+  const rates = deptRatesByProduct(ctx);
+  return rows.map((p) => ({ ...p, dept_rates: rates[String(p.id)] ?? {} }));
 }
 
 export function listCustomers(ctx: AppContext, query?: string) {

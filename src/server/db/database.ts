@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import { nextSequence } from "../lib/ids.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -28,10 +29,50 @@ export function defaultDbPath(): string {
   return path.join(dir, "hyperlounge.sqlite");
 }
 
+function hasColumn(db: Database.Database, table: string, column: string) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return cols.some((c) => c.name === column);
+}
+
 export function migrate(db: Database.Database): void {
   const schemaPath = path.join(__dirname, "schema.sql");
   const sql = fs.readFileSync(schemaPath, "utf8");
   db.exec(sql);
+  if (hasColumn(db, "dining_tables", "id") && !hasColumn(db, "dining_tables", "outlet")) {
+    db.exec("ALTER TABLE dining_tables ADD COLUMN outlet TEXT NOT NULL DEFAULT 'BAR'");
+  }
+  if (hasColumn(db, "table_sessions", "id") && !hasColumn(db, "table_sessions", "outlet")) {
+    db.exec("ALTER TABLE table_sessions ADD COLUMN outlet TEXT NOT NULL DEFAULT 'BAR'");
+  }
+  const productCols: Array<[string, string]> = [
+    ["sales_group", "TEXT NOT NULL DEFAULT ''"],
+    ["item_group", "TEXT NOT NULL DEFAULT ''"],
+    ["cost_price", "INTEGER NOT NULL DEFAULT 0"],
+    ["is_veg", "INTEGER NOT NULL DEFAULT 1"],
+    ["stock_item", "TEXT NOT NULL DEFAULT ''"],
+    ["allow_complimentary", "INTEGER NOT NULL DEFAULT 0"],
+    ["hide_in_web", "INTEGER NOT NULL DEFAULT 0"],
+    ["name_hindi", "TEXT NOT NULL DEFAULT ''"],
+    ["mix_item", "INTEGER NOT NULL DEFAULT 0"],
+    ["logo", "TEXT NOT NULL DEFAULT ''"],
+  ];
+  if (hasColumn(db, "products", "id")) {
+    for (const [name, def] of productCols) {
+      if (!hasColumn(db, "products", name)) db.exec(`ALTER TABLE products ADD COLUMN ${name} ${def}`);
+    }
+  }
+  if (hasColumn(db, "payments", "id")) {
+    if (!hasColumn(db, "payments", "remark")) db.exec("ALTER TABLE payments ADD COLUMN remark TEXT NOT NULL DEFAULT ''");
+    if (!hasColumn(db, "payments", "receipt_no")) db.exec("ALTER TABLE payments ADD COLUMN receipt_no INTEGER");
+    if (!hasColumn(db, "payments", "voucher_no")) db.exec("ALTER TABLE payments ADD COLUMN voucher_no INTEGER");
+    const missing = db
+      .prepare("SELECT id FROM payments WHERE receipt_no IS NULL OR voucher_no IS NULL ORDER BY created_at, id")
+      .all() as Array<{ id: string }>;
+    const fill = db.prepare("UPDATE payments SET receipt_no = COALESCE(receipt_no, ?), voucher_no = COALESCE(voucher_no, ?) WHERE id = ?");
+    for (const row of missing) {
+      fill.run(nextSequence(db, "settlement_receipt", 32901), nextSequence(db, "settlement_voucher", 47201), row.id);
+    }
+  }
 }
 
 export function resetDatabase(db: Database.Database): void {
@@ -57,6 +98,9 @@ export function resetDatabase(db: Database.Database): void {
     DROP TABLE IF EXISTS inventory;
     DROP TABLE IF EXISTS happy_hour_prices;
     DROP TABLE IF EXISTS happy_hours;
+    DROP TABLE IF EXISTS product_dept_rates;
+    DROP TABLE IF EXISTS item_groups;
+    DROP TABLE IF EXISTS sales_groups;
     DROP TABLE IF EXISTS product_prices;
     DROP TABLE IF EXISTS products;
     DROP TABLE IF EXISTS categories;

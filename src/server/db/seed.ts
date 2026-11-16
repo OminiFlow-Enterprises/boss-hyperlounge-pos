@@ -27,10 +27,55 @@ export interface SeedResult {
   cardTypes: Record<string, string>;
 }
 
+const EXTRA_MENU: Array<[string, string, "KITCHEN" | "BAR", number]> = [
+  ["FOOD-KC", "KADHAI CHICKEN", "KITCHEN", 450],
+  ["FOOD-KP", "KALONGI PANEER", "KITCHEN", 420],
+  ["FOOD-KF", "KALONGI FISH CURRY", "KITCHEN", 480],
+  ["BAR-KL", "KALUHA", "BAR", 350],
+  ["BAR-KM", "KAMIKAZE", "BAR", 400],
+  ["FOOD-KG", "KATHAL GALOUTI", "KITCHEN", 390],
+  ["FOOD-KK", "KESAR PISTA KULFI", "KITCHEN", 180],
+  ["BAR-K30", "KETEL ONE 30 ML", "BAR", 350],
+  ["BAR-KBT", "KETEL ONE BTL", "BAR", 4500],
+  ["BAR-KO", "KEWRA ORCHARD COOLER", "BAR", 320],
+  ["BAR-KPB", "KINGFISHER PREMIUM BUCKET", "BAR", 900],
+  ["BAR-KPP", "KINGFISHER PREMIUM PINT", "BAR", 250],
+  ["BAR-KUB", "KINGFISHER ULTRA BUCKET", "BAR", 1100],
+  ["BAR-KUP", "KINGFISHER ULTRA PINT", "BAR", 280],
+  ["FOOD-KA", "KIWI APPLE SMOOTHIE", "KITCHEN", 220],
+  ["FOOD-KB", "KIWI BANANA BOWL", "KITCHEN", 240],
+  ["BAR-KS", "Kiwi Masala Spark", "BAR", 300],
+  ["FOOD-KKK", "KKK", "KITCHEN", 350],
+  ["FOOD-KS", "KONJEE SHITAKE MUSHROOM", "KITCHEN", 460],
+];
+
 export function seedIfEmpty(db: Database.Database): SeedResult | null {
   const count = db.prepare("SELECT COUNT(*) AS n FROM staff").get() as { n: number };
-  if (count.n > 0) return null;
+  if (count.n > 0) {
+    ensureProductCatalog(db);
+    return null;
+  }
   return seedFresh(db);
+}
+
+export function ensureProductCatalog(db: Database.Database) {
+  const kitchen = db.prepare("SELECT id FROM categories WHERE station = 'KITCHEN' LIMIT 1").get() as { id: string } | undefined;
+  const bar = db.prepare("SELECT id FROM categories WHERE station = 'BAR' LIMIT 1").get() as { id: string } | undefined;
+  if (!kitchen || !bar) return;
+  const exists = db.prepare("SELECT id FROM products WHERE sku = ?");
+  const insert = db.prepare(
+    `INSERT INTO products (id, sku, name, category_id, station, base_price, tax_rate, track_inventory, unit, active)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pc', 1)`,
+  );
+  const stock = db.prepare("INSERT INTO inventory (product_id, quantity, reserved) VALUES (?, ?, 0)");
+  for (const [sku, name, station, price] of EXTRA_MENU) {
+    if (exists.get(sku)) continue;
+    const id = uuid();
+    insert.run(id, sku, name, station === "BAR" ? bar.id : kitchen.id, station, rupeesToPaise(price), station === "BAR" ? 18 : 5);
+    stock.run(id, 200);
+  }
+  db.prepare("UPDATE products SET tax_rate = 5 WHERE station = 'KITCHEN' AND (tax_rate IS NULL OR tax_rate = 0)").run();
+  db.prepare("UPDATE products SET tax_rate = 18 WHERE station = 'BAR' AND (tax_rate IS NULL OR tax_rate = 0)").run();
 }
 
 export function seedFresh(db: Database.Database): SeedResult {
@@ -97,7 +142,7 @@ export function seedFresh(db: Database.Database): SeedResult {
     const id = uuid();
     tables[code] = id;
     db.prepare(
-      "INSERT INTO dining_tables (id, floor_id, code, name, capacity, status) VALUES (?, ?, ?, ?, ?, 'AVAILABLE')",
+      "INSERT INTO dining_tables (id, floor_id, code, name, capacity, status, outlet) VALUES (?, ?, ?, ?, ?, 'AVAILABLE', 'BAR')",
     ).run(id, floor1, code, `Table ${code}`, i === 12 ? 8 : 4);
   }
   for (let i = 1; i <= 4; i++) {
@@ -105,7 +150,7 @@ export function seedFresh(db: Database.Database): SeedResult {
     const id = uuid();
     tables[code] = id;
     db.prepare(
-      "INSERT INTO dining_tables (id, floor_id, code, name, capacity, status) VALUES (?, ?, ?, ?, ?, 'AVAILABLE')",
+      "INSERT INTO dining_tables (id, floor_id, code, name, capacity, status, outlet) VALUES (?, ?, ?, ?, ?, 'AVAILABLE', 'BAR')",
     ).run(id, vip, code, `Table ${code}`, 6);
   }
 
@@ -116,12 +161,15 @@ export function seedFresh(db: Database.Database): SeedResult {
 
   const products: Record<string, string> = {};
   const catalog: Array<[string, string, string, string, number, number, number]> = [
-    ["FOOD-PT", "Paneer Tikka", kitchenCat, "KITCHEN", 400, 0, 80],
-    ["FOOD-PZ", "Pizza", kitchenCat, "KITCHEN", 600, 0, 40],
-    ["FOOD-FF", "French Fries", kitchenCat, "KITCHEN", 200, 0, 60],
-    ["BAR-WH", "Whisky", barCat, "BAR", 300, 0, 100],
-    ["BAR-CK", "Cocktail", barCat, "BAR", 700, 0, 80],
-    ["BAR-BE", "Beer", barCat, "BAR", 250, 0, 120],
+    ["FOOD-PT", "Paneer Tikka", kitchenCat, "KITCHEN", 400, 5, 80],
+    ["FOOD-PZ", "Pizza", kitchenCat, "KITCHEN", 600, 5, 40],
+    ["FOOD-FF", "French Fries", kitchenCat, "KITCHEN", 200, 5, 60],
+    ["BAR-WH", "Whisky", barCat, "BAR", 300, 18, 100],
+    ["BAR-CK", "Cocktail", barCat, "BAR", 700, 18, 80],
+    ["BAR-BE", "Beer", barCat, "BAR", 250, 18, 120],
+    ...EXTRA_MENU.map(([sku, name, station, price]) =>
+      [sku, name, station === "BAR" ? barCat : kitchenCat, station, price, station === "BAR" ? 18 : 5, 200] as [string, string, string, string, number, number, number],
+    ),
   ];
   for (const [sku, name, cat, station, price, tax, qty] of catalog) {
     const id = uuid();

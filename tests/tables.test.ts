@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { rupeesToPaise } from "../src/shared/money.js";
-import { openTable, transferTable, mergeTables, getTableByCode, splitTable, createTable } from "../src/server/services/tableService.js";
+import { openTable, transferTable, mergeTables, getTableByCode, splitTable, createTable, transferItems, listTables } from "../src/server/services/tableService.js";
 import { addItem, createOrder, sendKot, getOrderDetail, reprintKot } from "../src/server/services/orderService.js";
 import { generateInvoice, settleInvoice, previewBill } from "../src/server/services/billingService.js";
+import { issueCard, rechargeCard } from "../src/server/services/cardService.js";
+import { InsufficientBalanceError } from "../src/server/lib/errors.js";
 import { setSetting } from "../src/server/services/settingsService.js";
 import { resolvePrice } from "../src/server/services/pricingService.js";
 import { createTestApp } from "./helpers.js";
@@ -41,7 +43,9 @@ describe("tables, KOT and billing", () => {
     mergeTables(waiter, a.id, b.id);
     expect(getTableByCode(waiter, "01").status).toBe("AVAILABLE");
     const bill = previewBill(cashier, orderB.id);
-    expect(bill.grandTotal).toBe(rupeesToPaise(900));
+    expect(bill.foodTotal).toBe(rupeesToPaise(600));
+    expect(bill.drinksTotal).toBe(rupeesToPaise(300));
+    expect(bill.grandTotal).toBe(rupeesToPaise(984));
   });
 
   it("splits selected items onto another table", () => {
@@ -57,6 +61,65 @@ describe("tables, KOT and billing", () => {
     expect(getTableByCode(waiter, "03").status).toBe("OCCUPIED");
   });
 
+  it("transfers selected items onto another table", async () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const a = getTableByCode(waiter, "01");
+    const dest = getTableByCode(waiter, "05");
+    openTable(waiter, { tableId: a.id });
+    const order = createOrder(waiter, a.id) as { id: string };
+    const pizza = addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 }) as { id: string };
+    const whisky = addItem(waiter, { orderId: order.id, productId: seeded.products["BAR-WH"], qty: 1 }) as { id: string };
+    await sendKot(waiter, order.id);
+    transferItems(waiter, a.id, dest.id, [pizza.id], "move pizza");
+    expect(getTableByCode(waiter, "01").status).toBe("OCCUPIED");
+    expect(getTableByCode(waiter, "05").status).toBe("OCCUPIED");
+    const destOrder = createOrder(waiter, dest.id) as { id: string };
+    const destItems = getOrderDetail(waiter, destOrder.id).items as Array<{ id: string }>;
+    expect(destItems.map((i) => i.id)).toContain(pizza.id);
+    transferItems(waiter, a.id, dest.id, [whisky.id]);
+    expect(getTableByCode(waiter, "01").status).toBe("AVAILABLE");
+    expect(getOrderDetail(waiter, destOrder.id).items as Array<{ id: string }>).toHaveLength(2);
+  });
+
+  it("rejects member-card settlement when the card balance is too low", async () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const cashier = ctx("cashier");
+    setSetting(cashier, "service_charge_pct", "0");
+    const card = issueCard(cashier, {
+      customer: { name: "Low Bal", mobile: "9000000001" },
+      cardNumber: "LOW-1",
+      cardTypeCode: "REGULAR",
+    });
+    rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(50), paymentMode: "CASH", applyBonus: false });
+    const table = getTableByCode(waiter, "06");
+    openTable(waiter, { tableId: table.id });
+    const order = createOrder(waiter, table.id) as { id: string };
+    addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
+    const invoice = generateInvoice(cashier, order.id) as { id: string; grand_total: number };
+    expect(() =>
+      settleInvoice(cashier, invoice.id, [{ method: "MEMBER_CARD", amount: invoice.grand_total, memberCardId: card.id }]),
+    ).toThrow(InsufficientBalanceError);
+  });
+
+  it("keeps BAR and RESTAURANT running tables on separate tabs", () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const bar = getTableByCode(waiter, "01", "BAR");
+    openTable(waiter, { tableId: bar.id, outlet: "BAR" });
+    const barOrder = createOrder(waiter, bar.id) as { id: string };
+    addItem(waiter, { orderId: barOrder.id, productId: seeded.products["BAR-WH"], qty: 1 });
+    const rest = createTable(waiter, { code: "01", outlet: "RESTAURANT" });
+    openTable(waiter, { tableId: rest.id, outlet: "RESTAURANT" });
+    const restOrder = createOrder(waiter, rest.id) as { id: string };
+    addItem(waiter, { orderId: restOrder.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
+    const list = listTables(waiter) as Array<{ id: string; code: string; outlet: string; status: string }>;
+    expect(list.find((t) => t.code === "01" && t.outlet === "BAR")?.status).toBe("OCCUPIED");
+    expect(list.find((t) => t.code === "01" && t.outlet === "RESTAURANT")?.status).toBe("OCCUPIED");
+    expect(bar.id).not.toBe(rest.id);
+  });
+
   it("supports split cash + card settlement", async () => {
     const { seeded, ctx } = createTestApp();
     const waiter = ctx("waiter");
@@ -69,7 +132,7 @@ describe("tables, KOT and billing", () => {
     const invoice = generateInvoice(cashier, order.id) as { id: string; grand_total: number };
     const first = settleInvoice(cashier, invoice.id, [{ method: "CASH", amount: rupeesToPaise(200) }]);
     expect(first.complete).toBe(false);
-    const done = settleInvoice(cashier, invoice.id, [{ method: "UPI", amount: rupeesToPaise(400) }]);
+    const done = settleInvoice(cashier, invoice.id, [{ method: "PAYTM", amount: invoice.grand_total - rupeesToPaise(200) }]);
     expect(done.complete).toBe(true);
     expect(getTableByCode(cashier, "04").status).toBe("AVAILABLE");
   });
@@ -91,6 +154,24 @@ describe("tables, KOT and billing", () => {
     const reprint = hardware.kitchen.logs.find((l) => l.reprint);
     expect(reprint).toBeTruthy();
     expect((reprint?.payload as { reprint: boolean }).reprint).toBe(true);
+  });
+
+  it("punches -1 qty to reduce a sent item and prints a cancel KOT", async () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const table = getTableByCode(waiter, "03");
+    openTable(waiter, { tableId: table.id });
+    const order = createOrder(waiter, table.id) as { id: string };
+    addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 2 });
+    await sendKot(waiter, order.id);
+    addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: -1 });
+    const kots = await sendKot(waiter, order.id);
+    expect(kots.some((k) => k.type === "CANCEL")).toBe(true);
+    const detail = getOrderDetail(waiter, order.id);
+    const live = (detail.items as Array<{ voided: number; qty: number; kot_id: string | null }>).filter((i) => !i.voided);
+    expect(live).toHaveLength(1);
+    expect(live[0].qty).toBe(1);
+    expect(live[0].kot_id).toBeTruthy();
   });
 
   it("creates a new table from a typed code and reuses the same code", () => {
