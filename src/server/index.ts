@@ -9,6 +9,10 @@ seedIfEmpty(db);
 const hardware = createHardware();
 const app = createApp({ db, hardware, online: process.env.OFFLINE !== "1" });
 
-app.listen(port, "0.0.0.0", () => {
+const listener = app.listen(port, "0.0.0.0", () => {
   console.log(`BOSS Hyperlounge POS on http://0.0.0.0:${port}`);
+});
+listener.on("error", (err) => {
+  console.error(err instanceof Error ? err.message : err);
+  process.exit(1);
 });

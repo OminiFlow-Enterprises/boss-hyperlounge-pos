@@ -355,7 +355,9 @@ export function createApp(options: CreateAppOptions) {
   }));
 
   if (process.env.NODE_ENV === "production") {
-    const clientDir = path.resolve(process.cwd(), "dist/client");
+    const clientDir = process.env.POS_CLIENT_DIR
+      ? path.resolve(process.env.POS_CLIENT_DIR)
+      : path.resolve(process.cwd(), "dist/client");
     app.use(express.static(clientDir));
     app.get(/^(?!\/api).*/, (_req, res) => {
       res.sendFile(path.join(clientDir, "index.html"));

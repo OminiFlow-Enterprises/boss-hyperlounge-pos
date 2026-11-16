@@ -4,6 +4,8 @@
   "description": "BOSS Hyperlounge club/lounge POS — member cards, tables, KOT, billing, offline-first",
   "private": true,
   "type": "module",
+  "main": "electron/main.cjs",
+  "author": "THE BOSS",
   "engines": {
     "node": "22.x"
   },
@@ -11,10 +13,12 @@
     "dev": "concurrently -k -n server,client -c cyan,magenta \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch src/server/index.ts",
     "dev:client": "vite",
-    "build": "tsc -p tsconfig.server.json && vite build",
+    "build": "tsc -p tsconfig.server.json && node scripts/copy-schema.mjs && vite build",
+    "desktop": "npm run build && electron .",
+    "dist:win": "npm run build && node scripts/dist-win.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "start": "NODE_ENV=production tsx src/server/index.ts",
+    "start": "tsx scripts/start.ts",
     "build:start": "npm run build && npm start",
     "seed": "tsx src/server/db/seed.ts"
   },
@@ -37,6 +41,39 @@
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "electron": "36.9.5",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.theboss.pos",
+    "productName": "THE BOSS POS",
+    "asar": false,
+    "npmRebuild": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "data/hyperlounge.sqlite",
+        "to": "data/hyperlounge.sqlite"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": false
+    }
   }
 }

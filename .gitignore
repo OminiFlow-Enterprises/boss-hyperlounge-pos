@@ -9,3 +9,5 @@ data/*.sqlite-shm
 .DS_Store
 *.log
 .vite
+release
+.cache

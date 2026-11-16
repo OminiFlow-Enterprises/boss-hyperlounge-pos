@@ -24,7 +24,9 @@ export function openDatabase(options: OpenDbOptions = {}): Database.Database {
 }
 
 export function defaultDbPath(): string {
-  const dir = path.resolve(process.cwd(), "data");
+  const dir = process.env.POS_DATA_DIR
+    ? path.resolve(process.env.POS_DATA_DIR)
+    : path.resolve(process.cwd(), "data");
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, "hyperlounge.sqlite");
 }

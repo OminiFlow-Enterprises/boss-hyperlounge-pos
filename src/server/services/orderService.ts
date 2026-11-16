@@ -267,6 +267,7 @@ export async function sendKot(ctx: AppContext, orderId: string) {
       }
     | undefined;
   if (!order) throw new AppError("Order not found", 404);
+  const openOrder = order;
 
   type PendingItem = {
     id: string;
@@ -294,7 +295,7 @@ export async function sendKot(ctx: AppContext, orderId: string) {
     ? (ctx.db.prepare("SELECT name FROM staff WHERE id = ?").get(order.waiter_id) as { name: string } | undefined)
     : undefined;
 
-  const created = [];
+  const created: Array<{ kot_number: string }> = [];
 
   async function printStationKot(
     station: Station,
@@ -310,10 +311,10 @@ export async function sendKot(ctx: AppContext, orderId: string) {
     }>,
   ) {
     const kot = createKot(ctx, {
-      orderId: order.id,
-      sessionId: order.session_id,
-      tableId: order.table_id,
-      waiterId: order.waiter_id,
+      orderId: openOrder.id,
+      sessionId: openOrder.session_id,
+      tableId: openOrder.table_id,
+      waiterId: openOrder.waiter_id,
       station,
       type,
       items,

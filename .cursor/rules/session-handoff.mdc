@@ -1,0 +1,15 @@
+---
+description: Continue this POS from the saved session before changing billing, Electron, LAN, or the printer.
+alwaysApply: true
+---
+
+# Continue from the saved session
+
+Read `.cursor/session-handoff.md` before changing billing, reports, Electron, LAN, or printing.
+
+- This is THE BOSS WinForms POS. Follow `keyboard-first.mdc` and `windows-native.mdc`.
+- Money is integer paise. ₹1.00 = 100.
+- The desktop app is Electron. F5, F10, F11, and F12 must reach the POS, not the browser.
+- Next job is on the Windows master PC: detect its LAN address and the mini printer, then let other PCs use that master. Other PCs do not need Cursor.
+- Do not invent a printer name or IP. Read them on the master PC.
+- Imported staff PIN is 1234. Demo cashier PIN stays 2222.
