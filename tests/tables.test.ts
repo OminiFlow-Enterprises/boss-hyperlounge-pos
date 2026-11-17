@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { rupeesToPaise } from "../src/shared/money.js";
 import { openTable, transferTable, mergeTables, getTableByCode, splitTable, createTable, transferItems, listTables } from "../src/server/services/tableService.js";
-import { addItem, createOrder, sendKot, getOrderDetail, reprintKot } from "../src/server/services/orderService.js";
+import { addItem, createOrder, sendKot, getOrderDetail, reprintKot, setBillLineQty, setBillLineProduct, setBillLinePrice } from "../src/server/services/orderService.js";
 import { generateInvoice, settleInvoice, previewBill } from "../src/server/services/billingService.js";
 import { issueCard, rechargeCard } from "../src/server/services/cardService.js";
 import { InsufficientBalanceError } from "../src/server/lib/errors.js";
@@ -103,6 +103,22 @@ describe("tables, KOT and billing", () => {
     ).toThrow(InsufficientBalanceError);
   });
 
+  it("shows the bill net amount on the table estimate", () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const cashier = ctx("cashier");
+    setSetting(cashier, "service_charge_pct", "10");
+    const table = getTableByCode(waiter, "02");
+    openTable(waiter, { tableId: table.id });
+    const order = createOrder(waiter, table.id) as { id: string };
+    addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
+    const bill = previewBill(cashier, order.id, { serviceChargePct: 10, discountPct: 0 });
+    const row = (listTables(cashier) as Array<{ code: string; running_total: number; net_total: number }>)
+      .find((t) => t.code === "02");
+    expect(row?.net_total).toBe(bill.grandTotal);
+    expect(row?.net_total).not.toBe(row?.running_total);
+  });
+
   it("keeps BAR and RESTAURANT running tables on separate tabs", () => {
     const { seeded, ctx } = createTestApp();
     const waiter = ctx("waiter");
@@ -118,6 +134,22 @@ describe("tables, KOT and billing", () => {
     expect(list.find((t) => t.code === "01" && t.outlet === "BAR")?.status).toBe("OCCUPIED");
     expect(list.find((t) => t.code === "01" && t.outlet === "RESTAURANT")?.status).toBe("OCCUPIED");
     expect(bar.id).not.toBe(rest.id);
+  });
+
+  it("updates a printed bill when discount or service changes", () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const cashier = ctx("cashier");
+    setSetting(cashier, "service_charge_pct", "0");
+    const table = getTableByCode(waiter, "03");
+    openTable(waiter, { tableId: table.id });
+    const order = createOrder(waiter, table.id) as { id: string };
+    addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
+    const first = generateInvoice(cashier, order.id) as { id: string; grand_total: number; discount: number };
+    const again = generateInvoice(cashier, order.id, { discountPct: 10, discountFrom: "percent" }) as { id: string; grand_total: number; discount: number };
+    expect(again.id).toBe(first.id);
+    expect(again.discount).toBeGreaterThan(0);
+    expect(again.grand_total).toBeLessThan(first.grand_total);
   });
 
   it("supports split cash + card settlement", async () => {
@@ -172,6 +204,65 @@ describe("tables, KOT and billing", () => {
     expect(live).toHaveLength(1);
     expect(live[0].qty).toBe(1);
     expect(live[0].kot_id).toBeTruthy();
+  });
+
+  it("edits a printed bill qty and still accepts another item", async () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const cashier = ctx("cashier");
+    setSetting(cashier, "service_charge_pct", "0");
+    const table = getTableByCode(waiter, "04");
+    openTable(waiter, { tableId: table.id });
+    const order = createOrder(waiter, table.id) as { id: string };
+    const line = addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 2 }) as { id: string };
+    await sendKot(waiter, order.id);
+    const first = generateInvoice(cashier, order.id, { serviceChargePct: 0, discountPct: 0 }) as { id: string };
+    setBillLineQty(cashier, order.id, [line.id], 1);
+    addItem(cashier, { orderId: order.id, productId: seeded.products["BAR-WH"], qty: 1 });
+    const bill = previewBill(cashier, order.id, { serviceChargePct: 0, discountPct: 0 });
+    expect(bill.foodTotal).toBe(rupeesToPaise(600));
+    expect(bill.drinksTotal).toBe(rupeesToPaise(300));
+    const again = generateInvoice(cashier, order.id, { serviceChargePct: 0, discountPct: 0 }) as { id: string; grand_total: number };
+    expect(again.id).toBe(first.id);
+    expect(again.grand_total).toBe(bill.grandTotal);
+  });
+
+  it("replaces the item on a printed bill line", async () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const cashier = ctx("cashier");
+    setSetting(cashier, "service_charge_pct", "0");
+    const table = getTableByCode(waiter, "06");
+    openTable(waiter, { tableId: table.id });
+    const order = createOrder(waiter, table.id) as { id: string };
+    const line = addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 2 }) as { id: string };
+    await sendKot(waiter, order.id);
+    generateInvoice(cashier, order.id, { serviceChargePct: 0, discountPct: 0 });
+    setBillLineProduct(cashier, order.id, [line.id], seeded.products["BAR-WH"]);
+    const bill = previewBill(cashier, order.id, { serviceChargePct: 0, discountPct: 0 });
+    expect(bill.foodTotal).toBe(0);
+    expect(bill.drinksTotal).toBe(rupeesToPaise(600));
+    expect(bill.totalQty).toBe(2);
+  });
+
+  it("changes the price on a printed bill line", async () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const cashier = ctx("cashier");
+    setSetting(cashier, "service_charge_pct", "0");
+    const table = getTableByCode(waiter, "07");
+    openTable(waiter, { tableId: table.id });
+    const order = createOrder(waiter, table.id) as { id: string };
+    const line = addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 2 }) as { id: string };
+    await sendKot(waiter, order.id);
+    const first = generateInvoice(cashier, order.id, { serviceChargePct: 0, discountPct: 0 }) as { id: string };
+    setBillLinePrice(cashier, order.id, [line.id], rupeesToPaise(100));
+    const bill = previewBill(cashier, order.id, { serviceChargePct: 0, discountPct: 0 });
+    expect(bill.items[0]?.unit_price).toBe(rupeesToPaise(100));
+    expect(bill.foodTotal).toBe(rupeesToPaise(200));
+    const again = generateInvoice(cashier, order.id, { serviceChargePct: 0, discountPct: 0 }) as { id: string; grand_total: number };
+    expect(again.id).toBe(first.id);
+    expect(again.grand_total).toBe(bill.grandTotal);
   });
 
   it("creates a new table from a typed code and reuses the same code", () => {

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
-import { ConfirmAsk } from "./BillDialogs";
+import { AlertBox, ConfirmAsk } from "./BillDialogs";
+import { itemMatchScore } from "../shared/itemSearch";
 
 const DEPTS = ["CAFE", "BAR", "THE BOSS CLUB", "RESTAURANT", "NC"] as const;
 
@@ -157,9 +158,23 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
     return () => window.removeEventListener("keydown", keys, true);
   }, [groupOpen]);
 
+  const shown = useMemo(() => {
+    const q = name.trim();
+    if (!q) return items;
+    return items
+      .map((item) => ({ item, score: itemMatchScore(item.name, item.sku, q) }))
+      .filter((row): row is { item: MasterItem; score: number } => row.score != null)
+      .sort((a, b) => a.score - b.score || a.item.name.localeCompare(b.item.name))
+      .map((row) => row.item);
+  }, [items, name]);
+
   useEffect(() => {
     listRef.current?.querySelector("tr.on")?.scrollIntoView({ block: "nearest" });
-  }, [listSel, items.length]);
+  }, [listSel, shown.length]);
+
+  useEffect(() => {
+    if (listSel > shown.length - 1) setListSel(0);
+  }, [shown.length, listSel]);
 
   function startNew(code?: string) {
     setEditingId(null);
@@ -368,17 +383,17 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
   function onListKey(e: React.KeyboardEvent) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setListSel((i) => Math.min(items.length - 1, i + 1));
+      setListSel((i) => Math.min(Math.max(shown.length - 1, 0), i + 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setListSel((i) => Math.max(0, i - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const item = items[listSel];
+      const item = shown[listSel];
       if (item) edit(item);
     } else if (e.key === "Delete") {
       e.preventDefault();
-      const item = items[listSel];
+      const item = shown[listSel];
       if (item) setAskDelete(item);
     }
   }
@@ -528,7 +543,7 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
               <button type="button" className="fn" onClick={onClose}>Exit</button>
             </div>
           </div>
-          {err ? <div className="im-msg bad">{err}</div> : status ? <div className="im-msg ok">{status}</div> : null}
+          {(err || status) && <AlertBox message={err || status} onClose={() => { setErr(""); setStatus(""); }} />}
         </div>
 
         <div className="im-details">
@@ -556,7 +571,7 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
                 </tr>
               </thead>
               <tbody>
-                {items.map((item, i) => (
+                {shown.map((item, i) => (
                   <tr
                     key={item.id}
                     className={i === listSel ? "on" : ""}

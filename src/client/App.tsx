@@ -3,17 +3,37 @@ import { api, ApiError } from "./api";
 import { formatINR } from "../shared/money";
 import type { NavView, PaymentMode, StaffRole } from "../shared/types";
 import { ReportHost } from "./Reports";
-import { ConfirmAsk, ItemTransferDialog, PrepareBillDialog, PrepareTablePick, SettleDialog, TransferDialog } from "./BillDialogs";
+import { AlertBox, ConfirmAsk, ItemTransferDialog, PrepareBillDialog, PrepareTablePick, SettleDialog, TransferDialog } from "./BillDialogs";
+import { armReplaceOnFocus, blockLetterInsert, blockLetters, moveFormFocus, replaceOnFirstKey } from "./formNav";
+import { itemMatchScore } from "../shared/itemSearch";
 import { ItemMasterDialog } from "./ItemMaster";
 
 type Actor = { staffId: string; staffName: string; role: StaffRole; terminalId: string; terminalName: string };
+
+function StaffMark({ name }: { name: string }) {
+  const label = name.trim();
+  if (!label) return null;
+  const safe = label.replace(/[&<>"']/g, (ch) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" }[ch] ?? ch
+  ));
+  const width = Math.max(260, label.length * 18 + 90);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="150"><text x="16" y="88" fill="#9a9a9a" fill-opacity="0.28" font-family="Tahoma,sans-serif" font-size="22" font-weight="700" transform="rotate(-28 ${width / 2} 75)">${safe}</text></svg>`;
+  return (
+    <div
+      className="staff-mark"
+      aria-hidden="true"
+      style={{ backgroundImage: `url("data:image/svg+xml,${encodeURIComponent(svg)}")` }}
+    />
+  );
+}
 type Table = {
   id: string; code: string; name: string; status: string; floor_name: string; floor_id: string;
-  current_session_id: string | null; customer_name?: string; card_number?: string; running_total?: number;
+  current_session_id: string | null; customer_name?: string; card_number?: string; running_total?: number; net_total?: number;
   session_opened_at?: string; outlet?: string;
 };
 
 type Dept = "CLUB" | "RESTAURANT" | "NC" | "BAR";
+const DEPT_ORDER: Dept[] = ["CLUB", "RESTAURANT", "NC", "BAR"];
 
 function deptOutlet(d: Dept) {
   return d === "CLUB" ? "THE BOSS CLUB" : d;
@@ -141,6 +161,33 @@ function formatWinDate(d: Date) {
   return `${dd}-${months[d.getMonth()]}-${d.getFullYear()} ${hh}:${mm}:${ss} ${am}`;
 }
 
+function businessStartMs(at = new Date()) {
+  const d = new Date(at);
+  if (d.getHours() < 6) d.setDate(d.getDate() - 1);
+  d.setHours(6, 0, 0, 0);
+  return d.getTime();
+}
+
+const DROP_ROWS = 12;
+function visiblePicks<T>(list: T[], pick: number) {
+  if (list.length <= DROP_ROWS) return list.map((p, i) => ({ p, i }));
+  const start = Math.min(Math.max(0, pick - 2), list.length - DROP_ROWS);
+  return list.slice(start, start + DROP_ROWS).map((p, n) => ({ p, i: start + n }));
+}
+
+function WinClock() {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const tick = () => {
+      if (ref.current) ref.current.value = formatWinDate(new Date());
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <input ref={ref} className="win" readOnly tabIndex={-1} defaultValue={formatWinDate(new Date())} />;
+}
+
 export function App() {
   const [actor, setActor] = useState<Actor | null>(null);
   const [view, setView] = useState<AppView>("billing");
@@ -149,8 +196,11 @@ export function App() {
   const [menu, setMenu] = useState<string | null>(null);
   const [sub, setSub] = useState<string | null>(null);
   const [outlet, setOutlet] = useState("BAR");
+  const outletRef = useRef(outlet);
+  const stepDeptRef = useRef<((dir: -1 | 1) => void) | null>(null);
+  outletRef.current = outlet;
   const [invoice, setInvoice] = useState<any>(null);
-  const [msg, setMsg] = useState("");
+  const [alertText, setAlertText] = useState("");
 
   async function refresh() {
     const data = await api.get<any>("/api/bootstrap");
@@ -158,9 +208,18 @@ export function App() {
     if (!actor) setActor(data.actor);
   }
 
+  async function refreshTables() {
+    const rows = await api.get<any[]>("/api/tables");
+    setBootstrap((prev: any) => (prev ? { ...prev, tables: rows } : prev));
+  }
+
   useEffect(() => {
     refresh().catch((e) => setError(e.message));
   }, []);
+
+  function notify(m: string) {
+    setAlertText(m.trim());
+  }
 
   function go(next: AppView, nextOutlet?: string) {
     setView(next);
@@ -170,9 +229,46 @@ export function App() {
   }
 
   useEffect(() => {
+    const order = ["THE BOSS CLUB", "RESTAURANT", "NC", "BAR"];
+    (window as Window & { __bossStepDept?: (dir: number) => void }).__bossStepDept = (dir) => {
+      const step = dir < 0 ? -1 : 1;
+      if (stepDeptRef.current) {
+        stepDeptRef.current(step);
+        return;
+      }
+      const now = Date.now();
+      const mark = window as Window & { __bossStepAt?: number };
+      if (now - (mark.__bossStepAt || 0) < 50) return;
+      mark.__bossStepAt = now;
+      const i = Math.max(0, order.indexOf(outletRef.current));
+      go("billing", order[(i + step + order.length) % order.length]);
+    };
+    return () => {
+      delete (window as Window & { __bossStepDept?: (dir: number) => void }).__bossStepDept;
+    };
+  });
+
+  useEffect(() => {
+    function keys(e: KeyboardEvent) {
+      if (moveFormFocus(e)) return;
+      blockLetters(e);
+      if (e.defaultPrevented) return;
+      replaceOnFirstKey(e);
+    }
+    window.addEventListener("keydown", keys, true);
+    document.addEventListener("beforeinput", blockLetterInsert, true);
+    document.addEventListener("focusin", armReplaceOnFocus);
+    return () => {
+      window.removeEventListener("keydown", keys, true);
+      document.removeEventListener("beforeinput", blockLetterInsert, true);
+      document.removeEventListener("focusin", armReplaceOnFocus);
+    };
+  }, []);
+
+  useEffect(() => {
     function keys(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
-      if (document.querySelector(".su-dlg, .confirm-dlg")) return;
+      if (document.querySelector(".su-dlg, .confirm-dlg, .alert-dlg, .kot-view")) return;
       if (view === "billing" || view === "advance-booking" || view === "card-block") {
         if (view === "billing" && menu) {
           e.preventDefault();
@@ -199,7 +295,13 @@ export function App() {
     );
   }
 
-  const deptLabel = view === "settlement-report"
+  const billingName = outlet === "THE BOSS CLUB" ? "THE BOSS CLUB"
+    : outlet === "RESTAURANT" ? "RESTAURANT"
+    : outlet === "NC" ? "NC"
+    : "BAR (Restaurant)";
+  const deptLabel = view === "billing"
+    ? billingName
+    : view === "settlement-report"
     ? `Restaurant Settlement Report - ${outlet}`
     : view === "kot-report"
       ? `${outlet} KOT Report`
@@ -276,10 +378,12 @@ export function App() {
           tables={bootstrap.tables}
           products={bootstrap.products}
           outlet={outlet}
-          onRefresh={refresh}
+          onRefresh={refreshTables}
+          onCatalog={refresh}
           onInvoice={setInvoice}
-          onMessage={setMsg}
+          onMessage={notify}
           onOpenView={go}
+          onRegisterStep={(fn) => { stepDeptRef.current = fn; }}
         />
       )}
 
@@ -303,45 +407,54 @@ export function App() {
           </div>
         </div>
       )}
-      {error && <div className="flash" style={{ padding: 4 }}>{error}</div>}
-      {msg && <div className="meta" style={{ padding: "2px 8px" }}>{msg}</div>}
+      {alertText && <AlertBox message={alertText} onClose={() => setAlertText("")} />}
+      {!alertText && error && <AlertBox message={error} onClose={() => setError("")} />}
+      <StaffMark name={actor?.staffName ?? ""} />
     </div>
   );
 }
 
-function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessage, onOpenView }: {
+function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoice, onMessage, onOpenView, onRegisterStep }: {
   tables: Table[];
   products: Product[];
   outlet: string;
   onRefresh: () => void;
+  onCatalog: () => void;
   onInvoice: (inv: any) => void;
   onMessage: (m: string) => void;
   onOpenView: (v: AppView, nextOutlet?: string) => void;
+  onRegisterStep: (fn: ((dir: -1 | 1) => void) | null) => void;
 }) {
-  const [now, setNow] = useState(new Date());
   const [tableId, setTableId] = useState("");
   const [tableCode, setTableCode] = useState("");
   const [orderId, setOrderId] = useState<string | null>(null);
   const tableRef = useRef<HTMLInputElement>(null);
   const cardRef = useRef<HTMLInputElement>(null);
+  const clubCardRef = useRef<HTMLInputElement>(null);
   const itemRef = useRef<HTMLInputElement>(null);
   const qtyRef = useRef<HTMLInputElement>(null);
+  const nameLockRef = useRef(false);
+  const queryRef = useRef("");
   const remarkRef = useRef<HTMLInputElement>(null);
   const kotBtnRef = useRef<HTMLButtonElement>(null);
   const gridBodyRef = useRef<HTMLDivElement>(null);
   const dropRef = useRef<HTMLDivElement>(null);
+  const keyHandler = useRef<(e: KeyboardEvent) => void>(() => {});
   const [detail, setDetail] = useState<any>(null);
   const [dept, setDept] = useState<Dept>(outlet === "THE BOSS CLUB" ? "CLUB" : outlet === "RESTAURANT" ? "RESTAURANT" : outlet === "NC" ? "NC" : "BAR");
   const clubMode = dept === "CLUB";
   const [mobile, setMobile] = useState("");
   const [guest, setGuest] = useState("");
-  const [cardNo, setCardNo] = useState("");
-  const [cardBal, setCardBal] = useState("0.00");
+  const [clubCard, setClubCard] = useState("");
+  const [clubBal, setClubBal] = useState("0.00");
+  const [checkCard, setCheckCard] = useState("");
+  const [checkBal, setCheckBal] = useState("0.00");
   const [sel, setSel] = useState(-1);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [focusEntry, setFocusEntry] = useState(0);
   const [remark, setRemark] = useState("");
   const [payOpen, setPayOpen] = useState(false);
-  const [pickOpen, setPickOpen] = useState<"bill" | "settle" | null>(null);
+  const [pickOpen, setPickOpen] = useState<"bill" | "settle" | "reopen" | null>(null);
   const [billOrder, setBillOrder] = useState<{ orderId: string; table: Table } | null>(null);
   const [settleInv, setSettleInv] = useState<{ invoiceId: string; table: Table } | null>(null);
   const [settleTables, setSettleTables] = useState<Table[]>([]);
@@ -355,16 +468,13 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
   const [qtyStr, setQtyStr] = useState("1");
   const [pending, setPending] = useState<Product | null>(null);
   const [nameLocked, setNameLocked] = useState(false);
+  nameLockRef.current = nameLocked;
+  queryRef.current = itemQuery;
   const [listOpen, setListOpen] = useState(false);
   const [pick, setPick] = useState(0);
   const [itemListSel, setItemListSel] = useState(0);
   const [dropPos, setDropPos] = useState({ top: 0, left: 58 });
   const amt = (n: number) => (n / 100).toFixed(2);
-
-  useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
 
   useEffect(() => {
     if (outlet === "THE BOSS CLUB") setDept("CLUB");
@@ -374,7 +484,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
   }, [outlet]);
 
   useEffect(() => {
-    if (dept === "CLUB") cardRef.current?.focus();
+    if (dept === "CLUB") clubCardRef.current?.focus();
     else tableRef.current?.focus();
   }, [dept]);
 
@@ -409,11 +519,13 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
   }, [products, dept]);
 
   const matches = useMemo(() => {
-    const v = typed.trim().toLowerCase();
+    const v = typed.trim();
     if (!v) return [];
-    const starts = catalog.filter((p) => p.name.toLowerCase().startsWith(v));
-    if (starts.length) return starts;
-    return catalog.filter((p) => p.name.toLowerCase().includes(v));
+    return catalog
+      .map((p) => ({ p, score: itemMatchScore(p.name, p.sku, v) }))
+      .filter((row): row is { p: typeof row.p; score: number } => row.score != null)
+      .sort((a, b) => a.score - b.score || a.p.name.localeCompare(b.p.name))
+      .map((row) => row.p);
   }, [catalog, typed]);
 
   async function loadOrder(id: string) {
@@ -435,7 +547,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
       setItemListSel(0);
       await loadOrder(order.id);
       if (t?.customer_name) setGuest(t.customer_name);
-      if (t?.card_number) setCardNo(t.card_number);
+      if (t?.card_number) {
+        if (clubMode) setClubCard(t.card_number);
+        else setCheckCard(t.card_number);
+      }
       onRefresh();
       focusInput(itemRef.current);
     } catch (e) {
@@ -454,6 +569,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
     setTableId("");
     setTableCode("");
     setPending(null);
+    setEditingId(null);
     setNameLocked(false);
     setItemQuery("");
     setTyped("");
@@ -462,12 +578,29 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
     setListOpen(false);
     setPick(0);
     setItemListSel(0);
-    setCardNo("");
-    setCardBal("0.00");
     setSel(-1);
     onOpenView("billing", deptOutlet(next));
     focusDept(next);
   }
+
+  function stepDept(dir: -1 | 1) {
+    const now = Date.now();
+    const mark = window as Window & { __bossStepAt?: number };
+    if (now - (mark.__bossStepAt || 0) < 50) return;
+    mark.__bossStepAt = now;
+    const i = Math.max(0, DEPT_ORDER.indexOf(dept));
+    switchDept(DEPT_ORDER[(i + dir + DEPT_ORDER.length) % DEPT_ORDER.length]);
+  }
+
+  const registerRef = useRef(onRegisterStep);
+  registerRef.current = onRegisterStep;
+  useEffect(() => {
+    registerRef.current((dir) => {
+      if (itemMasterOpen || askExit) return;
+      stepDept(dir);
+    });
+  });
+  useEffect(() => () => registerRef.current(null), []);
 
   function focusInput(el: HTMLInputElement | null | undefined) {
     requestAnimationFrame(() => {
@@ -479,7 +612,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
 
   function focusDept(next: Dept) {
     requestAnimationFrame(() => {
-      const el = next === "CLUB" ? cardRef.current : tableRef.current;
+      const el = next === "CLUB" ? clubCardRef.current : tableRef.current;
       el?.focus();
       el?.select();
     });
@@ -487,9 +620,9 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
 
   async function ensureOpenByCode(code: string) {
     const raw = code.trim();
-    if (clubMode && !cardNo.trim()) {
+    if (clubMode && !clubCard.trim()) {
       onMessage("Enter Card No first");
-      cardRef.current?.focus();
+      clubCardRef.current?.focus();
       return null;
     }
     if (!raw) {
@@ -504,7 +637,9 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
     }
     try {
       let t = tables.find((x) => x.code.toLowerCase() === raw.toLowerCase() && (x.outlet || "BAR") === out);
-      if (!t) t = await api.post<Table>("/api/tables", { code: raw, name: `Table ${raw}`, outlet: out });
+      if (!t) {
+        t = await api.post<Table>("/api/tables", { code: raw, name: `Table ${raw}`, outlet: out });
+      }
       await selectTable(t.id, t.code);
       return t;
     } catch (e) {
@@ -513,22 +648,26 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
     }
   }
 
-  async function loadCard(q: string) {
+  async function loadCard(q: string, forClub = clubMode) {
     const v = q.trim();
-    setCardNo(q);
+    const setNo = forClub ? setClubCard : setCheckCard;
+    const setBal = forClub ? setClubBal : setCheckBal;
+    setNo(q);
     if (!v) {
-      setCardBal("0.00");
-      if (clubMode) onMessage("Enter Card No first");
+      setBal("0.00");
+      if (forClub) onMessage("Enter Card No first");
       return false;
     }
     try {
       const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(v)}`);
-      setCardBal(amt(b.balances.usable));
-      if (b.card.customer_name) setGuest(b.card.customer_name);
-      if (b.card.mobile && !String(b.card.mobile).startsWith("card-")) setMobile(b.card.mobile);
+      setBal(amt(b.balances.usable));
+      if (forClub) {
+        if (b.card.customer_name) setGuest(b.card.customer_name);
+        if (b.card.mobile && !String(b.card.mobile).startsWith("card-")) setMobile(b.card.mobile);
+      }
       return true;
     } catch {
-      setCardBal("0.00");
+      setBal("0.00");
       onMessage("Card not found");
       return false;
     }
@@ -536,14 +675,12 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
 
   function placeDrop() {
     const body = gridBodyRef.current;
-    const entry = body?.querySelector(".igrid-row.entry") as HTMLElement | null;
+    const entry = (body?.querySelector(".igrid-row.editing") ?? body?.querySelector(".igrid-row.entry")) as HTMLElement | null;
     if (!body || !entry) return;
     const b = body.getBoundingClientRect();
     const r = entry.getBoundingClientRect();
-    setDropPos({
-      top: Math.max(0, r.bottom - b.top - 1),
-      left: 58,
-    });
+    const top = Math.max(0, r.bottom - b.top - 1);
+    setDropPos((prev) => (prev.top === top && prev.left === 58 ? prev : { top, left: 58 }));
   }
 
   function listForPick() {
@@ -587,22 +724,100 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
     setSel(items.length);
   }
 
+  function clearEditor() {
+    setEditingId(null);
+    setPending(null);
+    setNameLocked(false);
+    setItemQuery("");
+    setTyped("");
+    setQtyStr("1");
+    setListOpen(false);
+  }
+
   function moveRow(delta: number) {
     const last = items.length;
     const cur = sel < 0 || sel > last ? last : sel;
     const next = Math.min(last, Math.max(0, cur + delta));
-    setSel(next);
     if (next === last) {
-      if (pending) {
-        qtyRef.current?.focus();
-        qtyRef.current?.select();
-      } else itemRef.current?.focus();
-      gridBodyRef.current?.querySelector(".igrid-row.entry")?.scrollIntoView({ block: "nearest" });
-    } else {
-      const row = gridBodyRef.current?.querySelectorAll(".igrid-row:not(.entry)")[next] as HTMLElement | undefined;
-      row?.focus();
-      row?.scrollIntoView({ block: "nearest" });
+      clearEditor();
+      setSel(next);
+      requestAnimationFrame(() => {
+        itemRef.current?.focus();
+        gridBodyRef.current?.querySelector(".igrid-row.entry")?.scrollIntoView({ block: "nearest" });
+      });
+      return;
     }
+    startEdit(next);
+    requestAnimationFrame(() => {
+      const row = gridBodyRef.current?.querySelectorAll(".igrid-row:not(.entry)")[next] as HTMLElement | undefined;
+      row?.scrollIntoView({ block: "nearest" });
+    });
+  }
+
+  function startEdit(index: number) {
+    const it = items[index];
+    if (!it) {
+      setSel(items.length);
+      itemRef.current?.focus();
+      return;
+    }
+    const found = products.find((p) => p.id === it.product_id);
+    const product: Product = found
+      ? { ...found, base_price: it.unit_price }
+      : { id: it.product_id || it.id, name: it.name, station: it.station, base_price: it.unit_price, sku: it.sku || "" };
+    setEditingId(it.id);
+    setPending(product);
+    setItemQuery(it.name);
+    setTyped("");
+    setNameLocked(true);
+    setQtyStr(String(Math.trunc(it.qty) || 1));
+    setListOpen(false);
+    setPick(0);
+    setSel(index);
+    focusName();
+  }
+
+  function replaceItem(index: number, ch: string) {
+    const it = items[index];
+    if (!it) return;
+    const appending = editingId === it.id && !nameLockRef.current;
+    const next = appending ? `${queryRef.current}${ch}` : ch;
+    nameLockRef.current = false;
+    queryRef.current = next;
+    setEditingId(it.id);
+    setPending(null);
+    setItemQuery(next);
+    setTyped(next);
+    setNameLocked(false);
+    setQtyStr("1");
+    setListOpen(true);
+    setPick(0);
+    setSel(index);
+    requestAnimationFrame(() => {
+      const el = itemRef.current;
+      if (!el) return;
+      el.focus();
+      const n = el.value.length;
+      el.setSelectionRange(n, n);
+    });
+  }
+
+  function focusName() {
+    requestAnimationFrame(() => {
+      const el = itemRef.current;
+      if (!el) {
+        requestAnimationFrame(() => {
+          const again = itemRef.current;
+          again?.focus();
+          const n = again?.value.length ?? 0;
+          again?.setSelectionRange(n, n);
+        });
+        return;
+      }
+      el.focus();
+      const n = el.value.length;
+      el.setSelectionRange(n, n);
+    });
   }
 
   function focusQty() {
@@ -628,13 +843,15 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
     setNameLocked(true);
     setListOpen(false);
     setQtyStr("1");
+    if (!editingId) setSel(items.length);
     focusQty();
   }
 
   async function addItem(product: Product, qty = 1, next: "item" | "none" = "item") {
-    if (clubMode && !cardNo.trim()) {
+    const payCard = clubMode ? clubCard : checkCard;
+    if (clubMode && !payCard.trim()) {
       onMessage("Enter Card No first");
-      cardRef.current?.focus();
+      clubCardRef.current?.focus();
       return false;
     }
     if (!orderId) {
@@ -643,9 +860,9 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
       return false;
     }
     const n = Number.isInteger(qty) && qty !== 0 ? qty : parseQty(String(qty)) ?? 1;
-    if (n > 0 && cardNo.trim()) {
+    if (n > 0 && payCard.trim()) {
       try {
-        const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(cardNo.trim())}`);
+        const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(payCard.trim())}`);
         const usable = Number(b.balances?.usable ?? 0);
         const line = product.base_price * n;
         const running = (table?.running_total as number)
@@ -655,14 +872,20 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
           onMessage(`Insufficient amount  Card balance : ${(usable / 100).toFixed(2)}`);
           return false;
         }
-        setCardBal(amt(usable));
+        if (clubMode) setClubBal(amt(usable));
+        else setCheckBal(amt(usable));
       } catch {
         onMessage("Card not found");
         return false;
       }
     }
     try {
-      await api.post(`/api/orders/${orderId}/items`, { productId: product.id, qty: n, notes: remark || undefined });
+      await api.post(`/api/orders/${orderId}/items`, {
+        productId: product.id,
+        qty: n,
+        notes: remark || undefined,
+        outlet: deptOutlet(dept),
+      });
       setPending(null);
       setNameLocked(false);
       setItemQuery("");
@@ -686,13 +909,45 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
       return;
     }
     const n = parseQty(qtyStr) ?? 1;
+    if (editingId) {
+      const line = items.find((it) => it.id === editingId);
+      try {
+        const sameItem = !line || pending.id === line.product_id || pending.name === line.name;
+        if (line && !sameItem) {
+          await api.post(`/api/order-items/${editingId}/cancel`, { reason: "changed item" });
+          await api.post(`/api/orders/${orderId}/items`, {
+            productId: pending.id,
+            qty: n,
+            notes: remark || undefined,
+            outlet: deptOutlet(dept),
+          });
+        } else if (line && n !== line.qty) {
+          await api.post(`/api/order-items/${editingId}/qty`, { qty: n });
+        }
+        clearEditor();
+        if (orderId) {
+          const d = await loadOrder(orderId);
+          setSel((d.items ?? []).filter((it: OrderItem) => !it.kot_id).length);
+        }
+        onRefresh();
+        focusInput(itemRef.current);
+      } catch (e) {
+        onMessage(e instanceof Error ? e.message : "Could not update item");
+        return false;
+      }
+      return true;
+    }
     const ok = await addItem(pending, n, "item");
     if (ok) focusInput(itemRef.current);
   }
 
   async function printKot() {
     let id = orderId;
-    if (pending) {
+    if (pending && editingId) {
+      const ok = await commitQty();
+      if (!ok) return;
+      id = orderId;
+    } else if (pending) {
       const n = parseQty(qtyStr) ?? 1;
       const ok = await addItem(pending, n, "none");
       if (!ok) return;
@@ -704,17 +959,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
     }
     try {
       await api.post(`/api/orders/${id}/send-kot`);
-      await loadOrder(id);
-      setRemark("");
-      setPending(null);
-      setItemQuery("");
-      setTyped("");
-      setQtyStr("1");
-      setNameLocked(false);
-      setListOpen(false);
-      onRefresh();
       onMessage("KOT printed");
-      setFocusEntry((x) => x + 1);
+      goMainBilling();
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "KOT failed");
     }
@@ -740,14 +986,17 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
     setDetail(null);
     setTableId("");
     setTableCode("");
-    setCardNo("");
-    setCardBal("0.00");
+    setClubCard("");
+    setClubBal("0.00");
+    setCheckCard("");
+    setCheckBal("0.00");
     setGuest("");
     setMobile("");
     setSel(-1);
+    setEditingId(null);
     onRefresh();
     setTimeout(() => {
-      if (dept === "CLUB") cardRef.current?.focus();
+      if (dept === "CLUB") clubCardRef.current?.focus();
       else tableRef.current?.focus();
     }, 0);
   }
@@ -772,10 +1021,33 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
   }
 
   const runningForBill = tables.filter((t) => {
-    if ((t.outlet || "BAR") !== deptOutlet(dept)) return false;
+    const here = (t.outlet || "BAR") === deptOutlet(dept);
+    if (!here) return false;
     if (t.status === "AVAILABLE" || t.status === "PAYMENT_PENDING") return false;
     return ((t.running_total as number) || 0) > 0 || t.id === tableId;
   });
+
+  async function openReopenList() {
+    setListOpen(false);
+    try {
+      const invoices = await api.get<any[]>("/api/invoices");
+      const open = invoices.filter((i) => i.status === "UNPAID" || i.status === "PARTIAL");
+      const mapped: Table[] = [];
+      for (const inv of open) {
+        const t = tables.find((x) => x.id === inv.table_id);
+        if (!t || (t.outlet || "BAR") !== deptOutlet(dept)) continue;
+        if (!mapped.some((x) => x.id === t.id)) mapped.push(t);
+      }
+      if (!mapped.length) {
+        onMessage("No bill to reopen");
+        return;
+      }
+      setSettleTables(mapped);
+      setPickOpen("reopen");
+    } catch (e) {
+      onMessage(e instanceof Error ? e.message : "No bill to reopen");
+    }
+  }
 
   function prepareBill() {
     if (!runningForBill.length) {
@@ -864,6 +1136,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
       return ev.key === "F10" || ev.code === "F10" || ev.keyCode === 121;
     }
     function keys(e: KeyboardEvent) {
+      if (document.querySelector(".alert-dlg")) return;
       if (askExit) return;
       if (itemMasterOpen) {
         if (e.key.startsWith("F") && e.key.length > 1) e.preventDefault();
@@ -875,7 +1148,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
         e.stopPropagation();
         if (settleInv) return;
         if (billOrder) return;
-        if (pickOpen === "settle") return;
+        if (pickOpen === "settle" || pickOpen === "reopen") return;
         if (xferOpen || itemXferOpen) return;
         void openSettlement();
         return;
@@ -896,6 +1169,12 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
       if (e.altKey && e.key === "2") { e.preventDefault(); switchDept("RESTAURANT"); }
       if (e.altKey && e.key === "3") { e.preventDefault(); switchDept("NC"); }
       if (e.altKey && e.key === "4") { e.preventDefault(); switchDept("BAR"); }
+      if (e.ctrlKey && !e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+        e.preventDefault();
+        e.stopPropagation();
+        stepDept(e.key === "ArrowRight" ? 1 : -1);
+        return;
+      }
       if (e.key === "F3" || e.code === "F3") {
         e.preventDefault();
         e.stopPropagation();
@@ -909,37 +1188,157 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
         else requestExit();
       }
       if (e.key === "F1") { e.preventDefault(); onMessage("Complimentary"); }
-      if (e.key === "F4") { e.preventDefault(); onMessage("Packing"); }
+      if (e.key === "F4" || e.code === "F4") {
+        e.preventDefault();
+        e.stopPropagation();
+        setItemXferOpen(true);
+      }
       if (e.key === "F5" || e.key === "F6" || e.key === "F16") { e.preventDefault(); void printKot(); }
       if (e.key === "F7") { e.preventDefault(); onOpenView("kot-report"); }
       if (e.key === "F8") { e.preventDefault(); onOpenView("bill-report"); }
       if (e.key === "F12") { e.preventDefault(); onOpenView("settlement-report", deptOutlet(dept)); }
     }
-    function up(e: KeyboardEvent) {
-      if (isF11(e)) e.preventDefault();
-    }
-    window.addEventListener("keydown", keys, true);
+    keyHandler.current = keys;
+  });
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => keyHandler.current(e);
+    const up = (e: KeyboardEvent) => {
+      if (e.key === "F11" || e.code === "F11" || e.keyCode === 122) e.preventDefault();
+    };
+    window.addEventListener("keydown", down, true);
     window.addEventListener("keyup", up, true);
     return () => {
-      window.removeEventListener("keydown", keys, true);
+      window.removeEventListener("keydown", down, true);
       window.removeEventListener("keyup", up, true);
     };
-  });
+  }, []);
 
-  const dayStart = new Date();
-  if (dayStart.getHours() < 6) dayStart.setDate(dayStart.getDate() - 1);
-  dayStart.setHours(6, 0, 0, 0);
+  const dayStartMs = businessStartMs();
   const occupied = tables.filter((t) => {
     if ((t.outlet || "BAR") !== deptOutlet(dept)) return false;
     if (t.status === "AVAILABLE") return false;
     if (!(((t.running_total as number) || 0) > 0 || t.id === tableId)) return false;
-    if (t.session_opened_at && new Date(t.session_opened_at) < dayStart) return false;
+    if (t.session_opened_at && Date.parse(t.session_opened_at) < dayStartMs) return false;
     return true;
   });
   const estimateRows = occupied;
-  const listTotal = estimateRows.reduce((s, t) => s + ((t.running_total as number) || 0), 0);
+  const nameInput = (
+    <input
+      ref={itemRef}
+      autoComplete="off"
+      spellCheck={false}
+      tabIndex={4}
+      style={{ width: "100%" }}
+      value={nameLocked && pending ? pending.name : itemQuery}
+      onChange={(e) => {
+        if (nameLocked) return;
+        const v = e.target.value;
+        setItemQuery(v);
+        setTyped(v);
+        setPending(null);
+        setPick(0);
+        setListOpen(v.trim().length > 0);
+      }}
+      onFocus={() => {
+        if (nameLocked) return;
+        if (itemQuery.trim()) setListOpen(true);
+      }}
+      onKeyDown={(e) => {
+        if (nameLockRef.current && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          nameLockRef.current = false;
+          queryRef.current = e.key;
+          setNameLocked(false);
+          setPending(null);
+          setItemQuery(e.key);
+          setTyped(e.key);
+          setPick(0);
+          setListOpen(true);
+          return;
+        }
+        if (e.key === "Backspace" && nameLocked) {
+          e.preventDefault();
+          e.stopPropagation();
+          setNameLocked(false);
+          setTyped(itemQuery);
+          setListOpen(false);
+          return;
+        }
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (listOpen) movePick(e.key === "ArrowDown" ? 1 : -1);
+          else moveRow(e.key === "ArrowDown" ? 1 : -1);
+        } else if (e.key === "Enter" || e.key === "Tab") {
+          const list = listForPick();
+          const chosen = list[pick] ?? list[0];
+          if (chosen && (itemQuery.trim() || listOpen)) {
+            e.preventDefault();
+            e.stopPropagation();
+            chooseItem(chosen);
+          } else if (pending) {
+            e.preventDefault();
+            e.stopPropagation();
+            focusQty();
+          } else if (!itemQuery.trim()) {
+            e.preventDefault();
+            e.stopPropagation();
+            setListOpen(false);
+            remarkRef.current?.focus();
+          }
+        }
+      }}
+    />
+  );
+  const qtyInput = pending ? (
+    <input
+      ref={qtyRef}
+      autoComplete="off"
+      inputMode="numeric"
+      tabIndex={5}
+      value={qtyStr}
+      onChange={(e) => setQtyStr(e.target.value.replace(/[^\d-]/g, "").replace(/(?!^)-/g, ""))}
+      onFocus={(e) => e.target.select()}
+      onKeyDown={(e) => {
+        if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!editingId) movePending(-1);
+        } else if (e.key === "ArrowRight") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!editingId) movePending(1);
+        } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          e.preventDefault();
+          e.stopPropagation();
+          moveRow(e.key === "ArrowDown" ? 1 : -1);
+        } else if (e.key === "+" || e.key === "=") {
+          e.preventDefault();
+          bumpQty(1);
+        } else if (e.key === "-" || e.key === "_") {
+          e.preventDefault();
+          bumpQty(-1);
+        } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.stopPropagation();
+        } else if (e.key === "Backspace") {
+          const el = e.currentTarget;
+          const allSelected = el.selectionStart === 0 && el.selectionEnd === el.value.length;
+          if (allSelected || qtyStr === "1" || qtyStr === "-1" || qtyStr === "") {
+            e.preventDefault();
+            itemRef.current?.focus();
+          }
+        } else if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          void commitQty();
+        }
+      }}
+    />
+  ) : null;
+  const listTotal = estimateRows.reduce((s, t) => s + (t.net_total ?? t.running_total ?? 0), 0);
   const grand = items.reduce((s, i) => s + i.qty * i.unit_price, 0);
-  const tableEstimate = (table?.running_total as number)
+  const tableEstimate = (table?.net_total ?? table?.running_total ?? 0)
     || allItems.reduce((s, i) => s + i.qty * i.unit_price, 0)
     || grand;
   const showTableItems = Boolean(tableId) && table?.status !== "PAYMENT_PENDING";
@@ -950,87 +1349,98 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
         <div className="header-row">
           <div className="hdr">
             <label className="pair"><span className="lbl">Date</span>
-              <input className="win" value={formatWinDate(now)} readOnly tabIndex={-1} />
+              <WinClock />
             </label>
             <label className="pair"><span className="lbl">KOT No</span>
               <span className="kot-text">{kotNo}</span>
             </label>
-            {clubMode && (
-              <label className="pair"><span>Card No</span>
+            <div className="table-stack">
+              {clubMode && (
+                <label className="pair"><span>Card No</span>
+                  <input
+                    ref={clubCardRef}
+                    className="win green"
+                    value={clubCard}
+                    tabIndex={1}
+                    autoFocus
+                    title="Deduct amount"
+                    onChange={(e) => setClubCard(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter") return;
+                      e.preventDefault();
+                      const typedCard = e.currentTarget.value.trim();
+                      setClubCard(typedCard);
+                      if (!typedCard) {
+                        onMessage("Enter Card No first");
+                        clubCardRef.current?.focus();
+                        return;
+                      }
+                      void loadCard(typedCard, true).then((ok) => {
+                        if (!ok) {
+                          clubCardRef.current?.focus();
+                          clubCardRef.current?.select();
+                          return;
+                        }
+                        focusInput(tableRef.current);
+                      });
+                    }}
+                  />
+                </label>
+              )}
+              <label className="pair"><span>Table No</span>
+                <input
+                  ref={tableRef}
+                  className="win green"
+                  value={tableCode}
+                  tabIndex={clubMode ? 2 : 1}
+                  autoFocus={!clubMode}
+                  onChange={(e) => setTableCode(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void ensureOpenByCode(e.currentTarget.value);
+                    }
+                  }}
+                />
+              </label>
+            </div>
+          </div>
+
+          <div className="dept-box">
+            <div className="dept-yellow">
+              <span className="dept-name">{dept}</span>
+              <div className="card-pane">
+                <span>Card No. :</span>
                 <input
                   ref={cardRef}
-                  className="win green"
-                  value={cardNo}
-                  tabIndex={1}
-                  autoFocus
-                  onChange={(e) => setCardNo(e.target.value)}
+                  className="win"
+                  style={{ width: 70 }}
+                  value={checkCard}
+                  tabIndex={3}
+                  title="Balance check"
+                  onChange={(e) => setCheckCard(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key !== "Enter") return;
                     e.preventDefault();
                     const typedCard = e.currentTarget.value;
-                    void loadCard(typedCard).then((ok) => {
+                    void loadCard(typedCard, false).then((ok) => {
                       if (!ok) {
                         cardRef.current?.focus();
                         return;
                       }
-                      focusInput(tableRef.current);
+                      focusInput(orderId ? itemRef.current : tableRef.current);
                     });
                   }}
+                  onBlur={() => { if (checkCard.trim()) void loadCard(checkCard, false); }}
                 />
-              </label>
-            )}
-            <label className="pair"><span>Table No</span>
-              <input
-                ref={tableRef}
-                className="win green"
-                value={tableCode}
-                tabIndex={clubMode ? 2 : 1}
-                autoFocus={!clubMode}
-                onChange={(e) => setTableCode(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void ensureOpenByCode(e.currentTarget.value);
-                  }
-                }}
-              />
-            </label>
-          </div>
-
-          <div className="dept-box">
-            <div className="dept-yellow">{dept}</div>
+                <span>{checkBal}</span>
+              </div>
+            </div>
             <div className="dept-body">
               <button type="button" className={`dept-btn ${dept === "CLUB" ? "active" : ""}`} title="Alt+1" onClick={() => switchDept("CLUB")}>THE BOSS<br />CLUB</button>
-              <button type="button" className={`dept-btn ${dept === "RESTAURANT" ? "active" : ""}`} title="Alt+2" onClick={() => switchDept("RESTAURANT")}>RESTAURAN<br />T</button>
+              <button type="button" className={`dept-btn ${dept === "RESTAURANT" ? "active" : ""}`} title="Alt+2" onClick={() => switchDept("RESTAURANT")}>RESTAURANT</button>
               <button type="button" className={`dept-btn ${dept === "NC" ? "active" : ""}`} title="Alt+3" onClick={() => switchDept("NC")}>NC</button>
               <button type="button" className={`dept-btn ${dept === "BAR" ? "active" : ""}`} title="Alt+4" onClick={() => switchDept("BAR")}>BAR</button>
-              <div className="card-pane">
-                <span>Card No. :</span>
-                {clubMode ? (
-                  <input className="win" style={{ width: 70 }} value={cardNo} readOnly tabIndex={-1} />
-                ) : (
-                  <input
-                    ref={cardRef}
-                    className="win"
-                    style={{ width: 70 }}
-                    value={cardNo}
-                    tabIndex={3}
-                    title="Balance check"
-                    onChange={(e) => setCardNo(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key !== "Enter") return;
-                      e.preventDefault();
-                      const typedCard = e.currentTarget.value;
-                      void loadCard(typedCard).then((ok) => {
-                        if (!ok) return;
-                        focusInput(orderId ? itemRef.current : tableRef.current);
-                      });
-                    }}
-                    onBlur={() => { if (cardNo.trim()) void loadCard(cardNo); }}
-                  />
-                )}
-                <span>{cardBal}</span>
-              </div>
             </div>
           </div>
         </div>
@@ -1046,10 +1456,12 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
             {items.map((it, i) => (
               <div
                 key={it.id}
-                className="igrid-row"
                 tabIndex={0}
-                onClick={() => setSel(i)}
+                className={`igrid-row ${editingId === it.id ? "editing" : ""}`}
+                onClick={(e) => { setSel(i); e.currentTarget.focus(); }}
                 onKeyDown={(e) => {
+                  const target = e.target as HTMLElement;
+                  if (target.closest("input, textarea, select")) return;
                   if (e.key === "ArrowUp") {
                     e.preventDefault();
                     moveRow(-1);
@@ -1058,136 +1470,37 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
                     moveRow(1);
                   } else if (e.key === "Enter") {
                     e.preventDefault();
-                    itemRef.current?.focus();
+                    startEdit(i);
+                  } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                    e.preventDefault();
+                    replaceItem(i, e.key);
                   }
                 }}
               >
                 <div>{i + 1}</div>
-                <div className={`cell-name ${sel === i ? "sel" : ""}`}>{it.name}{it.notes ? ` (${it.notes})` : ""}</div>
-                <div>{amt(it.unit_price)}</div>
-                <div>{it.qty}</div>
+                <div className={`cell-name ${sel === i ? "sel" : ""}`}>
+                  {editingId === it.id ? nameInput : <>{it.name}{it.notes ? ` (${it.notes})` : ""}</>}
+                </div>
+                <div>{editingId === it.id ? (pending ? amt(pending.base_price) : "") : amt(it.unit_price)}</div>
+                <div className="cell-qty">{editingId === it.id ? qtyInput : it.qty}</div>
               </div>
             ))}
             <div className="igrid-row entry" onClick={() => setSel(items.length)}>
               <div>{items.length + 1}</div>
-              <div className={`cell-name ${listOpen || (pending && nameLocked) ? "sel" : ""}`}>
-                <input
-                  ref={itemRef}
-                  autoComplete="off"
-                  spellCheck={false}
-                  tabIndex={4}
-                  style={{ width: "100%" }}
-                  value={nameLocked && pending ? pending.name : itemQuery}
-                  onChange={(e) => {
-                    if (nameLocked) return;
-                    const v = e.target.value;
-                    setItemQuery(v);
-                    setTyped(v);
-                    setPending(null);
-                    setPick(0);
-                    setListOpen(v.trim().length > 0);
-                  }}
-                  onFocus={() => {
-                    if (nameLocked) return;
-                    if (itemQuery.trim()) setListOpen(true);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Backspace" && nameLocked) {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setNameLocked(false);
-                      setTyped(itemQuery);
-                      setListOpen(false);
-                      return;
-                    }
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      movePick(1);
-                    } else if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      movePick(-1);
-                    } else if (e.key === "Enter" || e.key === "Tab") {
-                      const list = listForPick();
-                      const chosen = list[pick] ?? list[0];
-                      if (chosen && (itemQuery.trim() || listOpen)) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        chooseItem(chosen);
-                      } else if (pending) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        focusQty();
-                      } else if (!itemQuery.trim()) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setListOpen(false);
-                        remarkRef.current?.focus();
-                      }
-                    }
-                  }}
-                />
+              <div className={`cell-name ${!editingId && (sel < 0 || sel >= items.length) && (listOpen || (pending && nameLocked)) ? "sel" : ""}`}>
+                {editingId ? null : nameInput}
               </div>
-              <div>{pending ? amt(pending.base_price) : ""}</div>
-              <div className="cell-qty">
-                {pending && (
-                  <input
-                    ref={qtyRef}
-                    autoComplete="off"
-                    inputMode="numeric"
-                    tabIndex={5}
-                    value={qtyStr}
-                    onChange={(e) => setQtyStr(e.target.value.replace(/[^\d-]/g, "").replace(/(?!^)-/g, ""))}
-                    onFocus={(e) => e.target.select()}
-                    onKeyDown={(e) => {
-                      if (e.key === "ArrowLeft") {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        movePending(-1);
-                      } else if (e.key === "ArrowRight") {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        movePending(1);
-                      } else if (e.key === "ArrowUp") {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        movePending(-1);
-                      } else if (e.key === "ArrowDown") {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        movePending(1);
-                      } else if (e.key === "+" || e.key === "=") {
-                        e.preventDefault();
-                        bumpQty(1);
-                      } else if (e.key === "-" || e.key === "_") {
-                        e.preventDefault();
-                        bumpQty(-1);
-                      } else if (e.key === "Backspace") {
-                        const el = e.currentTarget;
-                        const allSelected = el.selectionStart === 0 && el.selectionEnd === el.value.length;
-                        if (allSelected || qtyStr === "1" || qtyStr === "-1" || qtyStr === "") {
-                          e.preventDefault();
-                          itemRef.current?.focus();
-                        }
-                      } else if (e.key === "Enter") {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        void commitQty();
-                      }
-                    }}
-                  />
-                )}
-              </div>
+              <div>{!editingId && pending ? amt(pending.base_price) : ""}</div>
+              <div className="cell-qty">{editingId ? null : qtyInput}</div>
             </div>
-            {listOpen && listForPick().length > 0 && (
+                {listOpen && listForPick().length > 0 && (
               <div
                 ref={dropRef}
                 className="item-drop"
                 style={{ top: dropPos.top, left: dropPos.left }}
                 onMouseDown={(e) => e.preventDefault()}
               >
-                {listForPick().map((p, i) => (
+                {visiblePicks(listForPick(), pick).map(({ p, i }) => (
                   <div
                     key={p.id}
                     className={i === pick ? "on" : ""}
@@ -1216,38 +1529,38 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
               }
             }}
           /></div>
-          <div className="fn-row">
-            <button className="fn" onClick={prepareBill}>Prepare Bill (F10)</button>
-            <button className="fn" onClick={openSettlement}>Settlement (F11)</button>
-            <button
-              ref={kotBtnRef}
-              className="fn"
-              tabIndex={7}
-              onClick={() => void printKot()}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  void printKot();
-                }
-              }}
-            >Print KOT (F16)</button>
-            <button className="fn" onClick={printKot}>Save (F5)</button>
-            <button className="fn" onClick={() => onMessage("Packing")}>Packing (F4)</button>
-            <button className="fn" onClick={() => onMessage("Complimentary")}>F1 Complim.</button>
-            <button className="fn" onClick={() => onOpenView("kot")}>Hold KOT</button>
-            <button className="fn" onClick={requestExit}>Exit</button>
-          </div>
-          <div className="fn-row">
-            <button className="fn" onClick={() => onOpenView("kot-report")}>KOT Rep. (F7)</button>
-            <button className="fn" onClick={() => onOpenView("bill-report")}>Bill Rep. (F8)</button>
-            <button className="fn" onClick={() => onOpenView("settlement-report", deptOutlet(dept))}>S. Report (F12)</button>
-            <button className="fn" onClick={() => setItemXferOpen(true)}>Item transfer</button>
-            <button className="fn" onClick={() => setXferOpen(true)}>T. Transfer (F9)</button>
-            <button className="fn" onClick={() => setItemMasterOpen(true)}>Create Item (F3)</button>
-            <button className="fn" onClick={() => onOpenView("kot")}>Load Hold</button>
-            <button className="fn">Table</button>
-          </div>
+          <table className="fn-table">
+            <tbody>
+              <tr>
+                <td><button className="fn" onClick={prepareBill}>Prepare Bill (F10)</button></td>
+                <td><button className="fn" onClick={openSettlement}>Settlement (F11)</button></td>
+                <td><button
+                  ref={kotBtnRef}
+                  className="fn"
+                  tabIndex={7}
+                  onClick={() => void printKot()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      void printKot();
+                    }
+                  }}
+                >Print KOT (F5)</button></td>
+                <td><button className="fn" onClick={printKot}>Save (F5)</button></td>
+                <td><button className="fn" onClick={() => onMessage("Complimentary")}>F1 Complim.</button></td>
+                <td><button className="fn" onClick={requestExit}>Exit</button></td>
+              </tr>
+              <tr>
+                <td><button className="fn" onClick={() => onOpenView("kot-report")}>KOT Rep. (F7)</button></td>
+                <td><button className="fn" onClick={() => onOpenView("bill-report")}>Bill Rep. (F8)</button></td>
+                <td><button className="fn" onClick={() => onOpenView("settlement-report", deptOutlet(dept))}>S. Report (F12)</button></td>
+                <td><button className="fn" onClick={() => setItemXferOpen(true)}>Item transfer (F4)</button></td>
+                <td><button className="fn" onClick={() => setXferOpen(true)}>T. Transfer (F9)</button></td>
+                <td><button className="fn" onClick={() => setItemMasterOpen(true)}>Create Item (F3)</button></td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
 
@@ -1306,27 +1619,42 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
               <tbody>
                 {estimateRows.map((t) => {
                   const settle = t.status === "PAYMENT_PENDING";
-                  const cls = t.id === tableId ? "sel" : settle ? "settle" : "occ";
                   return (
                     <tr
                       key={t.id}
-                      className={cls}
+                      className={settle ? "settle" : "occ"}
                       tabIndex={0}
-                    onClick={() => {
-                      if (settle) void openSettleForTable(t);
-                      else void openBillForTable(t);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
+                      onClick={() => {
+                        if (settle) void openSettleForTable(t);
+                        else void openBillForTable(t);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter" && e.key !== " ") return;
                         e.preventDefault();
                         if (settle) void openSettleForTable(t);
                         else void openBillForTable(t);
-                      }
-                    }}
+                      }}
                     >
                       <td>{t.code}</td>
-                      <td>{settle ? amt((t.running_total as number) || 0) : Math.round(((t.running_total as number) || 0) / 100)}</td>
-                      <td>{settle ? "Settlement" : "Bill"}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="est-amt"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void openBillForTable(t);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key !== "Enter" && e.key !== " ") return;
+                            e.preventDefault();
+                            e.stopPropagation();
+                            void openBillForTable(t);
+                          }}
+                        >
+                          {settle ? amt(t.net_total ?? t.running_total ?? 0) : Math.round((t.net_total ?? t.running_total ?? 0) / 100)}
+                        </button>
+                      </td>
+                      <td className={settle ? "" : "bill"}>{settle ? "Settlement" : "Bill"}</td>
                     </tr>
                   );
                 })}
@@ -1379,8 +1707,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
       )}
       {pickOpen && (
         <PrepareTablePick
-          title={pickOpen === "settle" ? "Settlement" : "Prepare Bill"}
-          tables={pickOpen === "settle" ? settleTables : runningForBill}
+          title={pickOpen === "settle" ? "Settlement" : pickOpen === "reopen" ? "Reopen Bill" : "Prepare Bill"}
+          tables={pickOpen === "bill" ? runningForBill : settleTables}
           onPick={(t) => void (pickOpen === "settle" ? openSettleForTable(t) : openBillForTable(t))}
           onClose={() => setPickOpen(null)}
         />
@@ -1393,6 +1721,12 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
           waiter={waiter}
           guest={guest}
           mobile={mobile}
+          catalog={catalog}
+          onChanged={() => onRefresh()}
+          onReopen={() => {
+            setBillOrder(null);
+            void openReopenList();
+          }}
           onClose={() => setBillOrder(null)}
           onPrinted={(inv) => {
             onInvoice(inv);
@@ -1412,7 +1746,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
           invoiceId={settleInv.invoiceId}
           table={settleInv.table}
           outlet={deptOutlet(dept)}
-          cardNo={cardNo}
+          cardNo={clubMode ? clubCard : checkCard}
           onClose={() => setSettleInv(null)}
           onDone={() => {
             setSettleInv(null);
@@ -1429,7 +1763,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onInvoice, onMessa
       {itemMasterOpen && (
         <ItemMasterDialog
           onClose={() => setItemMasterOpen(false)}
-          onSaved={() => onRefresh()}
+          onSaved={() => onCatalog()}
         />
       )}
     </div>

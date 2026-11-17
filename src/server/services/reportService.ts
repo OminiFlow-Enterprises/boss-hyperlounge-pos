@@ -349,6 +349,8 @@ export function updateSettlement(
   if (!Number.isInteger(amount) || amount <= 0) throw new AppError("Enter settle amount");
   const account = String(input.account || "").trim();
   if (method === "CARD" && (!account || account === "Select" || account === "Cash.")) throw new AppError("Select bank name");
+  const remark = String(input.remark ?? "").trim();
+  if (!remark) throw new AppError("Enter Remark");
 
   return ctx.db.transaction(() => {
     const row = settlementRow(ctx, paymentId);
@@ -365,7 +367,7 @@ export function updateSettlement(
     const storedAccount = method === "CASH" ? (account || "Cash.") : method === "CARD" ? account : String(row.account || "");
     ctx.db
       .prepare("UPDATE payments SET method = ?, amount = ?, reference = ?, remark = ? WHERE id = ?")
-      .run(method, amount, storedAccount, String(input.remark ?? ""), paymentId);
+      .run(method, amount, storedAccount, remark, paymentId);
     applyPaidStatus(ctx, String(row.invoice_id), String(row.order_id), Number(row.bill_amount), others + amount);
     audit(ctx, "SETTLEMENT_UPDATE", "payment", paymentId, null, row.amount, { method, amount, account: storedAccount });
     return settlementRow(ctx, paymentId);
@@ -411,8 +413,10 @@ export function billReport(ctx: AppContext, from?: string, to?: string) {
   const range = dateRange(from, to);
   const rows = ctx.db
     .prepare(
-      `SELECT i.invoice_number, t.code AS table_no, i.grand_total, i.status, i.created_at,
-              i.food_total, i.drinks_total, cu.name AS guest
+      `SELECT i.invoice_number, COALESCE(NULLIF(t.name, ''), t.code) AS table_no, i.grand_total, i.status, i.created_at,
+              i.food_total, i.drinks_total, cu.name AS guest,
+              COALESCE(NULLIF(t.outlet, ''), 'BAR') AS outlet_name,
+              (SELECT p.id FROM payments p WHERE p.invoice_id = i.id ORDER BY p.created_at DESC LIMIT 1) AS payment_id
        FROM invoices i
        JOIN dining_tables t ON t.id = i.table_id
        LEFT JOIN customers cu ON cu.id = i.customer_id

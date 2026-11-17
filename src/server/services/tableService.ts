@@ -3,7 +3,8 @@ import { AppError } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
 import { businessDayStart, nextNumber, nowIso, uuid } from "../lib/ids.js";
-import type { SplitType, TableStatus } from "../../shared/types.js";
+import type { ServiceChargeMode, SplitType, TableStatus } from "../../shared/types.js";
+import { previewBill } from "./billingService.js";
 import { dayCloseHour } from "./settingsService.js";
 
 export function listFloors(ctx: AppContext) {
@@ -26,7 +27,7 @@ export function closeStaleDaySessions(ctx: AppContext) {
 export function listTables(ctx: AppContext) {
   closeStaleDaySessions(ctx);
   const cutoff = businessDayStart(new Date(), dayCloseHour(ctx)).toISOString();
-  return ctx.db
+  const rows = ctx.db
     .prepare(
       `SELECT t.*, f.name AS floor_name, s.customer_id, s.card_id, s.waiter_id, s.id AS session_id,
               s.opened_at AS session_opened_at, cu.name AS customer_name, c.card_number, st.name AS waiter_name,
@@ -44,7 +45,57 @@ export function listTables(ctx: AppContext) {
        LEFT JOIN staff st ON st.id = s.waiter_id
        ORDER BY f.sort_order, t.code`,
     )
-    .all(cutoff);
+    .all(cutoff) as Array<Record<string, unknown>>;
+  return withNetTotals(ctx, rows);
+}
+
+function withNetTotals(ctx: AppContext, rows: Array<Record<string, unknown>>) {
+  const orderStmt = ctx.db.prepare(
+    `SELECT id FROM orders
+      WHERE session_id = ? AND status IN ('OPEN','BILL_REQUESTED','SETTLING')
+      ORDER BY created_at DESC LIMIT 1`,
+  );
+  const invoiceStmt = ctx.db.prepare(
+    `SELECT discount, service_charge_pct, service_charge_mode, other_charges
+       FROM invoices
+      WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')
+      ORDER BY created_at DESC LIMIT 1`,
+  );
+  for (const row of rows) {
+    const sessionId = row.current_session_id as string | null;
+    const running = Number(row.running_total) || 0;
+    if (!sessionId) {
+      row.net_total = 0;
+      continue;
+    }
+    const order = orderStmt.get(sessionId) as { id: string } | undefined;
+    if (!order) {
+      row.net_total = running;
+      continue;
+    }
+    const inv = invoiceStmt.get(order.id) as
+      | { discount: number; service_charge_pct: number; service_charge_mode: string; other_charges: number }
+      | undefined;
+    try {
+      const bill = previewBill(
+        ctx,
+        order.id,
+        inv
+          ? {
+              discount: Number(inv.discount) || 0,
+              discountFrom: "amount",
+              serviceChargePct: Number(inv.service_charge_pct) || 0,
+              serviceChargeMode: (inv.service_charge_mode || "EXCLUSIVE") as ServiceChargeMode,
+              otherCharges: Number(inv.other_charges) || 0,
+            }
+          : {},
+      );
+      row.net_total = bill.grandTotal;
+    } catch {
+      row.net_total = running;
+    }
+  }
+  return rows;
 }
 
 export function findTableByCode(ctx: AppContext, code: string, outlet?: string) {
@@ -103,12 +154,8 @@ export function createTable(
       )
       .run(id, floor.id, code, input.name?.trim() || `Table ${code}`, input.capacity ?? 4, outlet);
   } catch {
-    const any = findTableByCode(ctx, code);
-    if (any && any.status === "AVAILABLE") {
-      ctx.db.prepare("UPDATE dining_tables SET outlet = ? WHERE id = ?").run(outlet, any.id);
-      return getTable(ctx, any.id);
-    }
-    if (any) throw new AppError(`Table ${code} already running in ${any.outlet || "BAR"}`);
+    const same = findTableByCode(ctx, code, outlet);
+    if (same) return getTable(ctx, same.id);
     throw new AppError(`Could not create table ${code}`);
   }
   audit(ctx, "TABLE_CREATE", "dining_table", id, null, null, { code, outlet });
@@ -138,7 +185,7 @@ export function openTable(
   if (table.status !== "AVAILABLE" && table.status !== "RESERVED") {
     throw new AppError(`Table ${table.code} is ${table.status}`);
   }
-  const outlet = input.outlet?.trim() || table.outlet || "BAR";
+  const outlet = table.outlet || input.outlet?.trim() || "BAR";
   const sessionId = uuid();
   const now = nowIso();
   ctx.db
@@ -148,8 +195,8 @@ export function openTable(
     )
     .run(sessionId, table.id, input.customerId ?? null, input.cardId ?? null, input.waiterId ?? ctx.actor.staffId, now, outlet);
   ctx.db
-    .prepare("UPDATE dining_tables SET status = 'OCCUPIED', current_session_id = ?, outlet = ? WHERE id = ?")
-    .run(sessionId, outlet, table.id);
+    .prepare("UPDATE dining_tables SET status = 'OCCUPIED', current_session_id = ? WHERE id = ?")
+    .run(sessionId, table.id);
   audit(ctx, "TABLE_OPEN", "dining_table", table.id, null, "AVAILABLE", "OCCUPIED");
   return { table: getTable(ctx, table.id), sessionId };
 }
@@ -262,16 +309,16 @@ export function listTableItems(ctx: AppContext, tableId: string) {
 }
 
 function openOrderOnTable(ctx: AppContext, tableId: string) {
+  const table = getTable(ctx, tableId);
+  if (!table.current_session_id) throw new AppError("Destination table has no running order");
   const existing = ctx.db
     .prepare(
       `SELECT id FROM orders
-        WHERE table_id = ? AND status IN ('OPEN','BILL_REQUESTED','SETTLING')
+        WHERE session_id = ? AND status IN ('OPEN','BILL_REQUESTED','SETTLING')
         ORDER BY created_at DESC LIMIT 1`,
     )
-    .get(tableId) as { id: string } | undefined;
+    .get(table.current_session_id) as { id: string } | undefined;
   if (existing) return existing;
-  const table = getTable(ctx, tableId);
-  if (!table.current_session_id) throw new AppError("Destination table has no running order");
   const id = uuid();
   ctx.db
     .prepare(
@@ -300,16 +347,32 @@ export function transferItems(
     to = getTable(ctx, to.id);
   }
   const destOrder = openOrderOnTable(ctx, to.id);
+  const movedKots = new Set<string>();
   for (const itemId of ids) {
     const row = ctx.db
       .prepare(
-        `SELECT oi.id FROM order_items oi
+        `SELECT oi.id, oi.kot_id FROM order_items oi
            JOIN orders o ON o.id = oi.order_id
           WHERE oi.id = ? AND o.table_id = ? AND oi.voided = 0`,
       )
-      .get(itemId, from.id) as { id: string } | undefined;
+      .get(itemId, from.id) as { id: string; kot_id: string | null } | undefined;
     if (!row) throw new AppError("Item is not on the current table");
     ctx.db.prepare("UPDATE order_items SET order_id = ? WHERE id = ?").run(destOrder.id, itemId);
+    if (row.kot_id) movedKots.add(row.kot_id);
+  }
+  const dest = getTable(ctx, to.id);
+  for (const kotId of movedKots) {
+    const left = ctx.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM order_items oi
+           JOIN orders o ON o.id = oi.order_id
+          WHERE oi.kot_id = ? AND o.table_id = ? AND oi.voided = 0`,
+      )
+      .get(kotId, from.id) as { n: number };
+    if (left.n || !dest.current_session_id) continue;
+    ctx.db
+      .prepare("UPDATE kots SET table_id = ?, session_id = ?, order_id = ? WHERE id = ?")
+      .run(dest.id, dest.current_session_id, destOrder.id, kotId);
   }
   const remaining = ctx.db
     .prepare(

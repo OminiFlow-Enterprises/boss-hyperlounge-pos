@@ -40,3 +40,11 @@ export function nextSequence(db: Database.Database, name: string, start = 10001)
 export function nextNumber(db: Database.Database, name: string, prefix: string, start = 10001): string {
   return `${prefix}${nextSequence(db, name, start)}`;
 }
+
+/** Next number that `nextNumber` will issue. Does not move the sequence. */
+export function peekNextNumber(db: Database.Database, name: string, prefix: string, start = 10001): string {
+  const row = db.prepare("SELECT value FROM sequences WHERE name = ?").get(name) as
+    | { value: number }
+    | undefined;
+  return `${prefix}${row ? row.value + 1 : start}`;
+}

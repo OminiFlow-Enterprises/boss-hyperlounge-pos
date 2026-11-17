@@ -197,7 +197,7 @@ export function seedFresh(db: Database.Database): SeedResult {
   ).run(uuid(), hh, products["BAR-WH"], rupeesToPaise(200));
 
   const settings: Array<[string, string]> = [
-    ["service_charge_pct", "5"],
+    ["service_charge_pct", "10"],
     ["service_charge_mode", "EXCLUSIVE"],
     ["venue_name", "BOSS Hyperlounge"],
     ["spend_bonus_first", "1"],

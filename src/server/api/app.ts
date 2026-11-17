@@ -208,6 +208,15 @@ export function createApp(options: CreateAppOptions) {
   app.post("/api/orders/:id/items", wrap((req, res) => {
     res.json(orders.addItem(req.ctx, { orderId: req.params.id, ...req.body }));
   }));
+  app.post("/api/orders/:id/bill-qty", wrap((req, res) => {
+    res.json(orders.setBillLineQty(req.ctx, req.params.id, req.body.ids ?? [], Number(req.body.qty)));
+  }));
+  app.post("/api/orders/:id/bill-item", wrap((req, res) => {
+    res.json(orders.setBillLineProduct(req.ctx, req.params.id, req.body.ids ?? [], req.body.productId, req.body.outlet));
+  }));
+  app.post("/api/orders/:id/bill-price", wrap((req, res) => {
+    res.json(orders.setBillLinePrice(req.ctx, req.params.id, req.body.ids ?? [], Math.round(Number(req.body.price))));
+  }));
   app.post("/api/orders/:id/send-kot", wrap(async (req, res) => {
     res.json(await orders.sendKot(req.ctx, req.params.id));
   }));

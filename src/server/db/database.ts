@@ -31,6 +31,41 @@ export function defaultDbPath(): string {
   return path.join(dir, "hyperlounge.sqlite");
 }
 
+function separateTableCodesByOutlet(db: Database.Database) {
+  if (!hasColumn(db, "dining_tables", "outlet")) return;
+  const indexes = db.prepare("PRAGMA index_list(dining_tables)").all() as Array<{ name: string; unique: number; origin: string }>;
+  const codeOnly = indexes.some((idx) => {
+    if (!idx.unique || idx.origin === "pk") return false;
+    const cols = db.prepare(`PRAGMA index_info('${idx.name.replace(/'/g, "''")}')`).all() as Array<{ name: string }>;
+    return cols.length === 1 && cols[0]?.name === "code";
+  });
+  if (!codeOnly) return;
+  db.pragma("foreign_keys = OFF");
+  const rebuild = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE dining_tables_new (
+        id TEXT PRIMARY KEY,
+        floor_id TEXT NOT NULL,
+        code TEXT NOT NULL,
+        name TEXT NOT NULL,
+        capacity INTEGER NOT NULL DEFAULT 4,
+        status TEXT NOT NULL DEFAULT 'AVAILABLE',
+        current_session_id TEXT,
+        merged_into_table_id TEXT,
+        outlet TEXT NOT NULL DEFAULT 'BAR',
+        UNIQUE(outlet, code)
+      );
+      INSERT INTO dining_tables_new (id, floor_id, code, name, capacity, status, current_session_id, merged_into_table_id, outlet)
+      SELECT id, floor_id, code, name, capacity, status, current_session_id, merged_into_table_id, COALESCE(outlet, 'BAR')
+      FROM dining_tables;
+      DROP TABLE dining_tables;
+      ALTER TABLE dining_tables_new RENAME TO dining_tables;
+    `);
+  });
+  rebuild();
+  db.pragma("foreign_keys = ON");
+}
+
 function hasColumn(db: Database.Database, table: string, column: string) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   return cols.some((c) => c.name === column);
@@ -46,6 +81,7 @@ export function migrate(db: Database.Database): void {
   if (hasColumn(db, "table_sessions", "id") && !hasColumn(db, "table_sessions", "outlet")) {
     db.exec("ALTER TABLE table_sessions ADD COLUMN outlet TEXT NOT NULL DEFAULT 'BAR'");
   }
+  separateTableCodesByOutlet(db);
   const productCols: Array<[string, string]> = [
     ["sales_group", "TEXT NOT NULL DEFAULT ''"],
     ["item_group", "TEXT NOT NULL DEFAULT ''"],

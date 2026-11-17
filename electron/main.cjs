@@ -1,5 +1,5 @@
-const { app, BrowserWindow, Menu, dialog } = require("electron");
-const { spawn } = require("node:child_process");
+const { app, BrowserWindow, Menu, dialog, globalShortcut } = require("electron");
+const { spawn, execFile, execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
@@ -110,9 +110,17 @@ function altDigit(input) {
   return ["1", "2", "3", "4"].includes(input.key) ? input.key : "";
 }
 
+function deptArrow(input) {
+  if (!input.control || input.alt || input.meta) return "";
+  if (input.code === "ArrowLeft" || input.key === "ArrowLeft") return "ArrowLeft";
+  if (input.code === "ArrowRight" || input.key === "ArrowRight") return "ArrowRight";
+  return "";
+}
+
 function isPosShortcut(input) {
   if (input.alt && (input.code === "F4" || input.key === "F4")) return false;
   if (POS_KEYS.has(input.code) || POS_KEYS.has(input.key)) return true;
+  if (deptArrow(input)) return true;
   return Boolean(altDigit(input));
 }
 
@@ -123,6 +131,144 @@ function modifiersOf(input) {
   if (input.alt) list.push("alt");
   if (input.meta) list.push("meta");
   return list;
+}
+
+function stepDeptFromShell(dir) {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  win.webContents
+    .executeJavaScript(`window.__bossStepDept && window.__bossStepDept(${dir})`)
+    .catch(() => {});
+}
+
+const SPACE_SHORTCUTS = ["79", "80", "81", "82"];
+let savedSpaceShortcuts = null;
+
+function symbolPlist() {
+  return path.join(app.getPath("home"), "Library/Preferences/com.apple.symbolichotkeys.plist");
+}
+
+function readSpaceShortcuts() {
+  const plist = symbolPlist();
+  const saved = {};
+  for (const id of SPACE_SHORTCUTS) {
+    try {
+      const raw = execFileSync("plutil", ["-extract", `AppleSymbolicHotKeys.${id}.enabled`, "raw", "-o", "-", plist], { encoding: "utf8" }).trim();
+      saved[id] = raw === "true";
+    } catch {
+      saved[id] = null;
+    }
+  }
+  return saved;
+}
+
+function writeSpaceShortcut(id, enabled) {
+  execFileSync("plutil", ["-replace", `AppleSymbolicHotKeys.${id}.enabled`, "-bool", enabled ? "true" : "false", symbolPlist()], { stdio: "ignore" });
+}
+
+function publishSpaceShortcuts() {
+  execFileSync("python3", ["-c", `
+import ctypes
+lib = ctypes.CDLL("/usr/lib/libnotify.dylib")
+for name in (b"com.apple.HIToolbox.SymbolicHotKeysChanged", b"AppleSymbolicHotKeysChanged"):
+    lib.notify_post(name)
+`], { stdio: "ignore" });
+}
+
+function holdSpaceShortcuts() {
+  if (process.platform !== "darwin") return;
+  try {
+    if (!savedSpaceShortcuts) savedSpaceShortcuts = readSpaceShortcuts();
+    for (const id of SPACE_SHORTCUTS) writeSpaceShortcut(id, false);
+    publishSpaceShortcuts();
+  } catch {}
+}
+
+function releaseSpaceShortcuts() {
+  if (process.platform !== "darwin" || !savedSpaceShortcuts) return;
+  try {
+    for (const id of SPACE_SHORTCUTS) {
+      const enabled = savedSpaceShortcuts[id];
+      if (enabled === null) continue;
+      writeSpaceShortcut(id, enabled);
+    }
+    publishSpaceShortcuts();
+  } catch {}
+}
+
+function plutilAsync(args) {
+  return new Promise((resolve) => {
+    execFile("plutil", args, { stdio: "ignore" }, () => resolve());
+  });
+}
+
+let spaceJob = Promise.resolve();
+
+function readShortcutEnabled(id) {
+  return new Promise((resolve) => {
+    execFile("plutil", ["-extract", `AppleSymbolicHotKeys.${id}.enabled`, "raw", "-o", "-", symbolPlist()], { encoding: "utf8" }, (err, stdout) => {
+      resolve(err ? null : String(stdout).trim() === "true");
+    });
+  });
+}
+
+function publishSpaceShortcutsAsync() {
+  return new Promise((resolve) => {
+    execFile("python3", ["-c", `
+import ctypes
+lib = ctypes.CDLL("/usr/lib/libnotify.dylib")
+for name in (b"com.apple.HIToolbox.SymbolicHotKeysChanged", b"AppleSymbolicHotKeysChanged"):
+    lib.notify_post(name)
+`], { stdio: "ignore" }, () => resolve());
+  });
+}
+
+function holdSpaceShortcutsAsync() {
+  if (process.platform !== "darwin") return;
+  spaceJob = spaceJob.then(async () => {
+    try {
+      if (!savedSpaceShortcuts) {
+        const saved = {};
+        for (const id of SPACE_SHORTCUTS) saved[id] = await readShortcutEnabled(id);
+        savedSpaceShortcuts = saved;
+      }
+      const plist = symbolPlist();
+      await Promise.all(SPACE_SHORTCUTS.map((id) => plutilAsync(["-replace", `AppleSymbolicHotKeys.${id}.enabled`, "-bool", "false", plist])));
+      await publishSpaceShortcutsAsync();
+    } catch {}
+  });
+}
+
+function releaseSpaceShortcutsAsync() {
+  if (process.platform !== "darwin" || !savedSpaceShortcuts) return;
+  const saved = savedSpaceShortcuts;
+  spaceJob = spaceJob.then(async () => {
+    try {
+      const plist = symbolPlist();
+      await Promise.all(SPACE_SHORTCUTS.map((id) => {
+        const enabled = saved[id];
+        if (enabled === null) return Promise.resolve();
+        return plutilAsync(["-replace", `AppleSymbolicHotKeys.${id}.enabled`, "-bool", enabled ? "true" : "false", plist]);
+      }));
+      await publishSpaceShortcutsAsync();
+    } catch {}
+  });
+}
+
+function registerDeptKeys() {
+  holdSpaceShortcutsAsync();
+  globalShortcut.register("Control+Left", () => stepDeptFromShell(-1));
+  globalShortcut.register("Control+Right", () => stepDeptFromShell(1));
+  globalShortcut.register("Control+Shift+Left", () => stepDeptFromShell(-1));
+  globalShortcut.register("Control+Shift+Right", () => stepDeptFromShell(1));
+}
+
+function unregisterDeptKeys() {
+  globalShortcut.unregister("Control+Left");
+  globalShortcut.unregister("Control+Right");
+  globalShortcut.unregister("Control+Shift+Left");
+  globalShortcut.unregister("Control+Shift+Right");
+  releaseSpaceShortcutsAsync();
 }
 
 function attachShortcuts(win) {
@@ -141,6 +287,11 @@ function attachShortcuts(win) {
     if (!isPosShortcut(input)) return;
     event.preventDefault();
     if (input.type !== "keyDown") return;
+    const arrow = deptArrow(input);
+    if (arrow) {
+      stepDeptFromShell(arrow === "ArrowRight" ? 1 : -1);
+      return;
+    }
     const digit = altDigit(input);
     if (digit) {
       const key = JSON.stringify(digit);
@@ -189,10 +340,13 @@ async function openPos() {
   mainWindow.setMenu(null);
   mainWindow.setMenuBarVisibility(false);
   attachShortcuts(mainWindow);
+  mainWindow.on("focus", registerDeptKeys);
+  mainWindow.on("blur", unregisterDeptKeys);
   mainWindow.once("ready-to-show", () => {
     mainWindow.maximize();
     mainWindow.show();
     mainWindow.focus();
+    registerDeptKeys();
   });
   await mainWindow.loadURL(`http://127.0.0.1:${port}/`);
 }
@@ -212,5 +366,10 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  globalShortcut.unregister("Control+Left");
+  globalShortcut.unregister("Control+Right");
+  globalShortcut.unregister("Control+Shift+Left");
+  globalShortcut.unregister("Control+Shift+Right");
+  releaseSpaceShortcuts();
   if (server && !server.killed) server.kill();
 });

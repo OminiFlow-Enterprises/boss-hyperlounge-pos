@@ -87,9 +87,11 @@ function priceWithTax(unitPrice: number, taxRate: number) {
   return unitPrice + Math.round((unitPrice * rate) / 100);
 }
 
+const PUNCH_OUTLETS = new Set(["BAR", "RESTAURANT", "NC", "THE BOSS CLUB"]);
+
 export function addItem(
   ctx: AppContext,
-  input: { orderId: string; productId: string; qty: number; notes?: string; at?: Date },
+  input: { orderId: string; productId: string; qty: number; notes?: string; at?: Date; outlet?: string },
 ) {
   assertPermission(ctx.actor.role, "CREATE_ORDER");
   if (!Number.isInteger(input.qty) || input.qty === 0) throw new AppError("Quantity must be a non-zero integer");
@@ -114,11 +116,12 @@ export function addItem(
     cardTypeId = card?.card_type_id ?? null;
   }
 
+  const punch = input.outlet && PUNCH_OUTLETS.has(input.outlet) ? input.outlet : order.outlet;
   const deptRate = ctx.db
     .prepare("SELECT enabled FROM product_dept_rates WHERE product_id = ? AND dept = ?")
-    .get(input.productId, order.outlet) as { enabled: number } | undefined;
+    .get(input.productId, punch) as { enabled: number } | undefined;
   if (deptRate && !deptRate.enabled) throw new AppError("Item is not sold in this department");
-  const price = resolvePrice(ctx, input.productId, cardTypeId, input.at ?? new Date(), order.outlet);
+  const price = resolvePrice(ctx, input.productId, cardTypeId, input.at ?? new Date(), punch);
   const notes = input.notes ?? "";
   const existing = ctx.db
     .prepare(
@@ -473,6 +476,123 @@ export function modifyItemQty(ctx: AppContext, itemId: string, newQty: number) {
   });
   audit(ctx, "KOT_ADDITION", "order_item", item.id, null, item.qty, newQty);
   return { item: ctx.db.prepare("SELECT * FROM order_items WHERE id = ?").get(item.id), kot };
+}
+
+/** Sets the billed quantity of a line without printing a KOT. Qty 0 removes the line. */
+export function setBillLineQty(ctx: AppContext, orderId: string, ids: string[], qty: number) {
+  assertPermission(ctx.actor.role, "CREATE_ORDER");
+  if (!Number.isInteger(qty) || qty < 0) throw new AppError("Quantity must be a whole number");
+  const order = ctx.db.prepare("SELECT status FROM orders WHERE id = ?").get(orderId) as { status: string } | undefined;
+  if (!order || order.status === "PAID" || order.status === "CANCELLED") throw new AppError("Bill cannot be changed");
+  const items = ids
+    .map((id) => ctx.db.prepare("SELECT * FROM order_items WHERE id = ? AND order_id = ? AND voided = 0").get(id, orderId) as
+      | { id: string; product_id: string; qty: number; kot_id: string | null }
+      | undefined)
+    .filter((row): row is { id: string; product_id: string; qty: number; kot_id: string | null } => !!row);
+  if (!items.length) throw new AppError("Item not found");
+  const sum = items.reduce((total, item) => total + item.qty, 0);
+  if (qty === sum) return { qty };
+
+  function apply(item: { id: string; product_id: string; qty: number; kot_id: string | null }, next: number) {
+    const delta = next - item.qty;
+    if (item.kot_id && delta > 0) deductStock(ctx, item.product_id, delta, `BILL:${item.id}`);
+    if (item.kot_id && delta < 0) restoreStock(ctx, item.product_id, -delta, `BILL:${item.id}`);
+    if (next <= 0) ctx.db.prepare("UPDATE order_items SET qty = 0, voided = 1, status = 'VOID' WHERE id = ?").run(item.id);
+    else ctx.db.prepare("UPDATE order_items SET qty = ? WHERE id = ?").run(next, item.id);
+  }
+
+  if (qty > sum) {
+    const last = items[items.length - 1];
+    apply(last, last.qty + (qty - sum));
+  } else {
+    let left = sum - qty;
+    for (let i = items.length - 1; i >= 0 && left > 0; i--) {
+      const take = Math.min(items[i].qty, left);
+      apply(items[i], items[i].qty - take);
+      left -= take;
+    }
+  }
+  audit(ctx, "BILL_QTY", "order", orderId, null, sum, qty);
+  return { qty };
+}
+
+/** Replaces the product on a bill line and keeps the quantity. Does not print a KOT. */
+export function setBillLineProduct(ctx: AppContext, orderId: string, ids: string[], productId: string, outlet?: string) {
+  assertPermission(ctx.actor.role, "CREATE_ORDER");
+  const order = ctx.db
+    .prepare(
+      `SELECT o.id, o.card_id, o.status, COALESCE(s.outlet, t.outlet, 'BAR') AS outlet
+         FROM orders o
+         JOIN dining_tables t ON t.id = o.table_id
+         LEFT JOIN table_sessions s ON s.id = o.session_id
+        WHERE o.id = ?`,
+    )
+    .get(orderId) as { id: string; card_id: string | null; status: string; outlet: string } | undefined;
+  if (!order || order.status === "PAID" || order.status === "CANCELLED") throw new AppError("Bill cannot be changed");
+  const items = ids
+    .map((id) => ctx.db.prepare("SELECT * FROM order_items WHERE id = ? AND order_id = ? AND voided = 0").get(id, orderId) as
+      | { id: string; product_id: string; qty: number; kot_id: string | null }
+      | undefined)
+    .filter((row): row is { id: string; product_id: string; qty: number; kot_id: string | null } => !!row);
+  if (!items.length) throw new AppError("Item not found");
+  if (!productId) throw new AppError("Select an item");
+  if (items.every((item) => item.product_id === productId)) return { id: items[0].id };
+
+  let cardTypeId: string | null = null;
+  if (order.card_id) {
+    const card = ctx.db.prepare("SELECT card_type_id FROM member_cards WHERE id = ?").get(order.card_id) as
+      | { card_type_id: string }
+      | undefined;
+    cardTypeId = card?.card_type_id ?? null;
+  }
+  const punch = outlet && PUNCH_OUTLETS.has(outlet) ? outlet : order.outlet;
+  const deptRate = ctx.db
+    .prepare("SELECT enabled FROM product_dept_rates WHERE product_id = ? AND dept = ?")
+    .get(productId, punch) as { enabled: number } | undefined;
+  if (deptRate && !deptRate.enabled) throw new AppError("Item is not sold in this department");
+  const price = resolvePrice(ctx, productId, cardTypeId, new Date(), punch);
+  const sum = items.reduce((total, item) => total + item.qty, 0);
+  let sent = 0;
+  for (const item of items) {
+    if (!item.kot_id) continue;
+    restoreStock(ctx, item.product_id, item.qty, `BILL:${item.id}`);
+    sent += item.qty;
+  }
+  const first = items[0];
+  ctx.db
+    .prepare(
+      `UPDATE order_items
+          SET product_id = ?, name = ?, station = ?, qty = ?, unit_price = ?, tax_rate = ?
+        WHERE id = ?`,
+    )
+    .run(productId, price.name, price.station, sum, price.unitPrice, price.taxRate, first.id);
+  if (sent > 0) deductStock(ctx, productId, sent, `BILL:${first.id}`);
+  for (const extra of items.slice(1)) {
+    ctx.db.prepare("UPDATE order_items SET qty = 0, voided = 1, status = 'VOID' WHERE id = ?").run(extra.id);
+  }
+  audit(ctx, "BILL_ITEM", "order", orderId, null, items.map((item) => item.product_id), productId);
+  return ctx.db.prepare("SELECT * FROM order_items WHERE id = ?").get(first.id);
+}
+
+/** Sets the billed price of a line, in paise, without printing a KOT. */
+export function setBillLinePrice(ctx: AppContext, orderId: string, ids: string[], unitPrice: number) {
+  assertPermission(ctx.actor.role, "CREATE_ORDER");
+  if (!Number.isInteger(unitPrice) || unitPrice < 0) throw new AppError("Enter a price");
+  const order = ctx.db.prepare("SELECT status FROM orders WHERE id = ?").get(orderId) as { status: string } | undefined;
+  if (!order || order.status === "PAID" || order.status === "CANCELLED") throw new AppError("Bill cannot be changed");
+  const items = ids
+    .map((id) => ctx.db.prepare("SELECT id, unit_price FROM order_items WHERE id = ? AND order_id = ? AND voided = 0").get(id, orderId) as
+      | { id: string; unit_price: number }
+      | undefined)
+    .filter((row): row is { id: string; unit_price: number } => !!row);
+  if (!items.length) throw new AppError("Item not found");
+  if (items.every((item) => item.unit_price === unitPrice)) return { unitPrice };
+  const before = items[0].unit_price;
+  for (const item of items) {
+    ctx.db.prepare("UPDATE order_items SET unit_price = ? WHERE id = ?").run(unitPrice, item.id);
+  }
+  audit(ctx, "BILL_PRICE", "order", orderId, null, before, unitPrice);
+  return { unitPrice };
 }
 
 export async function reprintKot(ctx: AppContext, kotId: string) {

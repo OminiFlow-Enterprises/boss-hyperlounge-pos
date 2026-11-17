@@ -3,7 +3,7 @@ import { formatINR } from "../../shared/money.js";
 import { AppError, InsufficientBalanceError } from "../lib/errors.js";
 import { audit, enqueueSync } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
-import { idempotencyKey, nextNumber, nextSequence, nowIso, uuid } from "../lib/ids.js";
+import { idempotencyKey, nextNumber, nextSequence, nowIso, peekNextNumber, uuid } from "../lib/ids.js";
 import type { PaymentLine, ServiceChargeMode } from "../../shared/types.js";
 import { purchaseOnCard, refundToCard, getCard } from "./cardService.js";
 import { closeTable, getTable, setTableStatus } from "./tableService.js";
@@ -25,6 +25,7 @@ export interface BillPreview {
   grandTotal: number;
   items: Array<{
     id: string;
+    ids: string[];
     name: string;
     station: string;
     qty: number;
@@ -36,6 +37,7 @@ export interface BillPreview {
   totalQty: number;
   discountPct: number;
   roundOff: number;
+  invoiceNumber: string;
 }
 
 export function previewBill(
@@ -44,6 +46,10 @@ export function previewBill(
   options: {
     discount?: number;
     discountPct?: number;
+    /** `amount` uses `discount` paise. Anything else uses `discountPct` on items that are not excluded. */
+    discountFrom?: "amount" | "percent";
+    /** Order item ids that take no discount. */
+    excludeItemIds?: string[];
     otherCharges?: number;
     serviceChargePct?: number;
     serviceChargeMode?: ServiceChargeMode;
@@ -64,6 +70,7 @@ export function previewBill(
     )
     .all(orderId) as Array<{
     id: string;
+    product_id: string;
     name: string;
     station: string;
     qty: number;
@@ -73,12 +80,14 @@ export function previewBill(
   }>;
   if (!items.length) throw new AppError("Bill has no items");
 
-  const mapped = items.map((i) => {
+  const mapped = groupSameItems(items.map((i) => {
     const lineTax = Number(i.tax_rate);
     const tax_rate = Number.isFinite(lineTax) ? lineTax : Number(i.product_tax_rate) || 0;
     const amount = i.qty * i.unit_price;
     return {
       id: i.id,
+      ids: [i.id],
+      product_id: i.product_id,
       name: i.name,
       station: i.station,
       qty: i.qty,
@@ -87,18 +96,26 @@ export function previewBill(
       tax_rate,
       tax: Math.round(amount * (tax_rate / 100)),
     };
-  });
+  }));
   const foodTotal = mapped.filter((i) => i.station === "KITCHEN").reduce((s, i) => s + i.amount, 0);
   const drinksTotal = mapped.filter((i) => i.station === "BAR").reduce((s, i) => s + i.amount, 0);
   const subtotal = foodTotal + drinksTotal;
   const tax = mapped.reduce((s, i) => s + i.tax, 0);
+  const excluded = new Set(options.excludeItemIds ?? []);
+  const discountable = mapped.filter((i) => !i.ids.some((id) => excluded.has(id))).reduce((s, i) => s + i.amount, 0);
   const configured = getServiceCharge(ctx);
   const pct = options.serviceChargePct ?? configured.pct;
   const mode = options.serviceChargeMode ?? configured.mode;
-  const discountPct = options.discountPct ?? (subtotal ? ((options.discount ?? 0) / subtotal) * 100 : 0);
-  const discount = options.discount != null
-    ? options.discount
-    : Math.round(subtotal * ((options.discountPct ?? 0) / 100));
+  const fromAmount = options.discountFrom === "amount" || (options.discount != null && options.discountPct == null && options.discountFrom !== "percent");
+  let discount: number;
+  let discountPct: number;
+  if (fromAmount) {
+    discount = Math.max(0, Math.min(Math.round(options.discount ?? 0), discountable));
+    discountPct = discountable ? Math.round((discount / discountable) * 10000) / 100 : 0;
+  } else {
+    discountPct = Math.max(0, options.discountPct ?? 0);
+    discount = Math.min(discountable, Math.round((discountable * discountPct) / 100));
+  }
   const otherCharges = options.otherCharges ?? 0;
   const afterDiscount = Math.max(0, subtotal - discount);
   const serviceCharge =
@@ -126,13 +143,49 @@ export function previewBill(
     totalQty: mapped.reduce((s, i) => s + i.qty, 0),
     grandTotal,
     items: mapped,
+    invoiceNumber: openInvoiceNumber(ctx, orderId),
   };
+}
+
+function groupSameItems<T extends { id: string; ids: string[]; product_id: string; name: string; unit_price: number; tax_rate: number; qty: number; amount: number; tax: number }>(
+  lines: T[],
+): T[] {
+  const groups = new Map<string, T>();
+  for (const line of lines) {
+    const key = `${line.product_id}|${line.unit_price}|${line.tax_rate}|${line.name}`;
+    const found = groups.get(key);
+    if (!found) {
+      groups.set(key, { ...line, ids: [line.id] });
+      continue;
+    }
+    found.qty += line.qty;
+    found.amount += line.amount;
+    found.tax += line.tax;
+    found.ids.push(line.id);
+  }
+  return [...groups.values()].filter((line) => line.qty !== 0);
+}
+
+function openInvoiceNumber(ctx: AppContext, orderId: string): string {
+  const existing = ctx.db
+    .prepare("SELECT invoice_number FROM invoices WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')")
+    .get(orderId) as { invoice_number: string } | undefined;
+  if (existing) return existing.invoice_number;
+  return peekNextNumber(ctx.db, "invoice", "INV-");
 }
 
 export function generateInvoice(
   ctx: AppContext,
   orderId: string,
-  options: { discount?: number; discountPct?: number; otherCharges?: number; serviceChargePct?: number; reason?: string } = {},
+  options: {
+    discount?: number;
+    discountPct?: number;
+    discountFrom?: "amount" | "percent";
+    excludeItemIds?: string[];
+    otherCharges?: number;
+    serviceChargePct?: number;
+    reason?: string;
+  } = {},
 ) {
   assertPermission(ctx.actor.role, "SETTLE_BILL");
   const preview = previewBill(ctx, orderId, options);
@@ -145,14 +198,61 @@ export function generateInvoice(
 
   const existing = ctx.db
     .prepare("SELECT * FROM invoices WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')")
-    .get(orderId);
-  if (existing) return existing;
+    .get(orderId) as { id: string; status: string } | undefined;
 
   const bill = preview;
   const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId) as {
     customer_id: string | null;
     card_id: string | null;
   };
+  function writeItems(invoiceId: string) {
+    for (const item of bill.items) {
+      ctx.db
+        .prepare(
+          `INSERT INTO invoice_items (id, invoice_id, order_item_id, product_id, name, station, qty, unit_price, amount)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          uuid(),
+          invoiceId,
+          item.id,
+          (ctx.db.prepare("SELECT product_id FROM order_items WHERE id = ?").get(item.id) as { product_id: string }).product_id,
+          item.name,
+          item.station,
+          item.qty,
+          item.unit_price,
+          item.amount,
+        );
+    }
+  }
+
+  if (existing) {
+    const paid = (ctx.db.prepare("SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE invoice_id = ?").get(existing.id) as { paid: number }).paid;
+    if (paid > bill.grandTotal) throw new AppError("Bill amount is below the amount already settled");
+    ctx.db
+      .prepare(
+        `UPDATE invoices SET
+           food_total = ?, drinks_total = ?, service_charge = ?, service_charge_mode = ?, service_charge_pct = ?,
+           discount = ?, tax = ?, other_charges = ?, grand_total = ?
+         WHERE id = ?`,
+      )
+      .run(
+        bill.foodTotal,
+        bill.drinksTotal,
+        bill.serviceCharge,
+        bill.serviceChargeMode,
+        bill.serviceChargePct,
+        bill.discount,
+        bill.tax,
+        bill.otherCharges,
+        bill.grandTotal,
+        existing.id,
+      );
+    ctx.db.prepare("DELETE FROM invoice_items WHERE invoice_id = ?").run(existing.id);
+    writeItems(existing.id);
+    return ctx.db.prepare("SELECT * FROM invoices WHERE id = ?").get(existing.id);
+  }
+
   const id = uuid();
   const invoiceNumber = nextNumber(ctx.db, "invoice", "INV-");
   ctx.db
@@ -183,24 +283,7 @@ export function generateInvoice(
       ctx.actor.staffId,
       nowIso(),
     );
-  for (const item of bill.items) {
-    ctx.db
-      .prepare(
-        `INSERT INTO invoice_items (id, invoice_id, order_item_id, product_id, name, station, qty, unit_price, amount)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        uuid(),
-        id,
-        item.id,
-        (ctx.db.prepare("SELECT product_id FROM order_items WHERE id = ?").get(item.id) as { product_id: string }).product_id,
-        item.name,
-        item.station,
-        item.qty,
-        item.unit_price,
-        item.amount,
-      );
-  }
+  writeItems(id);
   ctx.db.prepare("UPDATE orders SET status = 'SETTLING' WHERE id = ?").run(orderId);
   setTableStatus(ctx, bill.tableId, "PAYMENT_PENDING");
   return ctx.db.prepare("SELECT * FROM invoices WHERE id = ?").get(id);

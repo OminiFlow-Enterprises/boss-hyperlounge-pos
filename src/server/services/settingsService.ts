@@ -25,7 +25,7 @@ export function getAllSettings(ctx: AppContext): Record<string, string> {
 }
 
 export function getServiceCharge(ctx: AppContext): { pct: number; mode: ServiceChargeMode } {
-  const pct = Number(getSetting(ctx, "service_charge_pct", "5"));
+  const pct = Number(getSetting(ctx, "service_charge_pct", "10"));
   const mode = getSetting(ctx, "service_charge_mode", "EXCLUSIVE") as ServiceChargeMode;
   return { pct: Number.isFinite(pct) ? pct : 0, mode: mode === "INCLUSIVE" ? "INCLUSIVE" : "EXCLUSIVE" };
 }
