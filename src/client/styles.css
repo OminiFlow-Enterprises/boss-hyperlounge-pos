@@ -422,6 +422,15 @@ label.chk input { width: 13px; height: 13px; margin: 0; }
   table-layout: auto;
 }
 .fn-table td { padding: 0; vertical-align: middle; width: 1%; }
+.fn-table td.exit-cell { vertical-align: bottom; }
+.club-card-bal {
+  color: #c00;
+  font-weight: 700;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.2;
+  margin-bottom: 2px;
+}
 .fn {
   background: var(--face);
   border: 1px solid #adadad;
@@ -1088,6 +1097,7 @@ table.data tr.grp td { background: #ffc0cb; font-weight: 700; }
 .xfer-dlg,
 .item-xfer-dlg,
 .im-dlg,
+.kot-add-dlg,
 .prep-pick {
   position: fixed;
   left: 50%;
@@ -1096,6 +1106,104 @@ table.data tr.grp td { background: #ffc0cb; font-weight: 700; }
   margin: 0;
   transform: translate(-50%, -50%);
 }
+
+.kot-add-dlg {
+  z-index: 120;
+  width: min(1180px, calc(100vw - 24px));
+  height: min(640px, calc(100vh - 48px));
+  background: var(--face);
+  border: 1px solid #404040;
+  display: flex;
+  flex-direction: column;
+  box-shadow: none;
+}
+.kot-add-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+}
+.kot-add-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 4px 4px 2px 6px;
+}
+.kot-add-hdr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 6px 4px 4px;
+  font-weight: 700;
+}
+.kot-add-hdr .pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.kot-add-hdr .pair .win { width: 150px; }
+.kot-add-hdr .pair .win.green { width: 120px; }
+.kot-add-hdr .kot-text {
+  min-width: 48px;
+  height: 26px;
+  line-height: 26px;
+  font-weight: 700;
+}
+.kot-comp {
+  background: #ffff66 !important;
+  font-weight: 700;
+  min-width: 140px;
+  height: 28px;
+}
+.kot-add-grid {
+  flex: 1;
+  min-height: 0;
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #808080;
+  background: var(--grid);
+}
+.kot-add-head,
+.kot-add-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1.4fr) 88px 64px minmax(0, 1fr);
+  width: 100%;
+}
+.kot-add-head {
+  background: #fff;
+  border-bottom: 1px solid #808080;
+  flex: 0 0 28px;
+  height: 28px;
+  font-weight: 700;
+}
+.kot-add-head > div,
+.kot-add-row > div {
+  border-right: 1px solid #b0b0b0;
+  padding: 2px 4px;
+  height: 26px;
+  line-height: 22px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.kot-add-rows {
+  flex: 1;
+  overflow: auto;
+  background: var(--grid);
+}
+.kot-add-row { height: 26px; font-weight: 700; }
+.kot-add-row.on > div { background: var(--blue); color: #fff; }
+.kot-add-row .num { text-align: right; }
+.kot-add-row .name { color: #0000cc; }
+.kot-add-row.on .name { color: #fff; }
+.kot-add-side {
+  border-left: 1px solid #808080;
+  height: 100%;
+}
+.kot-add-dlg .fn-box { margin-top: 12px; }
+.kot-add-dlg .fn-table .fn { min-width: 108px; }
 
 .staff-mark {
   position: fixed;

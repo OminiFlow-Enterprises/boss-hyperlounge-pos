@@ -117,4 +117,45 @@ describe("item master", () => {
     expect(kotDal?.price).toBe(rupeesToPaise(118));
     expect(kotWater?.price).toBe(rupeesToPaise(20));
   });
+
+  it("bill Tax(%) for an old seed line matches the sales-group catalog item with the same name", () => {
+    const { ctx } = createTestApp();
+    const cashier = ctx("cashier");
+    const seed = cashier.db
+      .prepare(
+        `SELECT id, tax_rate, sales_group FROM products
+          WHERE name = 'KINGFISHER PREMIUM BUCKET' AND IFNULL(sales_group,'') = '' LIMIT 1`,
+      )
+      .get() as { id: string; tax_rate: number; sales_group: string };
+    expect(seed.tax_rate).toBe(18);
+
+    // Imported-style catalog row (what a new add uses)
+    createItem(cashier, {
+      name: "KINGFISHER PREMIUM BUCKET",
+      sku: "9407",
+      salesGroup: "VAT @ 24% - VAT@24%",
+      itemGroup: "BAR",
+      rates: [{ dept: "BAR", rate: 1699, enabled: true }],
+    });
+
+    const waiter = ctx("waiter");
+    const table = getTableByCode(waiter, "08");
+    openTable(waiter, { tableId: table.id, outlet: "BAR" });
+    const order = createOrder(waiter, table.id) as { id: string };
+    cashier.db
+      .prepare(
+        `INSERT INTO order_items (id, order_id, product_id, name, station, qty, unit_price, tax_rate, status, voided)
+         VALUES ('line-kf', ?, ?, 'KINGFISHER PREMIUM BUCKET', 'BAR', 1, ?, 18, 'PENDING', 0)`,
+      )
+      .run(order.id, seed.id, rupeesToPaise(900));
+
+    const bill = previewBill(cashier, order.id);
+    expect(bill.items.find((i) => i.name === "KINGFISHER PREMIUM BUCKET")?.tax_rate).toBe(24);
+    const after = cashier.db.prepare("SELECT tax_rate, sales_group FROM products WHERE id = ?").get(seed.id) as {
+      tax_rate: number;
+      sales_group: string;
+    };
+    expect(after.tax_rate).toBe(18);
+    expect(after.sales_group).toBe("");
+  });
 });

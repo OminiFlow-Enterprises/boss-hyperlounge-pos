@@ -390,22 +390,121 @@ export function deleteSettlement(ctx: AppContext, paymentId: string) {
   })();
 }
 
+function stampKotDate(iso?: string) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${String(d.getDate()).padStart(2, "0")} ${months[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+function stampKotTime(iso?: string) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  let h = d.getHours();
+  const ap = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  return `${String(h).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")} ${ap}`;
+}
+
 export function kotReport(ctx: AppContext, from?: string, to?: string, station?: string) {
   assertPermission(ctx.actor.role, "VIEW_REPORTS");
   const range = dateRange(from, to);
-  let sql = `SELECT k.kot_number, t.code AS table_no, k.station, k.status, k.created_at,
-                    k.type, GROUP_CONCAT(ki.qty || ' x ' || ki.name, ', ') AS items
+  let sql = `SELECT k.id, k.kot_number, '' AS manual_kot,
+                    COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
+                    k.created_at, k.notes AS kot_remark, k.station, k.status, k.type,
+                    COALESCE(s.name, '') AS steward,
+                    (SELECT i.invoice_number FROM invoices i WHERE i.order_id = k.order_id ORDER BY i.created_at DESC LIMIT 1) AS bill_no,
+                    (SELECT COALESCE(SUM(oi.unit_price * ki2.qty), 0)
+                       FROM kot_items ki2
+                       LEFT JOIN order_items oi ON oi.id = ki2.order_item_id
+                      WHERE ki2.kot_id = k.id) AS net_amount
              FROM kots k
              JOIN dining_tables t ON t.id = k.table_id
-             LEFT JOIN kot_items ki ON ki.kot_id = k.id
+             LEFT JOIN staff s ON s.id = k.waiter_id
              WHERE k.created_at BETWEEN ? AND ?`;
   const args: string[] = [range.from, range.to];
   if (station) {
     sql += " AND k.station = ?";
     args.push(station);
   }
-  sql += " GROUP BY k.id ORDER BY k.created_at";
-  return { from: range.start, to: range.end, rows: ctx.db.prepare(sql).all(...args) };
+  sql += " ORDER BY k.created_at";
+  const rows = (ctx.db.prepare(sql).all(...args) as Array<Record<string, unknown>>).map((r) => {
+    const created = String(r.created_at || "");
+    return {
+      ...r,
+      kot_date: stampKotDate(created),
+      kot_time: stampKotTime(created),
+      user_id: String(r.station || ""),
+    };
+  });
+  return { from: range.start, to: range.end, rows };
+}
+
+export function kotDetail(ctx: AppContext, kotKey: string) {
+  assertPermission(ctx.actor.role, "VIEW_REPORTS");
+  const key = String(kotKey || "").trim();
+  const kot = ctx.db
+    .prepare(
+      `SELECT k.id, k.kot_number, k.notes, k.station, k.status, k.type, k.created_at, k.order_id, k.table_id,
+              COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
+              t.code AS table_code,
+              COALESCE(s.name, '') AS waiter,
+              (SELECT i.invoice_number FROM invoices i WHERE i.order_id = k.order_id ORDER BY i.created_at DESC LIMIT 1) AS bill_no
+       FROM kots k
+       JOIN dining_tables t ON t.id = k.table_id
+       LEFT JOIN staff s ON s.id = k.waiter_id
+       WHERE k.id = ? OR k.kot_number = ?`,
+    )
+    .get(key, key) as Record<string, unknown> | undefined;
+  if (!kot) throw new AppError("KOT not found", 404);
+
+  const items = ctx.db
+    .prepare(
+      `SELECT ki.id, ki.name, ki.qty, COALESCE(ki.notes, '') AS remark,
+              COALESCE(oi.unit_price, 0) AS rate,
+              COALESCE(p.sku, '') AS code
+       FROM kot_items ki
+       LEFT JOIN order_items oi ON oi.id = ki.order_item_id
+       LEFT JOIN products p ON p.id = ki.product_id
+       WHERE ki.kot_id = ?
+       ORDER BY ki.rowid`,
+    )
+    .all(String(kot.id)) as Array<{ id: string; name: string; qty: number; remark: string; rate: number; code: string }>;
+
+  const tableItems = ctx.db
+    .prepare(
+      `SELECT COALESCE(p.sku, '') AS code, oi.name, SUM(oi.qty) AS qty,
+              SUM(oi.qty * oi.unit_price) AS amount
+       FROM order_items oi
+       LEFT JOIN products p ON p.id = oi.product_id
+       WHERE oi.order_id = ? AND oi.voided = 0
+       GROUP BY oi.product_id, oi.name, p.sku
+       ORDER BY MIN(oi.rowid)`,
+    )
+    .all(String(kot.order_id)) as Array<{ code: string; name: string; qty: number; amount: number }>;
+
+  const netAmount = items.reduce((s, i) => s + i.rate * i.qty, 0);
+  const totalAmount = tableItems.reduce((s, i) => s + Number(i.amount || 0), 0);
+
+  return {
+    ...kot,
+    date_label: (() => {
+      const iso = String(kot.created_at || "");
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return iso;
+      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      let h = d.getHours();
+      const ap = h >= 12 ? "PM" : "AM";
+      h = h % 12 || 12;
+      return `${String(d.getDate()).padStart(2, "0")}-${months[d.getMonth()]}-${d.getFullYear()} ${String(h).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")} ${ap}`;
+    })(),
+    items,
+    table_items: tableItems,
+    net_amount: netAmount,
+    total_amount: totalAmount,
+  };
 }
 
 export function billReport(ctx: AppContext, from?: string, to?: string) {

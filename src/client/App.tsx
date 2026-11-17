@@ -40,8 +40,9 @@ function deptOutlet(d: Dept) {
 }
 type Product = {
   id: string; name: string; station: string; base_price: number; sku: string;
+  tax_rate?: number;
   item_group?: string;
-  dept_rates?: Record<string, { rate: number; enabled: number }>;
+  dept_rates?: Record<string, { rate: number; enabled: number; inclusive?: number }>;
 };
 
 const TAB_ITEM_GROUPS: Record<Dept, string[] | null> = {
@@ -51,13 +52,27 @@ const TAB_ITEM_GROUPS: Record<Dept, string[] | null> = {
   NC: null,
 };
 
+/** IBS inclusive dept rate → exclusive punch price (90 @ 18% → 76.27). */
+function exclusiveRate(paise: number, taxRate: number) {
+  const tax = Number(taxRate) || 0;
+  if (tax <= 0) return Math.round(paise);
+  return Math.round(paise / (1 + tax / 100));
+}
+
 function priceForOutlet(p: Product, outletName: string) {
   const row = p.dept_rates?.[outletName];
   if (!row || Number(row.enabled) === 0) return p.base_price;
-  return Number(row.rate) > 0 ? Number(row.rate) : p.base_price;
+  const raw = Number(row.rate) > 0 ? Number(row.rate) : p.base_price;
+  if (Number(row.inclusive) !== 0) return exclusiveRate(raw, Number(p.tax_rate) || 0);
+  return raw;
 }
 
 function onThisTab(p: Product, dept: Dept) {
+  const outletName = deptOutlet(dept);
+  const rate = p.dept_rates?.[outletName];
+  // Imported IBS rates win: FOOD items with BAR enabled must show on BAR, etc.
+  if (rate) return Number(rate.enabled) !== 0;
+
   const group = (p.item_group || "").trim().toUpperCase();
   if (!group) return true;
   const allowed = TAB_ITEM_GROUPS[dept];
@@ -958,8 +973,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       return;
     }
     try {
-      await api.post(`/api/orders/${id}/send-kot`);
-      onMessage("KOT printed");
+      await api.post(`/api/orders/${id}/send-kot`, {
+        remark: remark.trim() || undefined,
+        steward: waiter.trim() || undefined,
+      });
       goMainBilling();
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "KOT failed");
@@ -1549,7 +1566,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                 >Print KOT (F5)</button></td>
                 <td><button className="fn" onClick={printKot}>Save (F5)</button></td>
                 <td><button className="fn" onClick={() => onMessage("Complimentary")}>F1 Complim.</button></td>
-                <td><button className="fn" onClick={requestExit}>Exit</button></td>
+                <td className="exit-cell">
+                  {clubMode && clubCard.trim() ? <div className="club-card-bal">{clubBal}</div> : null}
+                  <button className="fn" onClick={requestExit}>Exit</button>
+                </td>
               </tr>
               <tr>
                 <td><button className="fn" onClick={() => onOpenView("kot-report")}>KOT Rep. (F7)</button></td>
@@ -2160,7 +2180,12 @@ function HistoryScreen({ invoice }: { invoice: Invoice | null }) {
           {rows.map((r) => (
             <tr key={r.id}>
               <td>{r.invoice_number}</td><td>{r.table_code}</td><td>{formatINR(r.grand_total)}</td><td>{r.status}</td>
-              <td><button className="fn" onClick={() => api.post(`/api/invoices/${r.id}/print`)}>Reprint</button></td>
+              <td><button className="fn" onClick={() => {
+                void api.post(`/api/invoices/${r.id}/print`).then(async (res) => {
+                  const { handleBillPrintResponse } = await import("./printBillHtml");
+                  await handleBillPrintResponse(res as any);
+                }).catch(() => null);
+              }}>Reprint</button></td>
             </tr>
           ))}
         </tbody>

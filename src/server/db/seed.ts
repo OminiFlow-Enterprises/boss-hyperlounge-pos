@@ -52,7 +52,7 @@ const EXTRA_MENU: Array<[string, string, "KITCHEN" | "BAR", number]> = [
 export function seedIfEmpty(db: Database.Database): SeedResult | null {
   const count = db.prepare("SELECT COUNT(*) AS n FROM staff").get() as { n: number };
   if (count.n > 0) {
-    ensureProductCatalog(db);
+    // Imported / existing DB: do not inject EXTRA_MENU demo items (Beer, Pizza, etc.).
     return null;
   }
   return seedFresh(db);
@@ -74,8 +74,6 @@ export function ensureProductCatalog(db: Database.Database) {
     insert.run(id, sku, name, station === "BAR" ? bar.id : kitchen.id, station, rupeesToPaise(price), station === "BAR" ? 18 : 5);
     stock.run(id, 200);
   }
-  db.prepare("UPDATE products SET tax_rate = 5 WHERE station = 'KITCHEN' AND (tax_rate IS NULL OR tax_rate = 0)").run();
-  db.prepare("UPDATE products SET tax_rate = 18 WHERE station = 'BAR' AND (tax_rate IS NULL OR tax_rate = 0)").run();
 }
 
 export function seedFresh(db: Database.Database): SeedResult {
@@ -199,7 +197,16 @@ export function seedFresh(db: Database.Database): SeedResult {
   const settings: Array<[string, string]> = [
     ["service_charge_pct", "10"],
     ["service_charge_mode", "EXCLUSIVE"],
-    ["venue_name", "BOSS Hyperlounge"],
+    ["venue_name", "THE BOSS"],
+    ["venue_unit", "(A UNIT OF BROTZEIT95)"],
+    ["venue_address1", "THE GRAND WALK,"],
+    ["venue_address2", "LAXMI MANDIR TIRAHA, TONK ROAD"],
+    ["venue_address3", "JAIPUR - 302015"],
+    ["venue_contact", "Contact No.:+91-7900890041"],
+    ["venue_gstin", "08ABFFB3127P1Z7"],
+    ["venue_hsn", "996331"],
+    ["venue_tin", "08694753852"],
+    ["venue_footer", "~~** Thanks for coming--Visit Again**~"],
     ["spend_bonus_first", "1"],
     ["cloud_sync_url", ""],
     ["offline_mode", "0"],

@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { api } from "./api";
 import { parseRupeesInput } from "../shared/money";
 import type { NavView } from "../shared/types";
@@ -459,6 +460,10 @@ export function GridReport({ title, endpoint, columns, onExit, onEdit, cellSelec
                   setCol(c);
                   if (!cellSelect) onEdit?.(r);
                 }}
+                onDoubleClick={() => {
+                  setSel(i);
+                  onEdit?.(r);
+                }}
                 onKeyDown={cellSelect ? undefined : (e) => {
                   if (e.key !== "Enter") return;
                   e.preventDefault();
@@ -707,7 +712,13 @@ function SettlementUpdateDialog({
         {err && <AlertBox message={err} onClose={() => { setErr(""); if (!remarkRef.current?.value.trim()) remarkRef.current?.focus(); }} />}
         <div className="su-foot">
           <span className="su-vno">Voucher No : {row?.voucher_no ?? ""}</span>
-          <button type="button" className="fn" onClick={() => { if (row?.invoice_id) void api.post(`/api/invoices/${row.invoice_id}/print`).catch(() => null); }}>Print</button>
+          <button type="button" className="fn" onClick={() => {
+            if (!row?.invoice_id) return;
+            void api.post(`/api/invoices/${row.invoice_id}/print`).then(async (res) => {
+              const { handleBillPrintResponse } = await import("./printBillHtml");
+              await handleBillPrintResponse(res as any);
+            }).catch(() => null);
+          }}>Print</button>
           <button ref={updateRef} type="button" className="fn su-update" onClick={() => void save()}>Update (F2)</button>
           <button type="button" className="fn" onClick={() => setAskDelete(true)}>Delete (F4)</button>
           <button type="button" className="fn" onClick={onClose}>Exit</button>
@@ -1162,48 +1173,224 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
   );
 }
 
-function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) {
-  const [row, setRow] = useState<any>(null);
+function KotAddTableDialog({
+  kotKey,
+  onClose,
+}: {
+  kotKey: string;
+  onClose: () => void;
+}) {
+  const [data, setData] = useState<any>(null);
+  const [sel, setSel] = useState(0);
+  const [err, setErr] = useState("");
+  const dataRef = useRef<any>(null);
+  const printRef = useRef<HTMLButtonElement>(null);
+  const reprintRef = useRef<() => void>(() => {});
+  const close = useRef(onClose);
+  close.current = onClose;
+  dataRef.current = data;
+
   useEffect(() => {
-    if (!row) return;
-    function keys(e: KeyboardEvent) {
-      if (e.key !== "Escape" && e.key !== "Enter") return;
-      e.preventDefault();
-      e.stopPropagation();
-      setRow(null);
+    let gone = false;
+    setData(null);
+    setErr("");
+    api.get<any>(`/api/reports/kots/${encodeURIComponent(kotKey)}`).then((next) => {
+      if (gone) return;
+      setData(next);
+      setSel(0);
+      setErr("");
+      setTimeout(() => printRef.current?.focus(), 0);
+    }).catch((e) => { if (!gone) setErr(e instanceof Error ? e.message : "KOT not found"); });
+    return () => { gone = true; };
+  }, [kotKey]);
+
+  async function reprint() {
+    const id = dataRef.current?.id;
+    if (!id) { setErr("KOT still loading"); return; }
+    printRef.current?.focus();
+    try {
+      await api.post(`/api/kots/${id}/reprint`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Print failed");
+    }
+  }
+  reprintRef.current = () => void reprint();
+
+  useEffect(() => {
+    function keys(e: globalThis.KeyboardEvent) {
+      if (document.querySelector(".confirm-dlg, .alert-dlg")) return;
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close.current(); return; }
+      if (e.key === "F6") { e.preventDefault(); e.stopPropagation(); reprintRef.current(); return; }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        printRef.current?.focus();
+        reprintRef.current();
+        return;
+      }
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        const n = dataRef.current?.items?.length || 0;
+        if (!n) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setSel((i) => e.key === "ArrowDown" ? Math.min(n - 1, i + 1) : Math.max(0, i - 1));
+      }
     }
     window.addEventListener("keydown", keys, true);
     return () => window.removeEventListener("keydown", keys, true);
-  }, [row]);
+  }, []);
+
+  const items: Array<{ id: string; name: string; qty: number; remark: string; rate: number; code: string }> = data?.items || [];
+  const tableItems: Array<{ code: string; name: string; qty: number }> = data?.table_items || [];
+  const qtyTxt = (n: number) => Number(n || 0).toFixed(2);
+  const remark = String(data?.notes || "");
+
+  return createPortal(
+    <div className="kot-add-dlg kot-view">
+      <div className="dialog-cap">
+        <span className="cap-dot" />
+        Add Table
+        <span className="cap-btns">
+          <button type="button" tabIndex={-1}>–</button>
+          <button type="button" tabIndex={-1}>□</button>
+          <button type="button" onClick={onClose}>✕</button>
+        </span>
+      </div>
+      <div className="kot-add-body">
+        <div className="kot-add-main">
+          <div className="kot-add-hdr">
+            <label className="pair"><span className="lbl">Date</span><input className="win" readOnly tabIndex={-1} value={data?.date_label || ""} /></label>
+            <label className="pair"><span className="lbl">KOT</span><span className="kot-text">{data?.kot_number || kotKey}</span></label>
+            <label className="pair"><span>Table No</span>
+              <select className="win green" disabled tabIndex={-1} value={data?.table_no || ""}>
+                {data?.table_no ? <option value={data.table_no}>{data.table_no}</option> : <option value=""> </option>}
+              </select>
+            </label>
+            <label className="pair"><span>Waiter</span><input className="win green" readOnly tabIndex={-1} value={data?.waiter || ""} style={{ width: 48 }} /></label>
+            <label className="pair"><span>Manual Kot</span><input className="win" readOnly tabIndex={-1} value="" style={{ width: 72 }} /></label>
+            <button type="button" className="fn kot-comp" disabled tabIndex={-1}>Complementary KOT</button>
+          </div>
+
+          <div className="kot-add-grid">
+            <div className="kot-add-head">
+              <div>Sr.No.</div><div>ItemName</div><div>Rate</div><div>Qty</div><div>Remark</div>
+            </div>
+            <div className="kot-add-rows">
+              {items.map((it, i) => (
+                <div
+                  key={it.id}
+                  className={`kot-add-row ${i === sel ? "on" : ""}`}
+                  onClick={() => setSel(i)}
+                >
+                  <div>{i + 1}</div>
+                  <div className="name">{it.name}</div>
+                  <div className="num">{rupees(it.rate)}</div>
+                  <div className="num">{qtyTxt(it.qty)}</div>
+                  <div className="remark-cell">{it.remark || ""}</div>
+                </div>
+              ))}
+              {!items.length && (
+                <div className="kot-add-row empty">
+                  <div /><div>{data ? "No items" : "Loading…"}</div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="fn-box">
+            <div className="remark">Remark : <input className="win" readOnly tabIndex={-1} value={remark} /></div>
+            <table className="fn-table">
+              <tbody>
+                <tr>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>Prepare Bill (F10)</button></td>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>Settlement (F11)</button></td>
+                  <td><button
+                    ref={printRef}
+                    type="button"
+                    className="fn"
+                    onClick={() => void reprint()}
+                  >Print KOT (F6)</button></td>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>Update (F5)</button></td>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>Delete (F4)</button></td>
+                </tr>
+                <tr>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>KOT Rep. (F7)</button></td>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>Bill Rep. (F8)</button></td>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>S. Report (F12)</button></td>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>Item transfer</button></td>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>T. Transfer (F9)</button></td>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>Create Item (F3)</button></td>
+                </tr>
+                <tr>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>Load Hold</button></td>
+                  <td><button type="button" className="fn" disabled tabIndex={-1}>Hold KOT</button></td>
+                  <td /><td /><td />
+                  <td><button type="button" className="fn" onClick={onClose}>Exit</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <aside className="estimate item-list kot-add-side">
+          <div className="estimate-head">Table No. Items List</div>
+          <table>
+            <colgroup><col className="c-code" /><col /><col className="c-qty" /></colgroup>
+            <thead>
+              <tr><th>Code</th><th>ItemName</th><th>Qty</th></tr>
+            </thead>
+            <tbody>
+              {tableItems.map((row, i) => (
+                <tr key={`${row.code}-${row.name}-${i}`}>
+                  <td>{row.code}</td>
+                  <td>{row.name}</td>
+                  <td className="qty">{row.qty}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="estimate-fill" />
+          <div className="estimate-total">Total Amount: {rupees(data?.total_amount)}</div>
+        </aside>
+      </div>
+      {err && <AlertBox message={err} onClose={() => setErr("")} />}
+    </div>,
+    document.body,
+  );
+}
+
+function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) {
+  const [kotKey, setKotKey] = useState<string | null>(null);
+  function openRow(row: any) {
+    const key = String(row?.id || row?.kot_number || "").trim();
+    if (key) setKotKey(key);
+  }
   return (
     <>
       <GridReport
         title={`${outlet || ""} KOT Report`.trim()}
         endpoint={`/api/reports/kots${outlet === "BAR" ? "?station=BAR" : outlet ? "?station=KITCHEN" : ""}`}
-        columns={[["kot_number","KOT"],["table_no","Table"],["station","Station"],["status","Status"],["items","Items"],["created_at","Date"]]}
+        columns={[
+          ["kot_number", "KOT No"],
+          ["manual_kot", "Manual KOTNo"],
+          ["table_no", "Table No"],
+          ["kot_date", "KOT Date"],
+          ["kot_time", "Kot Time"],
+          ["bill_no", "BillNo"],
+          ["net_amount", "NetAmount"],
+          ["steward", "StwardName"],
+          ["kot_remark", "KOTRemark"],
+          ["user_id", "UserID"],
+        ]}
         onExit={onExit}
         cellSelect
-        onEdit={setRow}
+        onEdit={openRow}
       />
-      {row && (
-        <div className="dialog kot-view">
-          <div className="dialog-cap">
-            <span className="cap-dot" />
-            KOT
-            <span className="cap-btns"><button type="button" onClick={() => setRow(null)}>✕</button></span>
-          </div>
-          <div className="dialog-body">
-            <p>KOT No : {row.kot_number}</p>
-            <p>Table : {row.table_no}</p>
-            <p>Station : {row.station}</p>
-            <p>Status : {row.status}</p>
-            <p>Date : {row.created_at}</p>
-            <p>Items : {row.items}</p>
-            <div className="bill-btns">
-              <button type="button" className="fn" onClick={() => setRow(null)}>Exit</button>
-            </div>
-          </div>
-        </div>
+      {kotKey && (
+        <KotAddTableDialog
+          kotKey={kotKey}
+          onClose={() => setKotKey(null)}
+        />
       )}
     </>
   );

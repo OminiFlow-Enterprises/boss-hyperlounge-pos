@@ -8,9 +8,11 @@ import type {
   KotPrintPayload,
   ReceiptPayload,
 } from "./types.js";
+import { POS_PRINTERS, TcpEscPosPrinter } from "./tcpPrinter.js";
 
 export type { ICardReader, IPrinter, ICashDrawer, ICustomerDisplay, IBarcodeScanner };
 export type { CardReadResult, KotPrintPayload, ReceiptPayload };
+export { POS_PRINTERS, TcpEscPosPrinter };
 
 interface PrintLog {
   device: string;
@@ -129,14 +131,28 @@ export interface HardwareBus {
   display: ICustomerDisplay;
 }
 
-export function createHardware(): HardwareBus {
+export function createHardware(options?: { memory?: boolean }): HardwareBus {
+  if (options?.memory || process.env.POS_MEMORY_PRINTERS === "1") {
+    return {
+      rfid: new MemoryCardReader(),
+      nfc: new MemoryCardReader(),
+      barcode: new MemoryBarcodeScanner(),
+      receipt: new MemoryPrinter("RECEIPT"),
+      kitchen: new MemoryPrinter("KITCHEN"),
+      bar: new MemoryPrinter("BAR"),
+      drawer: new MemoryCashDrawer(),
+      display: new MemoryCustomerDisplay(),
+    };
+  }
+  // Testing lock: all KOT + receipt go to bill (192.168.1.56) until user asks to update.
+  const bill = new TcpEscPosPrinter(POS_PRINTERS.bill.name, POS_PRINTERS.bill.host, POS_PRINTERS.bill.port);
   return {
     rfid: new MemoryCardReader(),
     nfc: new MemoryCardReader(),
     barcode: new MemoryBarcodeScanner(),
-    receipt: new MemoryPrinter("RECEIPT"),
-    kitchen: new MemoryPrinter("KITCHEN"),
-    bar: new MemoryPrinter("BAR"),
+    receipt: bill,
+    kitchen: bill,
+    bar: bill,
     drawer: new MemoryCashDrawer(),
     display: new MemoryCustomerDisplay(),
   };

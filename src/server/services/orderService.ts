@@ -5,6 +5,7 @@ import type { AppContext } from "../lib/context.js";
 import { nextNumber, nowIso, uuid } from "../lib/ids.js";
 import { printerForStation } from "../hardware/index.js";
 import { deductStock, restoreStock } from "./inventoryService.js";
+import { displayTaxRate } from "./itemService.js";
 import { resolvePrice } from "./pricingService.js";
 import { getTable } from "./tableService.js";
 import type { KotStatus, Station } from "../../shared/types.js";
@@ -258,8 +259,13 @@ function createKot(
   };
 }
 
-export async function sendKot(ctx: AppContext, orderId: string) {
+export async function sendKot(
+  ctx: AppContext,
+  orderId: string,
+  opts?: { remark?: string; steward?: string } | string,
+) {
   assertPermission(ctx.actor.role, "SEND_KOT");
+  const options = typeof opts === "string" ? { remark: opts } : opts ?? {};
   const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId) as
     | {
         id: string;
@@ -271,6 +277,8 @@ export async function sendKot(ctx: AppContext, orderId: string) {
     | undefined;
   if (!order) throw new AppError("Order not found", 404);
   const openOrder = order;
+  const slipRemark = String(options.remark ?? "").trim();
+  const stewardName = String(options.steward ?? "").trim();
 
   type PendingItem = {
     id: string;
@@ -281,22 +289,38 @@ export async function sendKot(ctx: AppContext, orderId: string) {
     notes: string | null;
     unit_price: number;
     tax_rate: number;
+    product_tax_rate: number | null;
+    product_sales_group: string | null;
   };
   const pending = ctx.db
-    .prepare("SELECT * FROM order_items WHERE order_id = ? AND kot_id IS NULL AND voided = 0")
+    .prepare(
+      `SELECT oi.*, p.tax_rate AS product_tax_rate, p.sales_group AS product_sales_group
+         FROM order_items oi
+         LEFT JOIN products p ON p.id = oi.product_id
+        WHERE oi.order_id = ? AND oi.kot_id IS NULL AND oi.voided = 0`,
+    )
     .all(orderId) as PendingItem[];
+  for (const item of pending) {
+    item.tax_rate = displayTaxRate(ctx, {
+      name: item.name,
+      salesGroup: item.product_sales_group,
+      productTaxRate: item.product_tax_rate,
+      lineTaxRate: item.tax_rate,
+    });
+  }
   const additions = pending.filter((i) => i.qty > 0);
   const reductions = pending.filter((i) => i.qty < 0);
   if (!additions.length && !reductions.length) throw new AppError("No new items to send to kitchen/bar");
 
-  const existingKots = ctx.db.prepare("SELECT COUNT(*) AS n FROM kots WHERE order_id = ? AND type IN ('NEW','ADDITION')").get(orderId) as {
-    n: number;
-  };
+  const existingKots = ctx.db
+    .prepare("SELECT COUNT(*) AS n FROM kots WHERE session_id = ? AND type IN ('NEW','ADDITION')")
+    .get(order.session_id) as { n: number };
   const kotType = existingKots.n > 0 ? "ADDITION" : "NEW";
   const table = getTable(ctx, order.table_id);
-  const waiter = order.waiter_id
+  const waiterFromStaff = order.waiter_id
     ? (ctx.db.prepare("SELECT name FROM staff WHERE id = ?").get(order.waiter_id) as { name: string } | undefined)
     : undefined;
+  const steward = stewardName || waiterFromStaff?.name || "";
 
   const created: Array<{ kot_number: string }> = [];
 
@@ -321,20 +345,21 @@ export async function sendKot(ctx: AppContext, orderId: string) {
       station,
       type,
       items,
+      notes: slipRemark || undefined,
     });
     created.push(kot);
+    const banner = type === "NEW" ? "NEW ORDER" : "RUNNING ORDER";
     const print = await printerForStation(ctx.hardware, station).printKOT({
       kotNumber: kot.kot_number,
       tableCode: table.code,
-      waiter: waiter?.name,
+      waiter: steward,
       station,
       reprint: false,
+      orderBanner: banner,
+      remark: slipRemark || undefined,
       items: items.map((i) => ({
         qty: type === "CANCEL" ? -i.qty : i.qty,
         name: i.name,
-        notes: i.notes,
-        rate: i.unitPrice,
-        price: i.unitPrice == null ? undefined : priceWithTax(i.unitPrice, i.taxRate ?? 0),
       })),
       createdAt: kot.created_at,
     });
@@ -363,10 +388,12 @@ export async function sendKot(ctx: AppContext, orderId: string) {
       let need = -red.qty;
       const sent = ctx.db
         .prepare(
-          `SELECT * FROM order_items
-           WHERE order_id = ? AND product_id = ? AND voided = 0 AND kot_id IS NOT NULL
-             AND IFNULL(notes,'') = ?
-           ORDER BY rowid`,
+          `SELECT oi.*, p.tax_rate AS product_tax_rate, p.sales_group AS product_sales_group
+             FROM order_items oi
+             LEFT JOIN products p ON p.id = oi.product_id
+            WHERE oi.order_id = ? AND oi.product_id = ? AND oi.voided = 0 AND oi.kot_id IS NOT NULL
+              AND IFNULL(oi.notes,'') = ?
+            ORDER BY oi.rowid`,
         )
         .all(orderId, red.product_id, red.notes ?? "") as Array<{
         id: string;
@@ -377,6 +404,8 @@ export async function sendKot(ctx: AppContext, orderId: string) {
         notes: string | null;
         unit_price: number;
         tax_rate: number;
+        product_tax_rate: number | null;
+        product_sales_group: string | null;
       }>;
       for (const item of sent) {
         if (need <= 0) break;
@@ -391,7 +420,12 @@ export async function sendKot(ctx: AppContext, orderId: string) {
           qty: take,
           notes: item.notes,
           unitPrice: item.unit_price,
-          taxRate: item.tax_rate,
+          taxRate: displayTaxRate(ctx, {
+            name: item.name,
+            salesGroup: item.product_sales_group,
+            productTaxRate: item.product_tax_rate,
+            lineTaxRate: item.tax_rate,
+          }),
         });
         need -= take;
       }
@@ -602,25 +636,16 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
         kot_number: string;
         table_id: string;
         station: Station;
+        type: string;
         waiter_id: string | null;
+        notes: string | null;
         created_at: string;
       }
     | undefined;
   if (!kot) throw new AppError("KOT not found", 404);
   const items = ctx.db
-    .prepare(
-      `SELECT ki.qty, ki.name, ki.notes, oi.unit_price, oi.tax_rate
-         FROM kot_items ki
-         LEFT JOIN order_items oi ON oi.id = ki.order_item_id
-        WHERE ki.kot_id = ?`,
-    )
-    .all(kotId) as Array<{
-    qty: number;
-    name: string;
-    notes: string | null;
-    unit_price: number | null;
-    tax_rate: number | null;
-  }>;
+    .prepare(`SELECT ki.qty, ki.name FROM kot_items ki WHERE ki.kot_id = ?`)
+    .all(kotId) as Array<{ qty: number; name: string }>;
   const table = getTable(ctx, kot.table_id);
   const waiter = kot.waiter_id
     ? (ctx.db.prepare("SELECT name FROM staff WHERE id = ?").get(kot.waiter_id) as { name: string } | undefined)
@@ -636,13 +661,9 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
     waiter: waiter?.name,
     station: kot.station,
     reprint: true,
-    items: items.map((i) => ({
-      qty: i.qty,
-      name: i.name,
-      notes: i.notes,
-      rate: i.unit_price ?? undefined,
-      price: i.unit_price == null ? undefined : priceWithTax(i.unit_price, i.tax_rate ?? 0),
-    })),
+    orderBanner: kot.type === "NEW" ? "NEW ORDER" : "RUNNING ORDER",
+    remark: kot.notes,
+    items: items.map((i) => ({ qty: i.qty, name: i.name })),
     createdAt: kot.created_at,
   });
   return { ok: print.ok, error: print.error, reprint: true };

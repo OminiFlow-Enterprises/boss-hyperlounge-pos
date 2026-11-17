@@ -50,4 +50,4 @@ Do this on the Windows master PC, after Cursor is open there:
 4. Bills and KOTs print on the mini printer from the master. A 58mm printer is 32 characters wide. ESC/POS over port 9100 for a network printer, or the Windows printer queue for USB.
 5. The server already listens on `0.0.0.0`. Windows Firewall may still block other PCs until port 8787 is allowed.
 
-The current printers are in-memory logs (`src/server/hardware/index.ts`). Nothing is sent to paper yet.
+Printers are locked for testing in `.cursor/rules/printers.mdc`. Bill test printer: `bill` → `192.168.1.56:9100` (EPSON TM-T82). Kitchen `192.168.1.208`, bar `192.168.1.188`. ESC/POS KOT layout matches the real slip (`src/server/hardware/escpos.ts`). Do not change printers until the user asks.

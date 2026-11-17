@@ -218,7 +218,9 @@ export function createApp(options: CreateAppOptions) {
     res.json(orders.setBillLinePrice(req.ctx, req.params.id, req.body.ids ?? [], Math.round(Number(req.body.price))));
   }));
   app.post("/api/orders/:id/send-kot", wrap(async (req, res) => {
-    res.json(await orders.sendKot(req.ctx, req.params.id));
+    const remark = typeof req.body?.remark === "string" ? req.body.remark : undefined;
+    const steward = typeof req.body?.steward === "string" ? req.body.steward : undefined;
+    res.json(await orders.sendKot(req.ctx, req.params.id, { remark, steward }));
   }));
   app.post("/api/order-items/:id/qty", wrap((req, res) => {
     res.json(orders.modifyItemQty(req.ctx, req.params.id, Number(req.body.qty)));
@@ -333,6 +335,9 @@ export function createApp(options: CreateAppOptions) {
       req.query.to ? String(req.query.to) : undefined,
       req.query.station ? String(req.query.station) : undefined,
     ));
+  }));
+  app.get("/api/reports/kots/:kotKey", wrap((req, res) => {
+    res.json(reports.kotDetail(req.ctx, String(req.params.kotKey)));
   }));
   app.get("/api/reports/bills", wrap((req, res) => {
     res.json(reports.billReport(req.ctx, req.query.from ? String(req.query.from) : undefined, req.query.to ? String(req.query.to) : undefined));

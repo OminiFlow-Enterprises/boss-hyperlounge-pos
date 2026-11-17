@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, globalShortcut } = require("electron");
+const { app, BrowserWindow, Menu, dialog, globalShortcut, ipcMain } = require("electron");
 const { spawn, execFile, execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -48,16 +48,17 @@ function startServer(port, dbDir) {
     POS_CLIENT_DIR: path.join(root, "dist", "client"),
   };
   delete env.ELECTRON_RUN_AS_NODE;
-  if (app.isPackaged) {
-    return spawn(process.execPath, [path.join(root, "dist", "server", "index.js")], {
-      cwd: root,
-      env: { ...env, ELECTRON_RUN_AS_NODE: "1" },
-      windowsHide: true,
-    });
-  }
-  return spawn(process.platform === "win32" ? "node.exe" : "node", ["--import", "tsx", path.join(root, "src", "server", "index.ts")], {
+  // Always run the API under Electron's Node so better-sqlite3 matches Electron ABI
+  // (system node.exe may be a different NODE_MODULE_VERSION).
+  const entry = app.isPackaged || fs.existsSync(path.join(root, "dist", "server", "index.js"))
+    ? path.join(root, "dist", "server", "index.js")
+    : path.join(root, "src", "server", "index.ts");
+  const args = entry.endsWith(".ts")
+    ? ["--import", "tsx", entry]
+    : [entry];
+  return spawn(process.execPath, args, {
     cwd: root,
-    env,
+    env: { ...env, ELECTRON_RUN_AS_NODE: "1" },
     windowsHide: true,
   });
 }
@@ -331,6 +332,7 @@ async function openPos() {
     backgroundColor: "#f0f0f0",
     autoHideMenuBar: true,
     webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
       nodeIntegration: false,
       contextIsolation: true,
       devTools: false,
@@ -356,6 +358,47 @@ app.on("second-instance", () => {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+});
+
+ipcMain.handle("pos:print-html", async (_event, { html, deviceName }) => {
+  const printer = String(deviceName || "bill");
+  const win = new BrowserWindow({
+    show: false,
+    width: 320,
+    height: 800,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      offscreen: true,
+    },
+  });
+  try {
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(String(html || ""))}`);
+    await new Promise((r) => setTimeout(r, 400));
+    const result = await new Promise((resolve) => {
+      win.webContents.print(
+        {
+          silent: true,
+          printBackground: true,
+          deviceName: printer,
+          margins: { marginType: "none" },
+          preferCSSPageSize: true,
+          scaleFactor: 100,
+          pagesPerSheet: 1,
+          collate: false,
+          copies: 1,
+        },
+        (success, failureReason) => {
+          resolve({ ok: Boolean(success), error: success ? undefined : failureReason || "print failed" });
+        },
+      );
+    });
+    return result;
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    if (!win.isDestroyed()) win.destroy();
+  }
 });
 
 app.whenReady().then(openPos);

@@ -1,0 +1,44 @@
+---
+description: Saved Windows printers for POS KOT/bill testing. Do not change until the user asks.
+alwaysApply: true
+---
+
+# Printers (testing — locked)
+
+Do not invent printer names or IPs. Do not re-scan or reassign printers until the user explicitly asks to update them.
+
+## Locked for testing
+
+Use these values from this Windows master PC:
+
+| Role | Windows queue name | Host / port | Notes |
+|------|-------------------|-------------|--------|
+| **Bill / receipt / KOT test** | `bill` | `192.168.1.56:9100` (ESDPRT001) | EPSON TM-T82. **All Print KOT goes here while testing.** |
+| Kitchen KOT | `kitchen` | `192.168.1.208:9100` | EPSON TM-T82 — not used until user asks |
+| Bar KOT | `bar` | `192.168.1.188:9100` | EPSON TM-T82 — not used until user asks |
+| Cafe bar | `cafe bar` | `192.168.1.189:9100` | EPSON TM-T82 — not wired unless asked |
+
+`createHardware()` points kitchen + bar + receipt at **bill** until the user asks to split them. IPs stay in `src/server/hardware/tcpPrinter.ts` (`POS_PRINTERS`).
+
+## KOT slip format (match the real THE BOSS sample)
+
+File: `src/server/hardware/escpos.ts`
+
+- Station title large/centered (`BAR` / `KITCHEN`), then `Restaurant KOT`
+- Fields: `KOT No.`, `Table No.`, `Date` (`17 Nov 2026  18:25:07`), `Stward` (same spelling as sample)
+- Centered bold underline order banner, then `Original Copy` / `Reprint Copy`:
+  - **NEW ORDER** — first KOT on that table session (table’s first punch)
+  - **RUNNING ORDER** — table already running (later KOTs / additions / cancel slips)
+- Table: `Item Name|Qty` with a vertical bar; more items = longer slip (feed + cut, no fixed page)
+- **Remark** prints under the item table after a rule line (sample text under AAA was the Remark field, not a second item)
+- Print KOT (F5) sends `{ remark }` with `/api/orders/:id/send-kot`
+- Match **native IBS** KOT (bottom slip / 18:33 sample): Font A, **48 cols**, BAR **heavy** (bold + double-strike) + double-width/height (`ESC ! 0x30`), tight meta block, centered NEW ORDER or RUNNING ORDER with thick underline then Original/Reprint Copy, **bold** `Item Name|Qty` header, solid rules (not dashed `-`), darker body/remark
+- ESC/POS Font A is fixed-pitch (TM-T82 raw TCP) — match native weight/spacing/alignment; do not switch to Windows GDI
+- **Do not** leave `GS L` / `GS W` margins set — they stick on the TM-T82 and can clip **Qty** on later IBS Windows prints. Always `ESC @` at start and after cut.
+- TM-T82 ESC/POS over TCP 9100
+
+## Rules
+
+- Until the user says to update printers: keep **bill** as the only KOT/test printer; do not switch to kitchen/bar IPs, PDF, or OneNote.
+- Do not start LAN multi-PC work unless asked.
+- After print code changes: `npm run build` and restart Electron (`npm run desktop`).

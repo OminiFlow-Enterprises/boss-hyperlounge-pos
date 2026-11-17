@@ -7,7 +7,11 @@ import { idempotencyKey, nextNumber, nextSequence, nowIso, peekNextNumber, uuid 
 import type { PaymentLine, ServiceChargeMode } from "../../shared/types.js";
 import { purchaseOnCard, refundToCard, getCard } from "./cardService.js";
 import { closeTable, getTable, setTableStatus } from "./tableService.js";
-import { getServiceCharge } from "./settingsService.js";
+import { billPrintMode, renderBillReceiptHtml } from "../hardware/billReceiptHtml.js";
+import { buildBillTotalLines } from "../hardware/billTotals.js";
+import { printHtmlToQueue } from "../hardware/htmlPrinter.js";
+import { getServiceCharge, getVenueProfile } from "./settingsService.js";
+import { displayTaxRate } from "./itemService.js";
 
 export interface BillPreview {
   orderId: string;
@@ -62,7 +66,7 @@ export function previewBill(
   const table = getTable(ctx, order.table_id);
   const items = ctx.db
     .prepare(
-      `SELECT oi.*, p.tax_rate AS product_tax_rate
+      `SELECT oi.*, p.tax_rate AS product_tax_rate, p.sales_group AS product_sales_group
          FROM order_items oi
          LEFT JOIN products p ON p.id = oi.product_id
         WHERE oi.order_id = ? AND oi.voided = 0
@@ -77,12 +81,17 @@ export function previewBill(
     unit_price: number;
     tax_rate: number;
     product_tax_rate: number | null;
+    product_sales_group: string | null;
   }>;
   if (!items.length) throw new AppError("Bill has no items");
 
   const mapped = groupSameItems(items.map((i) => {
-    const lineTax = Number(i.tax_rate);
-    const tax_rate = Number.isFinite(lineTax) ? lineTax : Number(i.product_tax_rate) || 0;
+    const tax_rate = displayTaxRate(ctx, {
+      name: i.name,
+      salesGroup: i.product_sales_group,
+      productTaxRate: i.product_tax_rate,
+      lineTaxRate: i.tax_rate,
+    });
     const amount = i.qty * i.unit_price;
     return {
       id: i.id,
@@ -94,13 +103,13 @@ export function previewBill(
       unit_price: i.unit_price,
       amount,
       tax_rate,
-      tax: Math.round(amount * (tax_rate / 100)),
+      sales_group: i.product_sales_group ?? "",
+      tax: 0,
     };
   }));
   const foodTotal = mapped.filter((i) => i.station === "KITCHEN").reduce((s, i) => s + i.amount, 0);
   const drinksTotal = mapped.filter((i) => i.station === "BAR").reduce((s, i) => s + i.amount, 0);
   const subtotal = foodTotal + drinksTotal;
-  const tax = mapped.reduce((s, i) => s + i.tax, 0);
   const excluded = new Set(options.excludeItemIds ?? []);
   const discountable = mapped.filter((i) => !i.ids.some((id) => excluded.has(id))).reduce((s, i) => s + i.amount, 0);
   const configured = getServiceCharge(ctx);
@@ -116,6 +125,25 @@ export function previewBill(
     discountPct = Math.max(0, options.discountPct ?? 0);
     discount = Math.min(discountable, Math.round((discountable * discountPct) / 100));
   }
+  // Tax after discount (THE BOSS slip bases are post-discount)
+  const discable = mapped.filter((i) => !i.ids.some((id) => excluded.has(id)) && i.amount > 0);
+  let allocatedDisc = 0;
+  for (let i = 0; i < mapped.length; i++) {
+    const line = mapped[i];
+    const canDisc = !line.ids.some((id) => excluded.has(id)) && line.amount > 0;
+    let lineDisc = 0;
+    if (canDisc && discount > 0 && discountable > 0) {
+      const isLast = line === discable[discable.length - 1];
+      lineDisc = isLast
+        ? Math.max(0, discount - allocatedDisc)
+        : Math.round((discount * line.amount) / discountable);
+      if (lineDisc > line.amount) lineDisc = line.amount;
+      allocatedDisc += lineDisc;
+    }
+    const taxable = Math.max(0, line.amount - lineDisc);
+    line.tax = Math.round((taxable * line.tax_rate) / 100);
+  }
+  const tax = mapped.reduce((s, i) => s + i.tax, 0);
   const otherCharges = options.otherCharges ?? 0;
   const afterDiscount = Math.max(0, subtotal - discount);
   const serviceCharge =
@@ -147,7 +175,7 @@ export function previewBill(
   };
 }
 
-function groupSameItems<T extends { id: string; ids: string[]; product_id: string; name: string; unit_price: number; tax_rate: number; qty: number; amount: number; tax: number }>(
+function groupSameItems<T extends { id: string; ids: string[]; product_id: string; name: string; unit_price: number; tax_rate: number; qty: number; amount: number; tax: number; sales_group?: string }>(
   lines: T[],
 ): T[] {
   const groups = new Map<string, T>();
@@ -397,40 +425,151 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
   const snap = getInvoice(ctx, invoiceId);
   const invoice = snap.invoice as {
     invoice_number: string;
+    order_id: string;
+    customer_id: string | null;
     food_total: number;
     drinks_total: number;
     service_charge: number;
+    service_charge_pct: number;
     discount: number;
     tax: number;
     other_charges: number;
     grand_total: number;
     table_id: string;
+    created_at: string;
   };
   const table = getTable(ctx, invoice.table_id);
-  const lines = [
-    `Invoice ${invoice.invoice_number}`,
-    `Table ${table.code}`,
-    `Food ${formatINR(invoice.food_total)}`,
-    `Drinks ${formatINR(invoice.drinks_total)}`,
-    invoice.discount ? `Discount ${formatINR(invoice.discount)}` : "",
-    `Service ${formatINR(invoice.service_charge)}`,
-    invoice.tax ? `Tax ${formatINR(invoice.tax)}` : "",
-    invoice.other_charges ? `Other ${formatINR(invoice.other_charges)}` : "",
-    `TOTAL ${formatINR(invoice.grand_total)}`,
-    ...snap.payments.map((p) => {
-      const pay = p as unknown as { method: string; amount: number };
-      return `${pay.method} ${formatINR(pay.amount)}`;
-    }),
-  ].filter(Boolean);
-  const result = await ctx.hardware.receipt.printReceipt({
-    title: "BOSS HYPERLOUNGE",
-    lines,
-    footer: "Thank you. Drive safe.",
-  });
-  if (!result.ok) {
-    audit(ctx, "PRINTER_FAILURE", "invoice", invoiceId, result.error ?? "print failed", null, invoice.invoice_number);
+  const order = ctx.db.prepare("SELECT waiter_id FROM orders WHERE id = ?").get(invoice.order_id) as
+    | { waiter_id: string | null }
+    | undefined;
+  let waiter = "";
+  if (order?.waiter_id) {
+    const staff = ctx.db.prepare("SELECT name FROM staff WHERE id = ?").get(order.waiter_id) as
+      | { name: string }
+      | undefined;
+    waiter = staff?.name ?? "";
   }
-  return result;
+  let guestName = "";
+  if (invoice.customer_id) {
+    const cust = ctx.db.prepare("SELECT name FROM customers WHERE id = ?").get(invoice.customer_id) as
+      | { name: string }
+      | undefined;
+    guestName = cust?.name ?? "";
+  }
+  const subtotal = invoice.food_total + invoice.drinks_total;
+  const discountPct = subtotal > 0 ? Math.round((invoice.discount / subtotal) * 10000) / 100 : 0;
+  const unrounded =
+    subtotal - invoice.discount + invoice.service_charge + invoice.tax + invoice.other_charges;
+  const roundOff = invoice.grand_total - unrounded;
+  const rawItems = snap.items as Array<{
+    name: string;
+    qty: number;
+    unit_price: number;
+    amount: number;
+    product_id?: string;
+  }>;
+  const items = rawItems.map((it) => ({
+    name: it.name,
+    rate: it.unit_price,
+    qty: it.qty,
+    amount: it.amount,
+  }));
+  // Prefer session waiter when the order row has none.
+  if (!waiter) {
+    const session = ctx.db
+      .prepare(
+        `SELECT s.name AS waiter_name
+           FROM table_sessions ts
+           LEFT JOIN staff s ON s.id = ts.waiter_id
+          WHERE ts.id = (SELECT session_id FROM orders WHERE id = ?)
+          LIMIT 1`,
+      )
+      .get(invoice.order_id) as { waiter_name: string | null } | undefined;
+    waiter = session?.waiter_name?.trim() || "";
+  }
+
+  const taxLines = ctx.db
+    .prepare(
+      `SELECT ii.amount, ii.name, ii.product_id,
+              p.sales_group AS sales_group, p.tax_rate AS product_tax_rate,
+              oi.tax_rate AS line_tax_rate
+         FROM invoice_items ii
+         LEFT JOIN products p ON p.id = ii.product_id
+         LEFT JOIN order_items oi ON oi.id = ii.order_item_id
+        WHERE ii.invoice_id = ?`,
+    )
+    .all(invoiceId) as Array<{
+    amount: number;
+    name: string;
+    product_id: string;
+    sales_group: string | null;
+    product_tax_rate: number | null;
+    line_tax_rate: number | null;
+  }>;
+  const totalLines = buildBillTotalLines({
+    lines: taxLines.map((row) => ({
+      amount: row.amount,
+      taxRate: displayTaxRate(ctx, {
+        name: row.name,
+        salesGroup: row.sales_group,
+        productTaxRate: row.product_tax_rate,
+        lineTaxRate: row.line_tax_rate,
+      }),
+      salesGroup: row.sales_group,
+    })),
+    discount: invoice.discount,
+    discountPct,
+    serviceCharge: invoice.service_charge,
+    serviceChargePct: invoice.service_charge_pct ?? 0,
+    otherCharges: invoice.other_charges,
+    roundOff,
+    taxTotal: invoice.tax,
+  });
+
+  const venue = getVenueProfile(ctx);
+  const payload = {
+    kind: "bill" as const,
+    venue,
+    outlet: table.outlet || "BAR",
+    billNo: invoice.invoice_number,
+    tableNo: table.code,
+    waiter,
+    guestName,
+    createdAt: invoice.created_at,
+    items,
+    subtotal,
+    discount: invoice.discount,
+    discountPct,
+    tax: invoice.tax,
+    serviceCharge: invoice.service_charge,
+    serviceChargePct: invoice.service_charge_pct ?? 0,
+    otherCharges: invoice.other_charges,
+    roundOff,
+    netTotal: invoice.grand_total,
+    totalLines,
+  };
+
+  // HTML/CSS (Arial) matches native Windows slip. ESC/POS kept for POS_BILL_PRINT=escpos.
+  if (billPrintMode() === "escpos") {
+    const result = await ctx.hardware.receipt.printReceipt(payload);
+    if (!result.ok) {
+      audit(ctx, "PRINTER_FAILURE", "invoice", invoiceId, result.error ?? "print failed", null, invoice.invoice_number);
+    }
+    return { ...result, mode: "escpos" as const, printed: Boolean(result.ok) };
+  }
+
+  const html = renderBillReceiptHtml(payload);
+  const printed = await printHtmlToQueue(html, "bill");
+  if (!printed.ok) {
+    audit(ctx, "PRINTER_FAILURE", "invoice", invoiceId, printed.error ?? "html print failed", null, invoice.invoice_number);
+  }
+  return {
+    ok: printed.ok,
+    mode: "html" as const,
+    html,
+    printed: printed.ok,
+    error: printed.error,
+  };
 }
 
 export function refundInvoice(

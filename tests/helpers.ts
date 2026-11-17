@@ -7,7 +7,7 @@ import type { Actor, StaffRole } from "../src/shared/types.js";
 export function createTestApp() {
   const db = openDatabase({ memory: true });
   const seeded = seedFresh(db);
-  const hardware = createHardware();
+  const hardware = createHardware({ memory: true });
 
   const actorFor = (roleKey: keyof typeof seeded.staff): Actor => {
     const row = db.prepare("SELECT * FROM staff WHERE id = ?").get(seeded.staff[roleKey as string]) as {

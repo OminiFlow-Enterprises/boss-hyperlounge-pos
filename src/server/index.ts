@@ -1,6 +1,6 @@
 import { createApp } from "./api/app.js";
 import { openDatabase } from "./db/database.js";
-import { seedIfEmpty, ensureProductCatalog } from "./db/seed.js";
+import { seedIfEmpty } from "./db/seed.js";
 import { createHardware } from "./hardware/index.js";
 
 const port = Number(process.env.PORT ?? 8787);

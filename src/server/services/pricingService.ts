@@ -1,4 +1,5 @@
 import type { AppContext } from "../lib/context.js";
+import { displayTaxRate } from "./itemService.js";
 
 export interface PriceResolution {
   productId: string;
@@ -8,6 +9,13 @@ export interface PriceResolution {
   taxRate: number;
   name: string;
   station: "KITCHEN" | "BAR";
+}
+
+/** IBS dept rate flagged inclusive → punch exclusive (e.g. 90 incl @ 18% → 76.27). */
+export function exclusiveFromInclusive(paise: number, taxRate: number): number {
+  const rate = Number(taxRate) || 0;
+  if (rate <= 0) return Math.round(paise);
+  return Math.round(paise / (1 + rate / 100));
 }
 
 function minutes(hhmm: string): number {
@@ -27,16 +35,47 @@ export function resolvePrice(
   outlet?: string | null,
 ): PriceResolution {
   const product = ctx.db
-    .prepare("SELECT id, name, station, base_price, tax_rate FROM products WHERE id = ? AND active = 1")
+    .prepare(
+      `SELECT id, name, station, base_price, tax_rate, sales_group
+         FROM products WHERE id = ? AND active = 1`,
+    )
     .get(productId) as
-    | { id: string; name: string; station: "KITCHEN" | "BAR"; base_price: number; tax_rate: number }
+    | {
+        id: string;
+        name: string;
+        station: "KITCHEN" | "BAR";
+        base_price: number;
+        tax_rate: number;
+        sales_group: string | null;
+      }
     | undefined;
   if (!product) throw new Error("Product not found");
+  const taxRate = displayTaxRate(ctx, {
+    name: product.name,
+    salesGroup: product.sales_group,
+    productTaxRate: product.tax_rate,
+  });
+  product.tax_rate = taxRate;
   if (outlet) {
     const dept = ctx.db
-      .prepare("SELECT rate FROM product_dept_rates WHERE product_id = ? AND dept = ? AND enabled = 1")
-      .get(productId, outlet) as { rate: number } | undefined;
-    if (dept && dept.rate > 0) product.base_price = dept.rate;
+      .prepare(
+        `SELECT rate, inclusive FROM product_dept_rates
+          WHERE product_id = ? AND dept = ? AND enabled = 1`,
+      )
+      .get(productId, outlet) as { rate: number; inclusive: number } | undefined;
+    if (dept && dept.rate > 0) {
+      product.base_price =
+        dept.inclusive ? exclusiveFromInclusive(dept.rate, taxRate) : dept.rate;
+    }
+  } else {
+    // No outlet: if base matches an inclusive dept rate, still punch exclusive
+    const anyIncl = ctx.db
+      .prepare(
+        `SELECT rate FROM product_dept_rates
+          WHERE product_id = ? AND inclusive = 1 AND rate = ? LIMIT 1`,
+      )
+      .get(productId, product.base_price) as { rate: number } | undefined;
+    if (anyIncl) product.base_price = exclusiveFromInclusive(product.base_price, taxRate);
   }
 
   const dow = at.getDay() === 0 ? 7 : at.getDay();

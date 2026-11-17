@@ -132,7 +132,12 @@ export function PrepareBillDialog({
   const discMode = useRef<"pct" | "amt">("pct");
   const wantPct = useRef(0);
   const wantAmt = useRef(0);
-  const [svcPct, setSvcPct] = useState("10");
+  const DEFAULT_SVC_PCT = 10;
+  const [svcPct, setSvcPct] = useState(String(DEFAULT_SVC_PCT));
+  function svcPctValue(raw?: string | number | null) {
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : DEFAULT_SVC_PCT;
+  }
   const [delivery, setDelivery] = useState("0");
   const [name, setName] = useState(guest);
   const [mob, setMob] = useState(mobile);
@@ -191,7 +196,7 @@ export function PrepareBillDialog({
       preview = await api.post<any>("/api/invoices/preview", {
         orderId,
         ...discountBody(next),
-        serviceChargePct: next?.serviceChargePct ?? (Number(svcPct) || 0),
+        serviceChargePct: next?.serviceChargePct ?? svcPctValue(svcPct),
         otherCharges: Math.round((Number(next?.otherCharges ?? delivery) || 0) * 100),
       });
     } catch (e) {
@@ -219,7 +224,9 @@ export function PrepareBillDialog({
         const inv = snap?.invoice;
         if (inv && !cancel) {
           const discountAmt = Number(inv.discount ?? 0) / 100;
-          const serviceChargePct = Number(inv.service_charge_pct ?? 0);
+          // Old bills saved with 0% must still pick up the default 10% service charge
+          const savedPct = Number(inv.service_charge_pct ?? 0);
+          const serviceChargePct = savedPct > 0 ? savedPct : DEFAULT_SVC_PCT;
           const otherCharges = Number(inv.other_charges ?? 0) / 100;
           discMode.current = "amt";
           wantAmt.current = discountAmt;
@@ -303,7 +310,7 @@ export function PrepareBillDialog({
       .filter((it) => !(it.ids ?? [it.id]).some((id: string) => excluded.has(id)))
       .reduce((s, it) => s + Number(it.amount), 0) + extra;
     const svcMode = bill?.serviceChargeMode === "INCLUSIVE" ? "INCLUSIVE" : "EXCLUSIVE";
-    const pct = Number(svcPct) || 0;
+    const pct = svcPctValue(svcPct);
     const discount = discMode.current === "amt"
       ? Math.max(0, Math.min(Math.round((Number(discAmt) || 0) * 100), discountable))
       : Math.min(discountable, Math.round((discountable * (Number(discPct) || 0)) / 100));
@@ -566,11 +573,27 @@ export function PrepareBillDialog({
       const invoice = await api.post<any>("/api/invoices/generate", {
         orderId,
         ...discountBody(),
-        serviceChargePct: Number(svcPct) || 0,
+        serviceChargePct: svcPctValue(svcPct),
         otherCharges: Math.round((Number(delivery) || 0) * 100),
         reason: remark || undefined,
       });
-      if (print) await api.post(`/api/invoices/${invoice.id}/print`).catch(() => null);
+      if (print) {
+        const printed = await api.post<{
+          ok?: boolean;
+          mode?: string;
+          html?: string;
+          printed?: boolean;
+          error?: string;
+        }>(`/api/invoices/${invoice.id}/print`).catch((e) => {
+          onMessage(e instanceof Error ? e.message : "Could not print bill");
+          return null;
+        });
+        if (printed) {
+          const { handleBillPrintResponse } = await import("./printBillHtml");
+          const sent = await handleBillPrintResponse(printed);
+          if (!sent.ok) onMessage(sent.error || "Bill print failed");
+        }
+      }
       onPrinted(invoice);
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Could not print bill");
@@ -957,11 +980,16 @@ export function PrepareBillDialog({
                             data-num="dec"
                             value={svcPct}
                             onChange={(e) => setSvcPct(numText(e.target.value))}
-                            onBlur={(e) => void load({ serviceChargePct: Number(e.target.value) || 0 })}
+                            onBlur={(e) => {
+                              const serviceChargePct = svcPctValue(e.target.value);
+                              setSvcPct(String(serviceChargePct));
+                              void load({ serviceChargePct });
+                            }}
                             onKeyDown={(e) => {
                               if (e.key !== "Enter") return;
                               e.preventDefault();
-                              const serviceChargePct = Number((e.target as HTMLInputElement).value) || 0;
+                              const serviceChargePct = svcPctValue((e.target as HTMLInputElement).value);
+                              setSvcPct(String(serviceChargePct));
                               void load({ serviceChargePct }).then(() => printRef.current?.focus());
                             }}
                           />
@@ -1229,7 +1257,12 @@ export function SettleDialog({
         </div>
         <div className="bill-btns">
           <span className="st-vno">Voucher No</span>
-          <button type="button" className="fn" onClick={() => api.post(`/api/invoices/${invoiceId}/print`).catch(() => null)}>Print</button>
+          <button type="button" className="fn" onClick={() => {
+            void api.post(`/api/invoices/${invoiceId}/print`).then(async (r) => {
+              const { handleBillPrintResponse } = await import("./printBillHtml");
+              await handleBillPrintResponse(r);
+            }).catch(() => null);
+          }}>Print</button>
           <button type="button" className="fn" onClick={() => void save()}>Save (F2)</button>
           <button type="button" className="fn" onClick={onClose}>Cancel (F4)</button>
           <button type="button" className="fn" onClick={onClose}>Exit</button>

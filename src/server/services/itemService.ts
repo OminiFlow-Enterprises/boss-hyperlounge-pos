@@ -112,6 +112,39 @@ export function taxForSalesGroup(name: string): number | null {
   return null;
 }
 
+/** Tax % to show on bill / KOT: sales group first; if product has no group, same-name catalog row with a group. Does not write the DB. */
+export function displayTaxRate(
+  ctx: AppContext,
+  input: {
+    name: string;
+    salesGroup?: string | null;
+    productTaxRate?: number | null;
+    lineTaxRate?: number | null;
+  },
+): number {
+  const fromGroup = taxForSalesGroup(input.salesGroup ?? "");
+  if (fromGroup != null) return fromGroup;
+  if (!String(input.salesGroup ?? "").trim()) {
+    const alt = ctx.db
+      .prepare(
+        `SELECT sales_group, tax_rate FROM products
+          WHERE active = 1 AND UPPER(name) = UPPER(?) AND IFNULL(sales_group, '') != ''
+          ORDER BY rowid DESC LIMIT 1`,
+      )
+      .get(input.name) as { sales_group: string; tax_rate: number } | undefined;
+    if (alt) {
+      const altGroup = taxForSalesGroup(alt.sales_group);
+      if (altGroup != null) return altGroup;
+      const altTax = Number(alt.tax_rate);
+      if (Number.isFinite(altTax)) return altTax;
+    }
+  }
+  const productTax = Number(input.productTaxRate);
+  if (Number.isFinite(productTax)) return productTax;
+  const lineTax = Number(input.lineTaxRate);
+  return Number.isFinite(lineTax) ? lineTax : 0;
+}
+
 function orderedNames(rows: string[], canonical: string[]) {
   const out: string[] = [];
   for (const name of canonical) {
@@ -223,11 +256,21 @@ export function listItemMaster(ctx: AppContext) {
 
 export function deptRatesByProduct(ctx: AppContext) {
   const rows = ctx.db
-    .prepare("SELECT product_id, dept, rate, enabled FROM product_dept_rates")
-    .all() as Array<{ product_id: string; dept: string; rate: number; enabled: number }>;
-  const map: Record<string, Record<string, { rate: number; enabled: number }>> = {};
+    .prepare("SELECT product_id, dept, rate, enabled, inclusive FROM product_dept_rates")
+    .all() as Array<{
+    product_id: string;
+    dept: string;
+    rate: number;
+    enabled: number;
+    inclusive: number;
+  }>;
+  const map: Record<string, Record<string, { rate: number; enabled: number; inclusive: number }>> = {};
   for (const r of rows) {
-    (map[r.product_id] ??= {})[r.dept] = { rate: r.rate, enabled: r.enabled };
+    (map[r.product_id] ??= {})[r.dept] = {
+      rate: r.rate,
+      enabled: r.enabled,
+      inclusive: r.inclusive ? 1 : 0,
+    };
   }
   return map;
 }

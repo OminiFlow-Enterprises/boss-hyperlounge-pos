@@ -1,6 +1,6 @@
 type ArrowDir = "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown";
 
-const FORM_ROOT = ".dialog, .xfer-dlg, .item-xfer-dlg, .im-dlg, .su-dlg, .adv-form, .set-filter, .rpt-bar, .login-dlg";
+const FORM_ROOT = ".dialog, .xfer-dlg, .item-xfer-dlg, .im-dlg, .su-dlg, .kot-add-dlg, .adv-form, .set-filter, .rpt-bar, .login-dlg";
 
 function textLike(el: HTMLInputElement) {
   return !["checkbox", "radio", "button", "submit", "reset", "file", "hidden", "image"].includes(el.type);

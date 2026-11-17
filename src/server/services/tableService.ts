@@ -77,6 +77,7 @@ function withNetTotals(ctx: AppContext, rows: Array<Record<string, unknown>>) {
       | { discount: number; service_charge_pct: number; service_charge_mode: string; other_charges: number }
       | undefined;
     try {
+      const savedPct = Number(inv?.service_charge_pct) || 0;
       const bill = previewBill(
         ctx,
         order.id,
@@ -84,8 +85,13 @@ function withNetTotals(ctx: AppContext, rows: Array<Record<string, unknown>>) {
           ? {
               discount: Number(inv.discount) || 0,
               discountFrom: "amount",
-              serviceChargePct: Number(inv.service_charge_pct) || 0,
-              serviceChargeMode: (inv.service_charge_mode || "EXCLUSIVE") as ServiceChargeMode,
+              // Prefer saved %; if old bill stored 0, fall through to settings default (10)
+              ...(savedPct > 0
+                ? {
+                    serviceChargePct: savedPct,
+                    serviceChargeMode: (inv.service_charge_mode || "EXCLUSIVE") as ServiceChargeMode,
+                  }
+                : {}),
               otherCharges: Number(inv.other_charges) || 0,
             }
           : {},
