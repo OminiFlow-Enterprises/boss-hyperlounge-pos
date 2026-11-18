@@ -3,6 +3,7 @@ import type { AppContext } from "../lib/context.js";
 import { AppError } from "../lib/errors.js";
 import { nowIso, todayDate, uuid } from "../lib/ids.js";
 import { audit } from "../lib/audit.js";
+import { buildBillTotalLines, type BillTotalLine } from "../hardware/billTotals.js";
 import * as cards from "./cardService.js";
 
 function dayRange(date = todayDate()) {
@@ -211,6 +212,321 @@ export function gstSummary(ctx: AppContext, from?: string, to?: string) {
   return { from: range.start, to: range.end, ...inv, mop };
 }
 
+function mopParticularLabel(method: string, account: string) {
+  const m = String(method || "").toUpperCase();
+  const acc = String(account || "").trim().toUpperCase();
+  if (m === "CASH") return "CASH";
+  if (m === "MEMBER_CARD") return "PREPAID CARD";
+  if (m === "CARD" || m === "UPI") {
+    // Native slip: "BANK TRANSFER / DINEOUT" (account on same / next line)
+    return acc ? `BANK TRANSFER / ${acc}` : "BANK TRANSFER";
+  }
+  if (acc) return `${m || "OTHER"} / ${acc}`;
+  return m || "OTHER";
+}
+
+/** Tax Summery Small Print — Crystal GST Summery slip + footer. */
+export function gstTaxSummary(
+  ctx: AppContext,
+  from?: string,
+  to?: string,
+  filters?: { outlet?: string; billNo?: string; taxReport?: string },
+) {
+  assertPermission(ctx.actor.role, "VIEW_REPORTS");
+  const bill = gstBillWise(ctx, from, to, filters);
+  const t = bill.totals;
+  const gst18Tax = (Number(t.sgst_9) || 0) + (Number(t.cgst_9) || 0);
+  const roundOff = Number(t.round_off) || 0;
+  // Native Total Tax = GST + VAT + Surcharge + Round Off
+  const totalTax =
+    gst18Tax + (Number(t.vat_20) || 0) + (Number(t.surchar_20) || 0) + roundOff;
+  const summary = {
+    total: Number(t.amount) || 0,
+    discount: Number(t.discount) || 0,
+    s_total: Number(t.gross_amount) || 0,
+    service: Number(t.service_charge) || 0,
+    non_gst: 0,
+    gst5_base: 0,
+    gst5_tax: 0,
+    gst18_base: Number(t.net_18) || 0,
+    gst18_tax: gst18Tax,
+    vat20_base: Number(t.net_20) || 0,
+    vat20_tax: Number(t.vat_20) || 0,
+    surcharge20_base: Number(t.net_surchar) || 0,
+    surcharge20_tax: Number(t.surchar_20) || 0,
+    round_off: roundOff,
+    total_tax: totalTax,
+    net_amount: Number(t.net_amount) || 0,
+    bill_advance: Number(bill.footer?.advance) || 0,
+  };
+
+  const range = dateRange(from, to);
+  const outlet = String(filters?.outlet || "").trim();
+  const where = ["i.created_at BETWEEN ? AND ?", "i.status IN ('PAID','UNPAID','PARTIAL')"];
+  const args: Array<string | number> = [range.from, range.to];
+  if (outlet && outlet !== "Select") {
+    where.push("COALESCE(NULLIF(t.outlet, ''), 'BAR') = ?");
+    args.push(outlet);
+  }
+
+  const payRows = ctx.db
+    .prepare(
+      `SELECT p.method AS method, COALESCE(NULLIF(p.reference, ''), '') AS account,
+              COALESCE(SUM(p.amount), 0) AS amount
+       FROM payments p
+       JOIN invoices i ON i.id = p.invoice_id
+       JOIN dining_tables t ON t.id = i.table_id
+       WHERE ${where.join(" AND ")}
+       GROUP BY p.method, account
+       ORDER BY p.method, account`,
+    )
+    .all(...args) as Array<{ method: string; account: string; amount: number }>;
+
+  const particulars: Array<{ label: string; amount: number }> = [];
+  const advanceRows = ctx.db
+    .prepare(
+      `SELECT COALESCE(NULLIF(mop, ''), 'CARD / PAYTM') AS mop, COALESCE(SUM(advance), 0) AS amount
+       FROM bookings WHERE created_at BETWEEN ? AND ?
+       GROUP BY mop HAVING amount > 0
+       ORDER BY mop`,
+    )
+    .all(range.from, range.to) as Array<{ mop: string; amount: number }>;
+  for (const a of advanceRows) {
+    // Native: "Advance :CARD / PAYTM"
+    const mop = String(a.mop || "CARD / PAYTM").trim();
+    particulars.push({ label: `Advance :${mop}`, amount: Number(a.amount) || 0 });
+  }
+  for (const p of payRows) {
+    const amt = Number(p.amount) || 0;
+    if (!amt) continue;
+    particulars.push({ label: mopParticularLabel(p.method, p.account), amount: amt });
+  }
+
+  return {
+    from: bill.from,
+    to: bill.to,
+    summary,
+    particulars,
+    footer: bill.footer,
+  };
+}
+
+function gstBillDate(iso: string) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+function splitGstTaxLines(lines: BillTotalLine[]) {
+  let net18 = 0;
+  let sgst = 0;
+  let cgst = 0;
+  let net20 = 0;
+  let vat = 0;
+  let netSur = 0;
+  let sur = 0;
+  let roundOff = 0;
+  for (const line of lines) {
+    const label = String(line.label || "");
+    if (label.startsWith("CGST")) {
+      cgst += line.amount;
+      net18 += Number(line.base) || 0;
+    } else if (label.startsWith("SGST")) {
+      sgst += line.amount;
+    } else if (label.startsWith("Vat")) {
+      vat += line.amount;
+      net20 += Number(line.base) || 0;
+    } else if (label === "Surcharge") {
+      sur += line.amount;
+      netSur += Number(line.base) || 0;
+    } else if (label === "Round Off") {
+      roundOff += line.amount;
+    }
+  }
+  return { net18, sgst, cgst, net20, vat, netSur, sur, roundOff };
+}
+
+/** Bill-wise FnB GST Report grid (Refresh view). */
+export function gstBillWise(
+  ctx: AppContext,
+  from?: string,
+  to?: string,
+  filters?: { outlet?: string; billNo?: string; taxReport?: string },
+) {
+  assertPermission(ctx.actor.role, "VIEW_REPORTS");
+  const range = dateRange(from, to);
+  const where = ["i.created_at BETWEEN ? AND ?", "i.status IN ('PAID','UNPAID','PARTIAL')"];
+  const args: Array<string | number> = [range.from, range.to];
+  const outlet = String(filters?.outlet || "").trim();
+  if (outlet && outlet !== "Select") {
+    where.push("COALESCE(NULLIF(t.outlet, ''), 'BAR') = ?");
+    args.push(outlet);
+  }
+  if (filters?.billNo?.trim()) {
+    const bill = filters.billNo.trim().replace(/^.*\//, "");
+    where.push("(i.invoice_number = ? OR i.invoice_number LIKE ? OR i.invoice_number LIKE ?)");
+    args.push(bill, `%/${bill}`, `%${bill}`);
+  }
+
+  const invoices = ctx.db
+    .prepare(
+      `SELECT i.id AS invoice_id, i.invoice_number AS bill_no, i.created_at, i.discount,
+              i.food_total, i.drinks_total, i.service_charge, i.service_charge_pct, i.tax,
+              i.other_charges, i.grand_total, cu.name AS client_name
+       FROM invoices i
+       JOIN dining_tables t ON t.id = i.table_id
+       LEFT JOIN customers cu ON cu.id = i.customer_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY i.created_at, i.invoice_number`,
+    )
+    .all(...args) as Array<Record<string, unknown>>;
+
+  const itemStmt = ctx.db.prepare(
+    `SELECT ii.amount AS amount, COALESCE(p.tax_rate, 0) AS tax_rate, p.sales_group AS sales_group
+     FROM invoice_items ii
+     LEFT JOIN products p ON p.id = ii.product_id
+     WHERE ii.invoice_id = ?`,
+  );
+  const payStmt = ctx.db.prepare(
+    `SELECT method, COALESCE(NULLIF(reference, ''), '') AS account, COALESCE(SUM(amount), 0) AS amount
+     FROM payments WHERE invoice_id = ? GROUP BY method, account`,
+  );
+
+  const taxReport = String(filters?.taxReport || "all").toLowerCase();
+  const rows: Array<Record<string, unknown>> = [];
+  for (const inv of invoices) {
+    const food = Number(inv.food_total) || 0;
+    const drinks = Number(inv.drinks_total) || 0;
+    if (taxReport === "liquor" && drinks <= 0) continue;
+    if (taxReport === "fnb" && food <= 0) continue;
+
+    const lines = itemStmt.all(String(inv.invoice_id)) as Array<{
+      amount: number;
+      tax_rate: number;
+      sales_group: string | null;
+    }>;
+    const taxLines = buildBillTotalLines({
+      lines: lines.map((l) => ({
+        amount: Number(l.amount) || 0,
+        taxRate: Number(l.tax_rate) || 0,
+        salesGroup: l.sales_group,
+      })),
+      discount: Number(inv.discount) || 0,
+      discountPct: 0,
+      serviceCharge: Number(inv.service_charge) || 0,
+      serviceChargePct: Number(inv.service_charge_pct) || 10,
+      otherCharges: Number(inv.other_charges) || 0,
+      roundOff: 0,
+      taxTotal: Number(inv.tax) || 0,
+    });
+    const tax = splitGstTaxLines(taxLines);
+    const amount = food + drinks;
+    const discount = Number(inv.discount) || 0;
+    const pays = payStmt.all(String(inv.invoice_id)) as Array<{ method: string; account: string; amount: number }>;
+    const mopParts: string[] = [];
+    for (const p of pays) {
+      const label = mopParticularLabel(p.method, p.account);
+      if (label && !mopParts.includes(label)) mopParts.push(label);
+    }
+    const primaryMop = mopParts[0] || "";
+    const mopShort = primaryMop.startsWith("BANK TRANSFER")
+      ? "BANK TRANSFER"
+      : primaryMop === "PREPAID CARD"
+        ? "PREPAID CARD"
+        : primaryMop || "";
+    rows.push({
+      invoice_id: inv.invoice_id,
+      bill_no: String(inv.bill_no || ""),
+      bill_date: gstBillDate(String(inv.created_at || "")),
+      client_name: String(inv.client_name || ""),
+      gstin: "",
+      amount,
+      discount,
+      gross_amount: Math.max(0, amount - discount),
+      service_charge: Number(inv.service_charge) || 0,
+      net_18: tax.net18,
+      sgst_9: tax.sgst,
+      cgst_9: tax.cgst,
+      net_20: tax.net20,
+      vat_20: tax.vat,
+      net_surchar: tax.netSur,
+      surchar_20: tax.sur,
+      round_off: tax.roundOff,
+      net_amount: Number(inv.grand_total) || 0,
+      // Native MOP cell looks like "0.00/- BANK TRANSFER"
+      mop: mopShort ? `0.00/- ${mopShort}` : "",
+      payment_modes: mopParts.join(", "),
+      food_total: food,
+      drinks_total: drinks,
+    });
+  }
+
+  const sum = (key: string) => rows.reduce((s, r) => s + (Number(r[key]) || 0), 0);
+  const columnTotals = {
+    amount: sum("amount"),
+    discount: sum("discount"),
+    gross_amount: sum("gross_amount"),
+    service_charge: sum("service_charge"),
+    net_18: sum("net_18"),
+    sgst_9: sum("sgst_9"),
+    cgst_9: sum("cgst_9"),
+    net_20: sum("net_20"),
+    vat_20: sum("vat_20"),
+    net_surchar: sum("net_surchar"),
+    surchar_20: sum("surchar_20"),
+    round_off: sum("round_off"),
+    net_amount: sum("net_amount"),
+  };
+
+  const mopRows = ctx.db
+    .prepare(
+      `SELECT p.method AS method, COALESCE(SUM(p.amount),0) AS amount
+       FROM payments p
+       JOIN invoices i ON i.id = p.invoice_id
+       JOIN dining_tables t ON t.id = i.table_id
+       WHERE i.created_at BETWEEN ? AND ? AND i.status IN ('PAID','UNPAID','PARTIAL')
+         ${outlet && outlet !== "Select" ? "AND COALESCE(NULLIF(t.outlet, ''), 'BAR') = ?" : ""}
+       GROUP BY p.method`,
+    )
+    .all(...(outlet && outlet !== "Select" ? [range.from, range.to, outlet] : [range.from, range.to])) as Array<{
+    method: string;
+    amount: number;
+  }>;
+
+  let cash = 0;
+  let bank = 0;
+  let prepaid = 0;
+  for (const m of mopRows) {
+    const method = String(m.method || "");
+    const amt = Number(m.amount) || 0;
+    if (method === "CASH") cash += amt;
+    else if (method === "MEMBER_CARD") prepaid += amt;
+    else if (method === "CARD" || method === "UPI") bank += amt;
+  }
+
+  const advance = ctx.db
+    .prepare(
+      `SELECT COALESCE(SUM(advance), 0) AS n FROM bookings WHERE created_at BETWEEN ? AND ?`,
+    )
+    .get(range.from, range.to) as { n: number };
+
+  return {
+    from: range.start,
+    to: range.end,
+    rows,
+    totals: columnTotals,
+    footer: {
+      advance: Number(advance?.n) || 0,
+      bank,
+      cash,
+      prepaid,
+      liquor: sum("drinks_total"),
+      food: sum("food_total"),
+    },
+  };
+}
+
 export function settlementReport(
   ctx: AppContext,
   from?: string,
@@ -408,38 +724,90 @@ function stampKotTime(iso?: string) {
   return `${String(h).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")} ${ap}`;
 }
 
-export function kotReport(ctx: AppContext, from?: string, to?: string, station?: string) {
+export function kotReport(
+  ctx: AppContext,
+  from?: string,
+  to?: string,
+  station?: string,
+  filters?: {
+    outlet?: string;
+    kotNo?: string;
+    tableNo?: string;
+    billNo?: string;
+    complementary?: string;
+  },
+) {
   assertPermission(ctx.actor.role, "VIEW_REPORTS");
   const range = dateRange(from, to);
-  let sql = `SELECT k.id, k.kot_number, '' AS manual_kot,
-                    COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
-                    k.created_at, k.notes AS kot_remark, k.station, k.status, k.type,
-                    COALESCE(s.name, '') AS steward,
-                    (SELECT i.invoice_number FROM invoices i WHERE i.order_id = k.order_id ORDER BY i.created_at DESC LIMIT 1) AS bill_no,
-                    (SELECT COALESCE(SUM(oi.unit_price * ki2.qty), 0)
-                       FROM kot_items ki2
-                       LEFT JOIN order_items oi ON oi.id = ki2.order_item_id
-                      WHERE ki2.kot_id = k.id) AS net_amount
-             FROM kots k
-             JOIN dining_tables t ON t.id = k.table_id
-             LEFT JOIN staff s ON s.id = k.waiter_id
-             WHERE k.created_at BETWEEN ? AND ?`;
+  const where = ["k.created_at BETWEEN ? AND ?"];
   const args: string[] = [range.from, range.to];
   if (station) {
-    sql += " AND k.station = ?";
+    where.push("k.station = ?");
     args.push(station);
   }
-  sql += " ORDER BY k.created_at";
+  const outlet = String(filters?.outlet || "").trim();
+  if (outlet && outlet !== "Select") {
+    where.push("COALESCE(NULLIF(t.outlet, ''), 'BAR') = ?");
+    args.push(outlet);
+  }
+  if (filters?.kotNo?.trim()) {
+    const kot = filters.kotNo.trim().replace(/\D/g, "") || filters.kotNo.trim();
+    where.push("(REPLACE(k.kot_number, 'KOT-', '') LIKE ? OR k.kot_number LIKE ?)");
+    args.push(`%${kot}%`, `%${kot}%`);
+  }
+  if (filters?.tableNo?.trim()) {
+    const q = `%${filters.tableNo.trim()}%`;
+    where.push("(t.code LIKE ? OR t.name LIKE ?)");
+    args.push(q, q);
+  }
+  if (filters?.billNo?.trim()) {
+    const bill = filters.billNo.trim().replace(/^.*\//, "");
+    where.push(
+      `EXISTS (
+         SELECT 1 FROM invoices i
+          WHERE i.order_id = k.order_id
+            AND (i.invoice_number = ? OR i.invoice_number LIKE ? OR i.invoice_number LIKE ?)
+       )`,
+    );
+    args.push(bill, `%/${bill}`, `%${bill}`);
+  }
+  const comp = String(filters?.complementary || "Select").trim();
+  if (comp === "Yes") {
+    where.push("(IFNULL(k.notes,'') LIKE '%COMPLIM%' OR IFNULL(k.notes,'') LIKE '%complementary%')");
+  } else if (comp === "No") {
+    where.push("(IFNULL(k.notes,'') NOT LIKE '%COMPLIM%' AND IFNULL(k.notes,'') NOT LIKE '%complementary%')");
+  }
+
+  const sql = `SELECT k.id, k.kot_number, '' AS manual_kot,
+                      COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
+                      t.code AS table_code,
+                      k.created_at, k.notes AS kot_remark, k.station, k.status, k.type,
+                      COALESCE(s.name, '') AS steward,
+                      COALESCE(s.username, k.station, '') AS user_id,
+                      COALESCE(NULLIF(t.outlet, ''), 'BAR') AS outlet_name,
+                      (SELECT i.invoice_number FROM invoices i WHERE i.order_id = k.order_id ORDER BY i.created_at DESC LIMIT 1) AS bill_no,
+                      (SELECT COALESCE(SUM(oi.unit_price * ki2.qty), 0)
+                         FROM kot_items ki2
+                         LEFT JOIN order_items oi ON oi.id = ki2.order_item_id
+                        WHERE ki2.kot_id = k.id) AS net_amount
+               FROM kots k
+               JOIN dining_tables t ON t.id = k.table_id
+               LEFT JOIN staff s ON s.id = k.waiter_id
+               WHERE ${where.join(" AND ")}
+               ORDER BY k.created_at`;
   const rows = (ctx.db.prepare(sql).all(...args) as Array<Record<string, unknown>>).map((r) => {
     const created = String(r.created_at || "");
+    const kotRaw = String(r.kot_number || "");
+    const billRaw = String(r.bill_no || "");
     return {
       ...r,
+      kot_number: kotRaw.replace(/\D/g, "") || kotRaw,
+      bill_no: billRaw.includes("/") ? billRaw.slice(billRaw.lastIndexOf("/") + 1).replace(/\D/g, "") || billRaw : billRaw.replace(/\D/g, "") || billRaw || "0",
       kot_date: stampKotDate(created),
       kot_time: stampKotTime(created),
-      user_id: String(r.station || ""),
     };
   });
-  return { from: range.start, to: range.end, rows };
+  return { from: range.start, to: range.end, outlet: outlet || "", rows };
 }
 
 export function kotDetail(ctx: AppContext, kotKey: string) {
@@ -507,23 +875,103 @@ export function kotDetail(ctx: AppContext, kotKey: string) {
   };
 }
 
-export function billReport(ctx: AppContext, from?: string, to?: string) {
+export function billReport(
+  ctx: AppContext,
+  from?: string,
+  to?: string,
+  filters?: {
+    outlet?: string;
+    billNo?: string;
+    tableNo?: string;
+    status?: "all" | "active" | "cancelled";
+    discountedOnly?: boolean;
+  },
+) {
   assertPermission(ctx.actor.role, "VIEW_REPORTS");
   const range = dateRange(from, to);
-  const rows = ctx.db
+  const where = ["i.created_at BETWEEN ? AND ?"];
+  const args: Array<string | number> = [range.from, range.to];
+  const outlet = String(filters?.outlet || "").trim();
+  if (outlet && outlet !== "Select") {
+    where.push("COALESCE(NULLIF(t.outlet, ''), 'BAR') = ?");
+    args.push(outlet);
+  }
+  if (filters?.billNo?.trim()) {
+    // Match short bill id (10023) or full (26-27/10023)
+    const bill = filters.billNo.trim().replace(/^.*\//, "");
+    where.push("(i.invoice_number = ? OR i.invoice_number LIKE ? OR i.invoice_number LIKE ?)");
+    args.push(bill, `%/${bill}`, `%${bill}`);
+  }
+  if (filters?.tableNo?.trim()) {
+    const q = `%${filters.tableNo.trim()}%`;
+    where.push("(t.code LIKE ? OR t.name LIKE ?)");
+    args.push(q, q);
+  }
+  const status = filters?.status || "all";
+  if (status === "active") where.push("i.status IN ('UNPAID','PARTIAL')");
+  else if (status === "cancelled") where.push("i.status IN ('VOID','CANCELLED')");
+  else where.push("i.status IN ('UNPAID','PARTIAL','PAID','VOID','CANCELLED')");
+  if (filters?.discountedOnly) where.push("COALESCE(i.discount, 0) > 0");
+
+  const invoices = ctx.db
     .prepare(
-      `SELECT i.invoice_number, COALESCE(NULLIF(t.name, ''), t.code) AS table_no, i.grand_total, i.status, i.created_at,
-              i.food_total, i.drinks_total, cu.name AS guest,
+      `SELECT i.id AS invoice_id, i.order_id, i.invoice_number, i.table_id,
+              COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
+              t.code AS table_code, i.grand_total, i.status, i.created_at, i.discount,
+              i.food_total, i.drinks_total, cu.name AS guest, cu.mobile AS mobile,
               COALESCE(NULLIF(t.outlet, ''), 'BAR') AS outlet_name,
-              (SELECT p.id FROM payments p WHERE p.invoice_id = i.id ORDER BY p.created_at DESC LIMIT 1) AS payment_id
+              s.name AS username,
+              (SELECT p.id FROM payments p WHERE p.invoice_id = i.id ORDER BY p.created_at DESC LIMIT 1) AS payment_id,
+              (SELECT COALESCE(p.remark, '') FROM payments p WHERE p.invoice_id = i.id ORDER BY p.created_at DESC LIMIT 1) AS remark
        FROM invoices i
        JOIN dining_tables t ON t.id = i.table_id
        LEFT JOIN customers cu ON cu.id = i.customer_id
-       WHERE i.created_at BETWEEN ? AND ?
-       ORDER BY i.created_at`,
+       LEFT JOIN staff s ON s.id = i.cashier_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY i.created_at, i.invoice_number`,
     )
-    .all(range.from, range.to);
-  return { from: range.start, to: range.end, rows };
+    .all(...args) as Array<Record<string, unknown>>;
+
+  const payStmt = ctx.db.prepare(
+    `SELECT method, COALESCE(SUM(amount), 0) AS amount
+       FROM payments WHERE invoice_id = ? GROUP BY method`,
+  );
+
+  const rows = invoices.map((row) => {
+    const pays = payStmt.all(String(row.invoice_id)) as Array<{ method: string; amount: number }>;
+    let cash = 0;
+    let card = 0;
+    let other = 0;
+    for (const p of pays) {
+      const m = String(p.method || "");
+      const amt = Number(p.amount) || 0;
+      if (m === "CASH") cash += amt;
+      else if (m === "CARD" || m === "UPI") card += amt;
+      else other += amt;
+    }
+    return {
+      ...row,
+      net_amount: Number(row.grand_total) || 0,
+      cash,
+      card,
+      btc: 0,
+      wallet: 0,
+      room_transfer: 0,
+      other_mod: other,
+      allowance: Number(row.discount) || 0,
+      remark: String(row.remark || ""),
+      username: String(row.username || ""),
+    };
+  });
+
+  const total = rows.reduce((s, r) => s + (Number(r.net_amount) || 0), 0);
+  return {
+    from: range.start,
+    to: range.end,
+    outlet: outlet || "",
+    rows,
+    total,
+  };
 }
 
 export function listBookings(ctx: AppContext) {

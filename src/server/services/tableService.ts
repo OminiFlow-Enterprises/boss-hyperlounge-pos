@@ -263,19 +263,24 @@ export function closeTable(ctx: AppContext, tableId: string) {
 
 export function transferTable(ctx: AppContext, fromTableId: string, toTableId: string, reason?: string) {
   if (fromTableId === toTableId) throw new AppError("Cannot transfer a table to itself");
+  const why = String(reason ?? "").trim();
+  if (!why) throw new AppError("Reason is mandatory");
   const from = getTable(ctx, fromTableId);
   const to = getTable(ctx, toTableId);
   if (!from.current_session_id) throw new AppError("Source table has no running order");
+  if (from.status === "PAYMENT_PENDING") throw new AppError("Printed bill table cannot be transferred");
   if (to.status !== "AVAILABLE") throw new AppError(`Destination table ${to.code} is not available`);
 
   const sessionId = from.current_session_id;
-  ctx.db.prepare("UPDATE table_sessions SET table_id = ? WHERE id = ?").run(to.id, sessionId);
+  const destOutlet = to.outlet || "BAR";
+  // Keep destination table's outlet; move the open session onto that outlet/table.
+  ctx.db.prepare("UPDATE table_sessions SET table_id = ?, outlet = ? WHERE id = ?").run(to.id, destOutlet, sessionId);
   ctx.db.prepare("UPDATE orders SET table_id = ? WHERE session_id = ?").run(to.id, sessionId);
   ctx.db.prepare("UPDATE kots SET table_id = ? WHERE session_id = ?").run(to.id, sessionId);
   ctx.db.prepare("UPDATE invoices SET table_id = ? WHERE session_id = ?").run(to.id, sessionId);
   ctx.db
-    .prepare("UPDATE dining_tables SET status = ?, current_session_id = ?, outlet = ? WHERE id = ?")
-    .run(from.status === "AVAILABLE" ? "OCCUPIED" : from.status, sessionId, from.outlet || "BAR", to.id);
+    .prepare("UPDATE dining_tables SET status = ?, current_session_id = ? WHERE id = ?")
+    .run(from.status === "AVAILABLE" ? "OCCUPIED" : from.status, sessionId, to.id);
   ctx.db
     .prepare("UPDATE dining_tables SET status = 'AVAILABLE', current_session_id = NULL WHERE id = ?")
     .run(from.id);
@@ -286,8 +291,12 @@ export function transferTable(ctx: AppContext, fromTableId: string, toTableId: s
       `INSERT INTO table_transfers (id, from_table_id, to_table_id, session_id, staff_id, reason, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(transferId, from.id, to.id, sessionId, ctx.actor.staffId, reason ?? null, nowIso());
-  audit(ctx, "TABLE_TRANSFER", "dining_table", from.id, reason ?? null, from.code, to.code);
+    .run(transferId, from.id, to.id, sessionId, ctx.actor.staffId, why, nowIso());
+  audit(ctx, "TABLE_TRANSFER", "dining_table", from.id, why, from.code, {
+    to: to.code,
+    fromOutlet: from.outlet || "BAR",
+    toOutlet: destOutlet,
+  });
   return { transferId, from: getTable(ctx, from.id), to: getTable(ctx, to.id), sessionId };
 }
 

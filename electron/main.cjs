@@ -360,6 +360,24 @@ app.on("second-instance", () => {
   mainWindow.focus();
 });
 
+ipcMain.handle("pos:window", async (_event, action) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return { ok: false };
+  if (action === "minimize") {
+    mainWindow.minimize();
+    return { ok: true };
+  }
+  if (action === "maximize") {
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+    return { ok: true };
+  }
+  if (action === "close") {
+    mainWindow.close();
+    return { ok: true };
+  }
+  return { ok: false };
+});
+
 ipcMain.handle("pos:print-html", async (_event, { html, deviceName }) => {
   const printer = String(deviceName || "bill");
   const win = new BrowserWindow({

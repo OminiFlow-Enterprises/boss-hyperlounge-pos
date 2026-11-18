@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
-import { AlertBox, ConfirmAsk } from "./BillDialogs";
+import { AlertBox, CapBtns, ConfirmAsk } from "./BillDialogs";
 import { itemMatchScore } from "../shared/itemSearch";
 
 const DEPTS = ["CAFE", "BAR", "THE BOSS CLUB", "RESTAURANT", "NC"] as const;
@@ -407,11 +407,7 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
         <div className="dialog-cap">
           <span className="cap-dot" />
           Item Master
-          <span className="cap-btns">
-            <button type="button" tabIndex={-1}>–</button>
-            <button type="button" tabIndex={-1}>□</button>
-            <button type="button" onClick={onClose}>✕</button>
-          </span>
+          <CapBtns onClose={onClose} />
         </div>
         <div className="im-body">
           <div className="im-row">
@@ -598,9 +594,7 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
           <div className="dialog-cap">
             <span className="cap-dot" />
             Item Group
-            <span className="cap-btns">
-              <button type="button" onClick={() => setGroupOpen(false)}>✕</button>
-            </span>
+            <CapBtns onClose={() => setGroupOpen(false)} chrome={false} />
           </div>
           <div className="im-group-body">
             <span>Name</span>

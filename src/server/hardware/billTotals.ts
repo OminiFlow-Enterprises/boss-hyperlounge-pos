@@ -48,9 +48,37 @@ function vatPrintRate(rate: number): number {
   return Math.abs(rate - 24) < 0.001 ? 20 : rate;
 }
 
+/** VAT @ 24% prints as Vat 20% + separate Surcharge (4% of base / 20% of VAT amount). */
+function pushVatAndSurcharge(rows: BillTotalLine[], v: Acc) {
+  if (!v.tax && !v.base) return;
+  const printRate = vatPrintRate(v.rate);
+  if (Math.abs(v.rate - 24) < 0.001) {
+    const vatAmount = Math.round((v.base * 20) / 100);
+    const surchargeAmount = Math.max(0, v.tax - vatAmount);
+    rows.push({
+      label: `Vat ${fmtPct(printRate, printRate % 1 === 0 ? 0 : 1)}%`,
+      base: v.base,
+      amount: vatAmount,
+    });
+    if (surchargeAmount > 0) {
+      rows.push({
+        label: "Surcharge",
+        base: vatAmount,
+        amount: surchargeAmount,
+      });
+    }
+    return;
+  }
+  rows.push({
+    label: `Vat ${fmtPct(printRate, printRate % 1 === 0 ? 0 : 1)}%`,
+    base: v.base,
+    amount: v.tax,
+  });
+}
+
 /**
- * Sequence (screenshot):
- * Discount → Vat 20% → Surcharge → S.C. VOLUNTARY 10 % → CGST % → SGST % → Delivery → Round Off
+ * Sequence (native slip / cashier):
+ * Discount → S.C. VOLUNTARY 10 % → Vat 20% → Surcharge → CGST % → SGST % → Delivery → Round Off
  */
 export function buildBillTotalLines(input: {
   lines: BillLineForTax[];
@@ -118,27 +146,6 @@ export function buildBillTotalLines(input: {
     }
   }
 
-  for (const v of [...vatByRate.values()].sort((a, b) => a.rate - b.rate)) {
-    if (!v.tax && !v.base) continue;
-    const printRate = vatPrintRate(v.rate);
-    rows.push({
-      label: `Vat ${fmtPct(printRate, printRate % 1 === 0 ? 0 : 1)}%`,
-      base: v.base,
-      amount: v.tax,
-    });
-  }
-
-  // Unknown non-VAT/GST rates: show as Vat-style so % still prints
-  for (const v of [...otherByRate.values()].sort((a, b) => a.rate - b.rate)) {
-    if (!v.tax && !v.base) continue;
-    const printRate = vatPrintRate(v.rate);
-    rows.push({
-      label: `Vat ${fmtPct(printRate, printRate % 1 === 0 ? 0 : 1)}%`,
-      base: v.base,
-      amount: v.tax,
-    });
-  }
-
   // 10% service charge prints as S.C. VOLUNTARY (not "Service Charge" / "Surcharge 10%")
   if (input.serviceCharge > 0) {
     const scPct = Number(input.serviceChargePct) || 10;
@@ -148,6 +155,18 @@ export function buildBillTotalLines(input: {
     });
   }
 
+  for (const v of [...vatByRate.values()].sort((a, b) => a.rate - b.rate)) {
+    pushVatAndSurcharge(rows, v);
+  }
+
+  // Unknown non-VAT/GST rates: show as Vat-style so % still prints
+  for (const v of [...otherByRate.values()].sort((a, b) => a.rate - b.rate)) {
+    pushVatAndSurcharge(rows, v);
+  }
+
+  // Display CGST/SGST as equal halves; odd paise goes to Round Off (not shown as 265.53/265.52).
+  let gstOddPaise = 0;
+
   // No per-line rates available: still print CGST/SGST with % from the invoice tax total
   if (
     input.taxTotal != null &&
@@ -156,34 +175,35 @@ export function buildBillTotalLines(input: {
     gstByRate.size === 0 &&
     otherByRate.size === 0
   ) {
-    const half = Math.round(input.taxTotal / 2);
-    const other = input.taxTotal - half;
+    const half = Math.floor(input.taxTotal / 2);
+    gstOddPaise += input.taxTotal - half * 2;
     rows.push({ label: "CGST 9.0%", amount: half });
-    rows.push({ label: "SGST 9.0%", amount: other });
+    rows.push({ label: "SGST 9.0%", amount: half });
   }
 
   for (const g of [...gstByRate.values()].sort((a, b) => a.rate - b.rate)) {
     if (!g.tax && !g.base) continue;
     const halfRate = g.rate / 2;
-    const cgst = Math.round(g.tax / 2);
-    const sgst = g.tax - cgst;
+    const half = Math.floor(g.tax / 2);
+    gstOddPaise += g.tax - half * 2;
     rows.push({
       label: `CGST ${fmtPct(halfRate, 1)}%`,
       base: g.base,
-      amount: cgst,
+      amount: half,
     });
     rows.push({
       label: `SGST ${fmtPct(halfRate, 1)}%`,
       base: g.base,
-      amount: sgst,
+      amount: half,
     });
   }
 
   if (input.otherCharges > 0) {
     rows.push({ label: "Delivery Charge", amount: input.otherCharges });
   }
-  if (input.roundOff !== 0) {
-    rows.push({ label: "Round Off", amount: input.roundOff });
+  const roundOff = (input.roundOff || 0) + gstOddPaise;
+  if (roundOff !== 0) {
+    rows.push({ label: "Round Off", amount: roundOff });
   }
 
   return rows;

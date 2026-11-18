@@ -74,6 +74,8 @@ export function moveFormFocus(e: KeyboardEvent) {
   const active = document.activeElement as HTMLElement | null;
   if (!active?.matches("input, select, textarea, button")) return false;
   if (active.dataset.list === "open") return false;
+  // Outlet / cycle fields own Up/Down (and Left/Right) themselves
+  if (active.dataset.cycle === "1" || active.classList.contains("xfer-outlet-box")) return false;
   if (active.closest(".cap-btns, .caption-btns")) return false;
   const root = active.closest(FORM_ROOT);
   if (!root) return false;

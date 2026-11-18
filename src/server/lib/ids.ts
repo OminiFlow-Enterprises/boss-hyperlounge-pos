@@ -48,3 +48,20 @@ export function peekNextNumber(db: Database.Database, name: string, prefix: stri
     | undefined;
   return `${prefix}${row ? row.value + 1 : start}`;
 }
+
+/** Indian FY label, e.g. Nov 2026 → `26-27/` for bill nos like `26-27/10022`. */
+export function financialYearPrefix(d = new Date()): string {
+  const year = d.getFullYear();
+  const fyStart = d.getMonth() >= 3 ? year : year - 1;
+  const a = String(fyStart).slice(-2);
+  const b = String(fyStart + 1).slice(-2);
+  return `${a}-${b}/`;
+}
+
+export function nextBillNumber(db: Database.Database, d = new Date()): string {
+  return nextNumber(db, "invoice", financialYearPrefix(d));
+}
+
+export function peekNextBillNumber(db: Database.Database, d = new Date()): string {
+  return peekNextNumber(db, "invoice", financialYearPrefix(d));
+}

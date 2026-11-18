@@ -3,7 +3,7 @@ import { api, ApiError } from "./api";
 import { formatINR } from "../shared/money";
 import type { NavView, PaymentMode, StaffRole } from "../shared/types";
 import { ReportHost } from "./Reports";
-import { AlertBox, ConfirmAsk, ItemTransferDialog, PrepareBillDialog, PrepareTablePick, SettleDialog, TransferDialog } from "./BillDialogs";
+import { AlertBox, CapBtns, ConfirmAsk, ItemNotesDialog, ItemTransferDialog, PrepareBillDialog, PrepareTablePick, SettleDialog, TransferDialog } from "./BillDialogs";
 import { armReplaceOnFocus, blockLetterInsert, blockLetters, moveFormFocus, replaceOnFirstKey } from "./formNav";
 import { itemMatchScore } from "../shared/itemSearch";
 import { ItemMasterDialog } from "./ItemMaster";
@@ -283,7 +283,8 @@ export function App() {
   useEffect(() => {
     function keys(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
-      if (document.querySelector(".su-dlg, .confirm-dlg, .alert-dlg, .kot-view")) return;
+      // Restaurant Bill / settlement dialogs own Escape (back to report first)
+      if (document.querySelector(".bill-dlg, .settle-dlg, .su-dlg, .confirm-dlg, .confirm-overlay, .alert-dlg, .kot-view")) return;
       if (view === "billing" || view === "advance-booking" || view === "card-block") {
         if (view === "billing" && menu) {
           e.preventDefault();
@@ -330,9 +331,41 @@ export function App() {
           Organisation : THE BOSS&nbsp;&nbsp;&nbsp;&nbsp;Session :2026-27&nbsp;&nbsp;&nbsp;&nbsp;Version : 1.0.0&nbsp;&nbsp;&nbsp;&nbsp;- [{deptLabel}]
         </div>
         <div className="caption-btns">
-          <button type="button">─</button>
-          <button type="button">☐</button>
-          <button type="button" className="cap-close">✕</button>
+          <button
+            type="button"
+            aria-label="Minimize"
+            onClick={() => {
+              if (window.bossWindow) void window.bossWindow.minimize();
+            }}
+          >
+            ─
+          </button>
+          <button
+            type="button"
+            aria-label="Maximize"
+            onClick={() => {
+              if (window.bossWindow) void window.bossWindow.maximize();
+            }}
+          >
+            ☐
+          </button>
+          <button
+            type="button"
+            className="cap-close"
+            aria-label="Close"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (window.bossWindow) void window.bossWindow.close();
+              else window.close();
+            }}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+            }}
+          >
+            ✕
+          </button>
         </div>
       </header>
       <nav className="menubar" onClick={(e) => e.stopPropagation()}>
@@ -415,7 +448,7 @@ export function App() {
         <div className="dialog">
           <div className="dialog-cap">
             USER LOGIN
-            <button type="button" onClick={() => go("billing")}>✕</button>
+            <CapBtns onClose={() => go("billing")} chrome={false} />
           </div>
           <div className="dialog-body">
             <LoginForm actor={actor} onLogin={(a) => { setActor(a); go("billing"); }} terminalId={bootstrap.actor.terminalId} />
@@ -477,6 +510,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   const [xferOpen, setXferOpen] = useState(false);
   const [itemXferOpen, setItemXferOpen] = useState(false);
   const [itemMasterOpen, setItemMasterOpen] = useState(false);
+  const [noteItem, setNoteItem] = useState<OrderItem | null>(null);
+  /** Punch grid only — not written to DB until Print KOT. */
+  const [draftItems, setDraftItems] = useState<OrderItem[]>([]);
+  const draftSeq = useRef(0);
   const [waiter, setWaiter] = useState("A");
   const [itemQuery, setItemQuery] = useState("");
   const [typed, setTyped] = useState("");
@@ -505,7 +542,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
 
   const table = tables.find((t) => t.id === tableId);
   const allItems: OrderItem[] = detail?.items ?? [];
-  const items: OrderItem[] = allItems.filter((it) => !it.kot_id);
+  const servedItems: OrderItem[] = allItems.filter((it) => it.kot_id);
+  const items: OrderItem[] = draftItems;
   const tableItemList = useMemo(() => {
     const map = new Map<string, { code: string; name: string; qty: number }>();
     for (const it of (detail?.items ?? []) as OrderItem[]) {
@@ -549,6 +587,30 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     return d;
   }
 
+  /** Drop any leftover DB punch lines that were never Print KOTed. */
+  async function clearServerUnsent(oid: string) {
+    const d = await api.get<any>(`/api/orders/${oid}`);
+    const unsent = ((d.items ?? []) as OrderItem[]).filter((it) => !it.kot_id);
+    for (const it of unsent) {
+      await api.post(`/api/order-items/${it.id}/cancel`, { reason: "ESC" }).catch(() => null);
+    }
+    if (unsent.length) return loadOrder(oid);
+    setDetail(d);
+    return d;
+  }
+
+  function servedQtyOf(productId: string) {
+    return servedItems
+      .filter((it) => (it.product_id || "") === productId)
+      .reduce((s, it) => s + it.qty, 0);
+  }
+
+  function draftQtyOf(productId: string, exceptId?: string | null) {
+    return draftItems
+      .filter((it) => (it.product_id || "") === productId && it.id !== exceptId)
+      .reduce((s, it) => s + it.qty, 0);
+  }
+
   async function selectTable(id: string, code?: string) {
     setTableId(id);
     if (code) setTableCode(code);
@@ -560,7 +622,16 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       const order = await api.post<any>("/api/orders", { tableId: id });
       setOrderId(order.id);
       setItemListSel(0);
-      await loadOrder(order.id);
+      setDraftItems([]);
+      setEditingId(null);
+      setPending(null);
+      setNameLocked(false);
+      setItemQuery("");
+      setTyped("");
+      setQtyStr("1");
+      setListOpen(false);
+      setSel(-1);
+      await clearServerUnsent(order.id);
       if (t?.customer_name) setGuest(t.customer_name);
       if (t?.card_number) {
         if (clubMode) setClubCard(t.card_number);
@@ -581,6 +652,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setDept(next);
     setOrderId(null);
     setDetail(null);
+    setDraftItems([]);
     setTableId("");
     setTableCode("");
     setPending(null);
@@ -749,6 +821,15 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setListOpen(false);
   }
 
+  function scrollGridRow(row: HTMLElement | null | undefined) {
+    const body = gridBodyRef.current;
+    if (!body || !row || body.scrollHeight <= body.clientHeight) return;
+    const top = row.offsetTop;
+    const bottom = top + row.offsetHeight;
+    if (top < body.scrollTop) body.scrollTop = top;
+    else if (bottom > body.scrollTop + body.clientHeight) body.scrollTop = bottom - body.clientHeight;
+  }
+
   function moveRow(delta: number) {
     const last = items.length;
     const cur = sel < 0 || sel > last ? last : sel;
@@ -758,14 +839,14 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       setSel(next);
       requestAnimationFrame(() => {
         itemRef.current?.focus();
-        gridBodyRef.current?.querySelector(".igrid-row.entry")?.scrollIntoView({ block: "nearest" });
+        scrollGridRow(gridBodyRef.current?.querySelector(".igrid-row.entry") as HTMLElement | null);
       });
       return;
     }
     startEdit(next);
     requestAnimationFrame(() => {
       const row = gridBodyRef.current?.querySelectorAll(".igrid-row:not(.entry)")[next] as HTMLElement | undefined;
-      row?.scrollIntoView({ block: "nearest" });
+      scrollGridRow(row);
     });
   }
 
@@ -851,15 +932,45 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   }
 
   function chooseItem(product: Product) {
-    const idx = matches.findIndex((p) => p.id === product.id);
-    setPick(idx < 0 ? 0 : idx);
+    setListOpen(false);
     setPending(product);
     setItemQuery(product.name);
     setNameLocked(true);
-    setListOpen(false);
     setQtyStr("1");
     if (!editingId) setSel(items.length);
     focusQty();
+  }
+
+  function mergeDraftLine(prev: OrderItem[], product: Product, n: number, keepNotes = ""): OrderItem[] {
+    const notes = keepNotes;
+    const same = prev.find(
+      (it) => (it.product_id || "") === product.id && (it.notes ?? "") === notes,
+    );
+    if (same) {
+      const nextQty = same.qty + n;
+      if (nextQty === 0) return prev.filter((it) => it.id !== same.id);
+      return prev.map((it) => (it.id === same.id ? { ...it, qty: nextQty } : it));
+    }
+    if (n < 0 && notes === "") {
+      const any = prev.find((it) => (it.product_id || "") === product.id);
+      if (any) {
+        const nextQty = any.qty + n;
+        if (nextQty === 0) return prev.filter((it) => it.id !== any.id);
+        if (nextQty > 0) return prev.map((it) => (it.id === any.id ? { ...it, qty: nextQty } : it));
+      }
+    }
+    draftSeq.current += 1;
+    const row: OrderItem = {
+      id: `draft-${draftSeq.current}`,
+      product_id: product.id,
+      sku: product.sku,
+      name: product.name,
+      qty: n,
+      unit_price: product.base_price,
+      station: product.station,
+      notes: notes || undefined,
+    };
+    return [...prev, row];
   }
 
   async function addItem(product: Product, qty = 1, next: "item" | "none" = "item") {
@@ -875,15 +986,24 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       return false;
     }
     const n = Number.isInteger(qty) && qty !== 0 ? qty : parseQty(String(qty)) ?? 1;
+    const netAfter = draftQtyOf(product.id) + n;
+    if (netAfter < 0) {
+      const served = servedQtyOf(product.id);
+      if (served < -netAfter) {
+        onMessage(served <= 0 ? "This item not served on this table!" : "Cannot reduce more than ordered qty");
+        return false;
+      }
+    }
     if (n > 0 && payCard.trim()) {
       try {
         const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(payCard.trim())}`);
         const usable = Number(b.balances?.usable ?? 0);
         const line = product.base_price * n;
         const running = (table?.running_total as number)
-          || allItems.reduce((s, i) => s + i.qty * i.unit_price, 0)
+          || servedItems.reduce((s, i) => s + i.qty * i.unit_price, 0)
           || 0;
-        if (usable < running + line) {
+        const draftTotal = draftItems.reduce((s, i) => s + i.qty * i.unit_price, 0);
+        if (usable < running + draftTotal + line) {
           onMessage(`Insufficient amount  Card balance : ${(usable / 100).toFixed(2)}`);
           return false;
         }
@@ -894,28 +1014,18 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         return false;
       }
     }
-    try {
-      await api.post(`/api/orders/${orderId}/items`, {
-        productId: product.id,
-        qty: n,
-        notes: remark || undefined,
-        outlet: deptOutlet(dept),
-      });
-      setPending(null);
-      setNameLocked(false);
-      setItemQuery("");
-      setTyped("");
-      setQtyStr("1");
-      setListOpen(false);
-      const d = await loadOrder(orderId);
-      setSel((d.items ?? []).filter((it: OrderItem) => !it.kot_id).length);
-      onRefresh();
-      if (next === "item") setFocusEntry((x) => x + 1);
-      return true;
-    } catch (e) {
-      onMessage(e instanceof Error ? e.message : "Could not add item");
-      return false;
-    }
+    const merged = mergeDraftLine(draftItems, product, n);
+    setDraftItems(merged);
+    setPending(null);
+    setNameLocked(false);
+    setItemQuery("");
+    setTyped("");
+    setQtyStr("1");
+    setListOpen(false);
+    setEditingId(null);
+    setSel(merged.length);
+    if (next === "item") setFocusEntry((x) => x + 1);
+    return true;
   }
 
   async function commitQty() {
@@ -923,63 +1033,148 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       itemRef.current?.focus();
       return;
     }
-    const n = parseQty(qtyStr) ?? 1;
+    if (qtyStr.trim() === "-" || qtyStr.trim() === "") {
+      qtyRef.current?.focus();
+      qtyRef.current?.select();
+      return false;
+    }
+    const n = parseQty(qtyStr);
+    if (n == null) {
+      onMessage("Enter a valid qty");
+      qtyRef.current?.focus();
+      qtyRef.current?.select();
+      return false;
+    }
+    // Minus qty is a reduction punch (Print KOT cancel), never in-place /qty edit
+    if (n < 0) {
+      const ok = await addItem(pending, n, "none");
+      if (ok) {
+        setEditingId(null);
+        if (!remark.trim()) {
+          remarkRef.current?.focus();
+        } else {
+          setFocusEntry((x) => x + 1);
+          focusInput(itemRef.current);
+        }
+      }
+      return ok;
+    }
     if (editingId) {
       const line = items.find((it) => it.id === editingId);
-      try {
-        const sameItem = !line || pending.id === line.product_id || pending.name === line.name;
-        if (line && !sameItem) {
-          await api.post(`/api/order-items/${editingId}/cancel`, { reason: "changed item" });
-          await api.post(`/api/orders/${orderId}/items`, {
-            productId: pending.id,
+      const sameItem = !line || pending.id === line.product_id || pending.name === line.name;
+      if (line && !sameItem) {
+        setDraftItems((prev) => {
+          draftSeq.current += 1;
+          const row: OrderItem = {
+            id: `draft-${draftSeq.current}`,
+            product_id: pending.id,
+            sku: pending.sku,
+            name: pending.name,
             qty: n,
-            notes: remark || undefined,
-            outlet: deptOutlet(dept),
-          });
-        } else if (line && n !== line.qty) {
-          await api.post(`/api/order-items/${editingId}/qty`, { qty: n });
-        }
-        clearEditor();
-        if (orderId) {
-          const d = await loadOrder(orderId);
-          setSel((d.items ?? []).filter((it: OrderItem) => !it.kot_id).length);
-        }
-        onRefresh();
-        focusInput(itemRef.current);
-      } catch (e) {
-        onMessage(e instanceof Error ? e.message : "Could not update item");
-        return false;
+            unit_price: pending.base_price,
+            station: pending.station,
+            notes: line.notes,
+          };
+          return prev.map((it) => (it.id === editingId ? row : it));
+        });
+      } else if (line && n !== line.qty) {
+        setDraftItems((prev) => prev.map((it) => (it.id === editingId ? { ...it, qty: n } : it)));
       }
+      clearEditor();
+      setSel(draftItems.length);
+      focusInput(itemRef.current);
       return true;
     }
     const ok = await addItem(pending, n, "item");
     if (ok) focusInput(itemRef.current);
+    return ok;
   }
 
   async function printKot() {
-    let id = orderId;
-    if (pending && editingId) {
-      const ok = await commitQty();
-      if (!ok) return;
-      id = orderId;
-    } else if (pending) {
-      const n = parseQty(qtyStr) ?? 1;
-      const ok = await addItem(pending, n, "none");
-      if (!ok) return;
-      id = orderId;
-    }
+    const id = orderId;
     if (!id) {
       onMessage("No items to print");
       return;
     }
+    let toSend = draftItems;
+    if (pending) {
+      const n = parseQty(qtyStr);
+      if (n == null) {
+        onMessage("Enter a valid qty");
+        qtyRef.current?.focus();
+        qtyRef.current?.select();
+        return;
+      }
+      if (n < 0) {
+        const netAfter = draftQtyOf(pending.id, editingId) + n;
+        const served = servedQtyOf(pending.id);
+        if (netAfter < 0 && served < -netAfter) {
+          onMessage(served <= 0 ? "This item not served on this table!" : "Cannot reduce more than ordered qty");
+          return;
+        }
+      }
+      if (editingId) {
+        const line = draftItems.find((it) => it.id === editingId);
+        const sameItem = !line || pending.id === line.product_id || pending.name === line.name;
+        if (line && !sameItem) {
+          draftSeq.current += 1;
+          toSend = draftItems.map((it) =>
+            it.id === editingId
+              ? {
+                  id: `draft-${draftSeq.current}`,
+                  product_id: pending.id,
+                  sku: pending.sku,
+                  name: pending.name,
+                  qty: n,
+                  unit_price: pending.base_price,
+                  station: pending.station,
+                  notes: line.notes,
+                }
+              : it,
+          );
+        } else if (line) {
+          toSend = draftItems.map((it) => (it.id === editingId ? { ...it, qty: n } : it));
+        } else {
+          toSend = mergeDraftLine(draftItems, pending, n);
+        }
+      } else {
+        toSend = mergeDraftLine(draftItems, pending, n);
+      }
+      setDraftItems(toSend);
+      setPending(null);
+      setEditingId(null);
+      setNameLocked(false);
+      setItemQuery("");
+      setTyped("");
+      setQtyStr("1");
+      setListOpen(false);
+    }
+    if (!toSend.length) {
+      onMessage("No items to print");
+      return;
+    }
+    if (toSend.some((it) => it.qty < 0) && !remark.trim()) {
+      remarkRef.current?.focus();
+      return;
+    }
     try {
+      for (const it of toSend) {
+        await api.post(`/api/orders/${id}/items`, {
+          productId: it.product_id,
+          qty: it.qty,
+          notes: it.notes?.trim() || undefined,
+          outlet: deptOutlet(dept),
+        });
+      }
       await api.post(`/api/orders/${id}/send-kot`, {
         remark: remark.trim() || undefined,
         steward: waiter.trim() || undefined,
       });
+      setDraftItems([]);
       goMainBilling();
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "KOT failed");
+      await clearServerUnsent(id).catch(() => null);
     }
   }
 
@@ -1001,6 +1196,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setItemListSel(0);
     setOrderId(null);
     setDetail(null);
+    setDraftItems([]);
     setTableId("");
     setTableCode("");
     setClubCard("");
@@ -1019,12 +1215,9 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   }
 
   async function abandonPunch() {
-    if (orderId) {
-      const current = items;
-      for (const it of current) {
-        await api.post(`/api/order-items/${it.id}/cancel`, { reason: "ESC" }).catch(() => null);
-      }
-    }
+    const oid = orderId;
+    setDraftItems([]);
+    if (oid) await clearServerUnsent(oid).catch(() => null);
     goMainBilling();
   }
 
@@ -1128,11 +1321,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     if (listOpen) placeDrop();
   }, [listOpen, itemQuery, items.length, pick]);
 
-  useEffect(() => {
-    if (!listOpen) return;
-    const el = dropRef.current?.querySelector(".on") as HTMLElement | null;
-    el?.scrollIntoView({ block: "nearest" });
-  }, [listOpen, pick]);
+  // visiblePicks already windows the drop list — never scrollIntoView the
+  // highlight (that scrolls the whole billing pane while typing / Enter).
 
   useEffect(() => {
     const n = listForPick().length;
@@ -1142,7 +1332,14 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   useLayoutEffect(() => {
     if (!focusEntry) return;
     itemRef.current?.focus();
-    gridBodyRef.current?.querySelector(".igrid-row.entry")?.scrollIntoView({ block: "nearest" });
+    const body = gridBodyRef.current;
+    const entry = body?.querySelector(".igrid-row.entry") as HTMLElement | null;
+    if (body && entry && body.scrollHeight > body.clientHeight) {
+      const top = entry.offsetTop;
+      const bottom = top + entry.offsetHeight;
+      if (top < body.scrollTop) body.scrollTop = top;
+      else if (bottom > body.scrollTop + body.clientHeight) body.scrollTop = bottom - body.clientHeight;
+    }
   }, [focusEntry, items.length]);
 
   useEffect(() => {
@@ -1155,6 +1352,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     function keys(e: KeyboardEvent) {
       if (document.querySelector(".alert-dlg")) return;
       if (askExit) return;
+      if (noteItem) return;
       if (itemMasterOpen) {
         if (e.key.startsWith("F") && e.key.length > 1) e.preventDefault();
         return;
@@ -1182,6 +1380,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         if (!pickOpen && !billOrder && !settleInv && !xferOpen && !itemXferOpen) prepareBill();
         return;
       }
+      // Table / item transfer owns the keyboard (Outlet Up/Down, etc.)
+      if (xferOpen || itemXferOpen) return;
       if (e.altKey && e.key === "1") { e.preventDefault(); switchDept("CLUB"); }
       if (e.altKey && e.key === "2") { e.preventDefault(); switchDept("RESTAURANT"); }
       if (e.altKey && e.key === "3") { e.preventDefault(); switchDept("NC"); }
@@ -1195,10 +1395,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       if (e.key === "F3" || e.code === "F3") {
         e.preventDefault();
         e.stopPropagation();
-        if (!pickOpen && !billOrder && !settleInv && !xferOpen && !itemXferOpen) setItemMasterOpen(true);
+        if (!pickOpen && !billOrder && !settleInv) setItemMasterOpen(true);
         return;
       }
-      if (pickOpen || billOrder || settleInv || xferOpen || itemXferOpen) return;
+      if (pickOpen || billOrder || settleInv) return;
       if (e.key === "Escape") {
         e.preventDefault();
         if (payOpen) setPayOpen(false);
@@ -1211,8 +1411,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         setItemXferOpen(true);
       }
       if (e.key === "F5" || e.key === "F6" || e.key === "F16") { e.preventDefault(); void printKot(); }
-      if (e.key === "F7") { e.preventDefault(); onOpenView("kot-report"); }
-      if (e.key === "F8") { e.preventDefault(); onOpenView("bill-report"); }
+      if (e.key === "F7") { e.preventDefault(); onOpenView("kot-report", deptOutlet(dept)); }
+      if (e.key === "F8") { e.preventDefault(); onOpenView("bill-report", deptOutlet(dept)); }
       if (e.key === "F12") { e.preventDefault(); onOpenView("settlement-report", deptOutlet(dept)); }
     }
     keyHandler.current = keys;
@@ -1335,13 +1535,29 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           bumpQty(1);
         } else if (e.key === "-" || e.key === "_") {
           e.preventDefault();
-          bumpQty(-1);
+          e.stopPropagation();
+          const el = e.currentTarget;
+          const allSelected = el.selectionStart === 0 && el.selectionEnd === el.value.length;
+          // With Qty selected (usual after item pick), "-" starts typing -2 / -1 — do not bump to -1 then lose the minus.
+          if (allSelected || qtyStr === "" || qtyStr === "1" || qtyStr === "-") {
+            setQtyStr("-");
+            delete el.dataset.replace;
+            requestAnimationFrame(() => {
+              const q = qtyRef.current;
+              if (q) {
+                delete q.dataset.replace;
+                q.setSelectionRange(1, 1);
+              }
+            });
+          } else {
+            bumpQty(-1);
+          }
         } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
           e.stopPropagation();
         } else if (e.key === "Backspace") {
           const el = e.currentTarget;
           const allSelected = el.selectionStart === 0 && el.selectionEnd === el.value.length;
-          if (allSelected || qtyStr === "1" || qtyStr === "-1" || qtyStr === "") {
+          if (allSelected || qtyStr === "1" || qtyStr === "-1" || qtyStr === "" || qtyStr === "-") {
             e.preventDefault();
             itemRef.current?.focus();
           }
@@ -1356,7 +1572,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   const listTotal = estimateRows.reduce((s, t) => s + (t.net_total ?? t.running_total ?? 0), 0);
   const grand = items.reduce((s, i) => s + i.qty * i.unit_price, 0);
   const tableEstimate = (table?.net_total ?? table?.running_total ?? 0)
-    || allItems.reduce((s, i) => s + i.qty * i.unit_price, 0)
+    || servedItems.reduce((s, i) => s + i.qty * i.unit_price, 0)
     || grand;
   const showTableItems = Boolean(tableId) && table?.status !== "PAYMENT_PENDING";
 
@@ -1476,6 +1692,12 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                 tabIndex={0}
                 className={`igrid-row ${editingId === it.id ? "editing" : ""}`}
                 onClick={(e) => { setSel(i); e.currentTarget.focus(); }}
+                onDoubleClick={(e) => {
+                  e.preventDefault();
+                  setSel(i);
+                  if (editingId === it.id) return;
+                  setNoteItem(it);
+                }}
                 onKeyDown={(e) => {
                   const target = e.target as HTMLElement;
                   if (target.closest("input, textarea, select")) return;
@@ -1538,10 +1760,19 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
             tabIndex={6}
             value={remark}
             onChange={(e) => setRemark(e.target.value)}
+            onBlur={() => {
+              if (draftItems.some((it) => it.qty < 0) && !remark.trim()) {
+                requestAnimationFrame(() => remarkRef.current?.focus());
+              }
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === "Tab") {
                 e.preventDefault();
                 e.stopPropagation();
+                if (draftItems.some((it) => it.qty < 0) && !remark.trim()) {
+                  remarkRef.current?.focus();
+                  return;
+                }
                 kotBtnRef.current?.focus();
               }
             }}
@@ -1572,8 +1803,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                 </td>
               </tr>
               <tr>
-                <td><button className="fn" onClick={() => onOpenView("kot-report")}>KOT Rep. (F7)</button></td>
-                <td><button className="fn" onClick={() => onOpenView("bill-report")}>Bill Rep. (F8)</button></td>
+                <td><button className="fn" onClick={() => onOpenView("kot-report", deptOutlet(dept))}>KOT Rep. (F7)</button></td>
+                <td><button className="fn" onClick={() => onOpenView("bill-report", deptOutlet(dept))}>Bill Rep. (F8)</button></td>
                 <td><button className="fn" onClick={() => onOpenView("settlement-report", deptOutlet(dept))}>S. Report (F12)</button></td>
                 <td><button className="fn" onClick={() => setItemXferOpen(true)}>Item transfer (F4)</button></td>
                 <td><button className="fn" onClick={() => setXferOpen(true)}>T. Transfer (F9)</button></td>
@@ -1693,6 +1924,30 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           onNo={() => setAskExit(false)}
         />
       )}
+      {noteItem && (
+        <ItemNotesDialog
+          itemName={noteItem.name}
+          initialNotes={noteItem.notes ?? ""}
+          onClose={() => {
+            setNoteItem(null);
+            setEditingId(null);
+            setSel(items.length);
+            setFocusEntry((x) => x + 1);
+            focusInput(itemRef.current);
+          }}
+          onSave={(notes) => {
+            const cleaned = notes.trim();
+            setDraftItems((prev) =>
+              prev.map((it) => (it.id === noteItem.id ? { ...it, notes: cleaned || undefined } : it)),
+            );
+            setNoteItem(null);
+            setEditingId(null);
+            setSel(draftItems.length);
+            setFocusEntry((x) => x + 1);
+            focusInput(itemRef.current);
+          }}
+        />
+      )}
       {xferOpen && (
         <TransferDialog
           tables={tables}
@@ -1702,7 +1957,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           onDone={(fromCode, to) => {
             setXferOpen(false);
             onRefresh();
-            onMessage(`Transferred ${fromCode} to ${to.code}`);
+            const toOutlet = to.outlet || "BAR";
+            onMessage(`Transferred ${fromCode} to ${to.code} (${toOutlet})`);
             if (tableCode.toLowerCase() === fromCode.toLowerCase()) {
               setTableId(to.id);
               setTableCode(to.code);
@@ -1756,7 +2012,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
             setTableId("");
             setTableCode("");
             onRefresh();
-            onMessage("Bill printed");
           }}
           onMessage={onMessage}
         />

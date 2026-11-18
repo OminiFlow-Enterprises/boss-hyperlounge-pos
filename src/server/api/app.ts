@@ -225,6 +225,9 @@ export function createApp(options: CreateAppOptions) {
   app.post("/api/order-items/:id/qty", wrap((req, res) => {
     res.json(orders.modifyItemQty(req.ctx, req.params.id, Number(req.body.qty)));
   }));
+  app.post("/api/order-items/:id/notes", wrap((req, res) => {
+    res.json(orders.setItemNotes(req.ctx, req.params.id, String(req.body?.notes ?? "")));
+  }));
   app.post("/api/order-items/:id/cancel", wrap((req, res) => {
     res.json(orders.cancelItem(req.ctx, req.params.id, req.body.reason ?? "cancelled"));
   }));
@@ -296,7 +299,19 @@ export function createApp(options: CreateAppOptions) {
     res.json(reports.itemWiseSales(req.ctx, req.query.from ? String(req.query.from) : undefined, req.query.to ? String(req.query.to) : undefined));
   }));
   app.get("/api/reports/gst", wrap((req, res) => {
-    res.json(reports.gstSummary(req.ctx, req.query.from ? String(req.query.from) : undefined, req.query.to ? String(req.query.to) : undefined));
+    const mode = String(req.query.mode || "bills").toLowerCase();
+    const filters = {
+      outlet: req.query.outlet ? String(req.query.outlet) : undefined,
+      billNo: req.query.bill ? String(req.query.bill) : undefined,
+      taxReport: req.query.tax ? String(req.query.tax) : undefined,
+    };
+    const from = req.query.from ? String(req.query.from) : undefined;
+    const to = req.query.to ? String(req.query.to) : undefined;
+    if (mode === "summary" || mode === "tax-summary") {
+      res.json(reports.gstTaxSummary(req.ctx, from, to, filters));
+      return;
+    }
+    res.json(reports.gstBillWise(req.ctx, from, to, filters));
   }));
   app.get("/api/reports/settlement", wrap((req, res) => {
     res.json(reports.settlementReport(
@@ -334,13 +349,33 @@ export function createApp(options: CreateAppOptions) {
       req.query.from ? String(req.query.from) : undefined,
       req.query.to ? String(req.query.to) : undefined,
       req.query.station ? String(req.query.station) : undefined,
+      {
+        outlet: req.query.outlet ? String(req.query.outlet) : undefined,
+        kotNo: req.query.kot ? String(req.query.kot) : undefined,
+        tableNo: req.query.table ? String(req.query.table) : undefined,
+        billNo: req.query.bill ? String(req.query.bill) : undefined,
+        complementary: req.query.complementary ? String(req.query.complementary) : undefined,
+      },
     ));
   }));
   app.get("/api/reports/kots/:kotKey", wrap((req, res) => {
     res.json(reports.kotDetail(req.ctx, String(req.params.kotKey)));
   }));
   app.get("/api/reports/bills", wrap((req, res) => {
-    res.json(reports.billReport(req.ctx, req.query.from ? String(req.query.from) : undefined, req.query.to ? String(req.query.to) : undefined));
+    const statusRaw = String(req.query.status || "all").toLowerCase();
+    const status = statusRaw === "active" || statusRaw === "cancelled" ? statusRaw : "all";
+    res.json(reports.billReport(
+      req.ctx,
+      req.query.from ? String(req.query.from) : undefined,
+      req.query.to ? String(req.query.to) : undefined,
+      {
+        outlet: req.query.outlet ? String(req.query.outlet) : undefined,
+        billNo: req.query.bill ? String(req.query.bill) : undefined,
+        tableNo: req.query.table ? String(req.query.table) : undefined,
+        status,
+        discountedOnly: req.query.discounted === "1" || req.query.discounted === "true",
+      },
+    ));
   }));
   app.get("/api/bookings", wrap((req, res) => res.json(reports.listBookings(req.ctx))));
   app.post("/api/bookings", wrap((req, res) => res.json(reports.saveBooking(req.ctx, req.body ?? {}))));

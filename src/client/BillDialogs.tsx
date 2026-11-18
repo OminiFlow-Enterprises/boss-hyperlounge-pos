@@ -1,7 +1,7 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { api, ApiError } from "./api";
-import { formatINR, parseRupeesInput } from "../shared/money";
+import { parseRupeesInput } from "../shared/money";
 import { itemMatchScore } from "../shared/itemSearch";
 import type { PaymentMode } from "../shared/types";
 
@@ -50,6 +50,43 @@ function insufficientCard(e: unknown) {
   return e instanceof Error ? e.message : "Payment failed";
 }
 
+/** Win32 caption ✕ — mousedown so overlays / focus traps cannot swallow the click. */
+export function CapClose({ onClose }: { onClose: () => void }) {
+  return (
+    <button
+      type="button"
+      className="cap-x"
+      tabIndex={-1}
+      aria-label="Close"
+      onMouseDown={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+    >
+      ✕
+    </button>
+  );
+}
+
+export function CapBtns({ onClose, chrome = true }: { onClose: () => void; chrome?: boolean }) {
+  return (
+    <span className="cap-btns">
+      {chrome && (
+        <>
+          <button type="button" tabIndex={-1} aria-hidden="true">–</button>
+          <button type="button" tabIndex={-1} aria-hidden="true">□</button>
+        </>
+      )}
+      <CapClose onClose={onClose} />
+    </span>
+  );
+}
+
 export function PrepareTablePick({
   tables,
   title = "Prepare Bill",
@@ -83,7 +120,10 @@ export function PrepareTablePick({
 
   return (
     <div className="prep-pick" role="listbox" ref={box} tabIndex={-1}>
-      <div className="prep-pick-cap">{title}</div>
+      <div className="prep-pick-cap">
+        {title}
+        <CapClose onClose={onClose} />
+      </div>
       {tables.map((t, i) => (
         <div
           key={t.id}
@@ -171,6 +211,8 @@ export function PrepareBillDialog({
   const [addQty, setAddQty] = useState("1");
   const [pending, setPending] = useState<BillProduct | null>(null);
   const [dropBox, setDropBox] = useState<{ top: number; left: number; width: number; up: boolean } | null>(null);
+  const [ask, setAsk] = useState<null | "save" | "print">(null);
+  const savedInvoice = useRef<any>(null);
 
   function discountBody(next?: { discountPct?: number; discountAmt?: number; mode?: "pct" | "amt"; excludeItemIds?: string[] }) {
     const mode = next?.mode ?? discMode.current;
@@ -527,6 +569,7 @@ export function PrepareBillDialog({
 
   useEffect(() => {
     function keys(e: KeyboardEvent) {
+      if (ask || document.querySelector(".confirm-dlg, .alert-dlg")) return;
       if (e.key === "Escape") {
         if (addOpen || nameOpen) {
           e.preventDefault();
@@ -539,8 +582,8 @@ export function PrepareBillDialog({
         e.stopPropagation();
         onClose();
       }
-      if (e.key === "F10") { e.preventDefault(); e.stopPropagation(); void printBill(); }
-      if (e.key === "F5") { e.preventDefault(); e.stopPropagation(); void printBill(false); }
+      if (e.key === "F10") { e.preventDefault(); e.stopPropagation(); void printBill(true); }
+      if (e.key === "F5") { e.preventDefault(); e.stopPropagation(); setAsk("save"); }
       if (e.key === "F4") {
         const typing = document.activeElement === addNameRef.current || document.activeElement === addQtyRef.current || document.activeElement === editNameRef.current || (document.activeElement as HTMLElement | null)?.classList.contains("price");
         if (!typing) {
@@ -566,8 +609,8 @@ export function PrepareBillDialog({
     return () => window.removeEventListener("keydown", keys, true);
   });
 
-  async function printBill(print = true) {
-    if (busy.current) return;
+  async function saveBill() {
+    if (busy.current) return null;
     busy.current = true;
     try {
       const invoice = await api.post<any>("/api/invoices/generate", {
@@ -577,29 +620,55 @@ export function PrepareBillDialog({
         otherCharges: Math.round((Number(delivery) || 0) * 100),
         reason: remark || undefined,
       });
-      if (print) {
-        const printed = await api.post<{
-          ok?: boolean;
-          mode?: string;
-          html?: string;
-          printed?: boolean;
-          error?: string;
-        }>(`/api/invoices/${invoice.id}/print`).catch((e) => {
-          onMessage(e instanceof Error ? e.message : "Could not print bill");
-          return null;
-        });
-        if (printed) {
-          const { handleBillPrintResponse } = await import("./printBillHtml");
-          const sent = await handleBillPrintResponse(printed);
-          if (!sent.ok) onMessage(sent.error || "Bill print failed");
-        }
-      }
-      onPrinted(invoice);
+      savedInvoice.current = invoice;
+      return invoice;
     } catch (e) {
-      onMessage(e instanceof Error ? e.message : "Could not print bill");
+      onMessage(e instanceof Error ? e.message : "Could not save bill");
+      return null;
     } finally {
       busy.current = false;
     }
+  }
+
+  async function printInvoice(invoice: { id: string }) {
+    const printed = await api.post<{
+      ok?: boolean;
+      mode?: string;
+      html?: string;
+      printed?: boolean;
+      error?: string;
+    }>(`/api/invoices/${invoice.id}/print`).catch((e) => {
+      onMessage(e instanceof Error ? e.message : "Could not print bill");
+      return null;
+    });
+    if (printed) {
+      const { handleBillPrintResponse } = await import("./printBillHtml");
+      const sent = await handleBillPrintResponse(printed);
+      if (!sent.ok) onMessage(sent.error || "Bill print failed");
+    }
+  }
+
+  async function printBill(print = true) {
+    if (busy.current) return;
+    const invoice = await saveBill();
+    if (!invoice) return;
+    if (print) await printInvoice(invoice);
+    onPrinted(invoice);
+  }
+
+  function finishAfterSave(doPrint: boolean) {
+    const invoice = savedInvoice.current;
+    const shouldPrint = doPrint === true;
+    // Defer unmount so the Yes/No click cannot fall through onto Print Bill (F10)
+    window.setTimeout(() => {
+      setAsk(null);
+      (document.activeElement as HTMLElement | null)?.blur?.();
+      if (!invoice) return;
+      void (async () => {
+        if (shouldPrint) await printInvoice(invoice);
+        onPrinted(invoice);
+      })();
+    }, 100);
   }
 
   const now = new Date();
@@ -611,11 +680,7 @@ export function PrepareBillDialog({
       <div className="dialog-cap">
         <span className="cap-dot" />
         Restaurant Bill - {outlet}
-        <span className="cap-btns">
-          <button type="button" tabIndex={-1}>–</button>
-          <button type="button" tabIndex={-1}>□</button>
-          <button type="button" onClick={onClose}>✕</button>
-        </span>
+        <CapBtns onClose={onClose} />
       </div>
       <div className="bill-body">
         <table className="bill-form">
@@ -1009,17 +1074,42 @@ export function PrepareBillDialog({
           </tbody>
         </table>
 
-        <div className="bill-btns">
-          <button ref={printRef} type="button" className="fn" onClick={() => void printBill(true)} onKeyDown={(e) => {
-            if (e.key === "Enter") { e.preventDefault(); void printBill(true); }
+        <div className="bill-btns" style={ask ? { pointerEvents: "none" } : undefined}>
+          <button ref={printRef} type="button" className="fn" disabled={Boolean(ask)} onClick={() => { if (!ask) void printBill(true); }} onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); if (!ask) void printBill(true); }
           }}>Print Bill (F10)</button>
-          <button type="button" className="fn" onClick={() => onReopen?.()}>Reopen Bill</button>
-          <button type="button" className="fn" onClick={() => void printBill(false)}>Save (F5)</button>
+          <button type="button" className="fn" disabled={Boolean(ask)} onClick={() => onReopen?.()}>Reopen Bill</button>
+          <button type="button" className="fn" disabled={Boolean(ask)} onClick={() => setAsk("save")}>Save (F5)</button>
           <button type="button" className="fn" onClick={() => void load()}>Print Estimate</button>
           <button type="button" className="fn">Share Bill</button>
           <button type="button" className="fn" onClick={onClose}>Exit</button>
         </div>
       </div>
+      {ask === "save" && (
+        <ConfirmAsk
+          message="Do you want to save?"
+          onYes={() => {
+            window.setTimeout(() => {
+              setAsk(null);
+              void (async () => {
+                const inv = await saveBill();
+                // Wait so Enter from Save? cannot also answer Print?
+                if (inv) window.setTimeout(() => setAsk("print"), 350);
+              })();
+            }, 100);
+          }}
+          onNo={() => window.setTimeout(() => setAsk(null), 100)}
+        />
+      )}
+      {ask === "print" && (
+        <ConfirmAsk
+          message="Do you want to print?"
+          defaultFocus="no"
+          ignoreEnterMs={400}
+          onYes={() => finishAfterSave(true)}
+          onNo={() => finishAfterSave(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1047,12 +1137,65 @@ export function SettleDialog({
   const [remark, setRemark] = useState("");
   const [payCard, setPayCard] = useState(cardNo);
   const [payBal, setPayBal] = useState("");
-  const [bankName, setBankName] = useState("");
+  const [bankName, setBankName] = useState(BANK_NAMES[0]);
+  const [warn, setWarn] = useState("");
+  const warnBack = useRef<"amount" | "mode" | "bank" | "card" | "save">("amount");
   const amtRef = useRef<HTMLInputElement>(null);
   const payCardRef = useRef<HTMLInputElement>(null);
   const bankRef = useRef<HTMLSelectElement>(null);
   const modeRef = useRef<HTMLSelectElement>(null);
+  const saveBtnRef = useRef<HTMLButtonElement>(null);
+  const methodRef = useRef<PaymentMode>("CASH");
+  const bankValueRef = useRef(BANK_NAMES[0]);
   const busy = useRef(false);
+
+  function focusField(where: "amount" | "mode" | "bank" | "card" | "save") {
+    if (where === "amount") {
+      amtRef.current?.focus();
+      amtRef.current?.select();
+    } else if (where === "mode") modeRef.current?.focus();
+    else if (where === "bank") bankRef.current?.focus();
+    else if (where === "card") {
+      payCardRef.current?.focus();
+      payCardRef.current?.select();
+    } else saveBtnRef.current?.focus();
+  }
+
+  function showWarn(message: string, back: "amount" | "mode" | "bank" | "card" | "save") {
+    warnBack.current = back;
+    setWarn(message);
+  }
+
+  function chooseMode(next: PaymentMode) {
+    methodRef.current = next;
+    setMethod(next);
+    if (next === "CARD" && !BANK_NAMES.includes(bankValueRef.current)) {
+      bankValueRef.current = BANK_NAMES[0];
+      setBankName(BANK_NAMES[0]);
+    }
+    if (next !== "MEMBER_CARD") setPayBal("");
+  }
+
+  function stepMode(dir: 1 | -1) {
+    const i = PAY_MODES.findIndex((m) => m.id === methodRef.current);
+    const next = PAY_MODES[Math.max(0, Math.min(PAY_MODES.length - 1, (i < 0 ? 0 : i) + dir))];
+    if (next) chooseMode(next.id);
+  }
+
+  function stepBank(dir: 1 | -1) {
+    const i = Math.max(0, BANK_NAMES.indexOf(bankValueRef.current));
+    const next = BANK_NAMES[Math.max(0, Math.min(BANK_NAMES.length - 1, i + dir))];
+    if (!next || next === bankValueRef.current) return;
+    bankValueRef.current = next;
+    setBankName(next);
+  }
+
+  function afterMode() {
+    const mode = methodRef.current;
+    if (mode === "CARD") window.setTimeout(() => bankRef.current?.focus(), 0);
+    else if (mode === "MEMBER_CARD") window.setTimeout(() => { payCardRef.current?.focus(); payCardRef.current?.select(); }, 0);
+    else window.setTimeout(() => saveBtnRef.current?.focus(), 0);
+  }
 
   function dueOf(data: any) {
     return Number(data?.due ?? 0);
@@ -1070,6 +1213,7 @@ export function SettleDialog({
 
   useEffect(() => {
     function keys(e: KeyboardEvent) {
+      if (warn) return;
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); }
       if (e.key === "F2") { e.preventDefault(); e.stopPropagation(); void save(); }
       if (e.key === "F4") { e.preventDefault(); e.stopPropagation(); onClose(); }
@@ -1082,18 +1226,16 @@ export function SettleDialog({
     if (busy.current || !snap) return;
     const due = dueOf(snap);
     let paise = 0;
-    try { paise = parseRupeesInput(amount || "0"); } catch { onMessage("Enter settle amount"); return; }
-    if (paise <= 0) { onMessage("Enter settle amount"); return; }
+    try { paise = parseRupeesInput(amount || "0"); } catch { showWarn("Enter settle amount", "amount"); return; }
+    if (paise <= 0) { showWarn("Enter settle amount", "amount"); return; }
     if (paise > due) paise = due;
     if (method === "CARD" && !bankName) {
-      onMessage("Select bank name");
-      bankRef.current?.focus();
+      showWarn("Select bank name", "bank");
       return;
     }
     const cardRaw = payCard.trim();
     if (method === "MEMBER_CARD" && !cardRaw) {
-      onMessage("Enter Card No");
-      payCardRef.current?.focus();
+      showWarn("Enter Card No", "card");
       return;
     }
     busy.current = true;
@@ -1103,8 +1245,7 @@ export function SettleDialog({
         const found = await api.get<Card[]>(`/api/cards?q=${encodeURIComponent(cardRaw)}`);
         memberCardId = found[0]?.id;
         if (!memberCardId) {
-          onMessage("Card not found");
-          payCardRef.current?.focus();
+          showWarn("Card not found", "card");
           busy.current = false;
           return;
         }
@@ -1113,12 +1254,12 @@ export function SettleDialog({
           const usable = Number(b.balances?.usable ?? 0);
           setPayBal(rupee(usable));
           if (usable < paise) {
-            onMessage(`Insufficient amount  Card balance : ${rupee(usable)}`);
+            showWarn(`Insufficient amount  Card balance : ${rupee(usable)}`, "amount");
             busy.current = false;
             return;
           }
         } catch {
-          onMessage("Card not found");
+          showWarn("Card not found", "card");
           busy.current = false;
           return;
         }
@@ -1138,12 +1279,37 @@ export function SettleDialog({
       }
       setSnap(result);
       setAmount(rupee(Number(result.due ?? 0)));
-      onMessage(`Balance ${formatINR(Number(result.due ?? 0))}`);
+      methodRef.current = "CASH";
+      setMethod("CASH");
+      setPayBal("");
       setTimeout(() => { amtRef.current?.focus(); amtRef.current?.select(); }, 0);
     } catch (e) {
-      onMessage(insufficientCard(e));
+      showWarn(insufficientCard(e), method === "MEMBER_CARD" ? "amount" : "save");
     } finally {
       busy.current = false;
+    }
+  }
+
+  async function acceptCard() {
+    const q = payCard.trim();
+    if (!q) { showWarn("Enter Card No", "card"); return; }
+    let paise = 0;
+    try { paise = parseRupeesInput(amount || "0"); } catch { showWarn("Enter settle amount", "amount"); return; }
+    if (paise <= 0) { showWarn("Enter settle amount", "amount"); return; }
+    const due = dueOf(snap);
+    if (paise > due) paise = due;
+    try {
+      const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(q)}`);
+      const usable = Number(b.balances?.usable ?? 0);
+      setPayBal(rupee(usable));
+      if (usable < paise) {
+        showWarn(`Insufficient amount  Card balance : ${rupee(usable)}`, "amount");
+        return;
+      }
+      window.setTimeout(() => saveBtnRef.current?.focus(), 0);
+    } catch {
+      setPayBal("");
+      showWarn("Card not found", "card");
     }
   }
 
@@ -1157,115 +1323,258 @@ export function SettleDialog({
       <div className="dialog-cap">
         <span className="cap-dot" />
         Restaurant Settlement - {outlet}
-        <span className="cap-btns">
-          <button type="button" tabIndex={-1}>–</button>
-          <button type="button" tabIndex={-1}>□</button>
-          <button type="button" onClick={onClose}>✕</button>
-        </span>
+        <CapBtns onClose={onClose} />
       </div>
       <div className="settle-body">
-        <div className="st-grid">
-          <div className="st-row"><span>Bill No. :</span><input className="win" readOnly value={inv?.invoice_number ?? ""} /></div>
-          <div className="st-row"><span>Date :</span><input className="win" readOnly value={dateStr} /></div>
-          <div className="st-row"><span>Guest Name :</span><input className="win" readOnly value={table.customer_name ?? inv?.customer_name ?? ""} /></div>
-          <div className="st-row"><span>Table No :</span><input className="win" readOnly value={table.code} /></div>
-          <div className="st-row"><span>Voucher/Receipt :</span><input className="win" readOnly value={inv?.invoice_number?.replace(/\D/g, "") ?? ""} /></div>
-          <div className="st-row"><span>Bill Amount :</span><input className="win" readOnly value={rupee(inv?.grand_total ?? 0)} /></div>
-          <div className="st-row"><span>Allowance :</span><input className="win" readOnly value={rupee(inv?.discount ?? 0)} /></div>
-          <div className="st-row"><span>Payment Mode :</span>
-            <select
-              ref={modeRef}
-              className="win"
-              value={method}
-              onChange={(e) => setMethod(e.target.value as PaymentMode)}
-              onKeyDown={(e) => {
-                if (e.key !== "Enter") return;
-                e.preventDefault();
-                amtRef.current?.focus();
-                amtRef.current?.select();
-              }}
-            >
-              {PAY_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-            </select>
-          </div>
-          <div className="st-row"><span>Settled Amount :</span>
-            <input
-              ref={amtRef}
-              className="win green"
-              data-num="dec"
-              value={amount}
-              onChange={(e) => setAmount(numText(e.target.value))}
-              onKeyDown={(e) => {
-                if (e.key !== "Enter") return;
-                e.preventDefault();
-                if (method === "CARD") {
-                  if (!bankName) { bankRef.current?.focus(); return; }
-                }
-                if (method === "MEMBER_CARD" && !payCard.trim()) {
-                  payCardRef.current?.focus();
-                  return;
-                }
-                void save();
-              }}
-            />
-          </div>
-          {method === "CARD" && (
-            <div className="st-row"><span>Bank Name :</span>
-              <select
-                ref={bankRef}
-                className="win"
-                value={bankName}
-                onChange={(e) => setBankName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key !== "Enter") return;
-                  e.preventDefault();
-                  if (!bankName) { onMessage("Select bank name"); return; }
-                  void save();
-                }}
-              >
-                <option value="">Select</option>
-                {BANK_NAMES.map((b) => <option key={b} value={b}>{b}</option>)}
-              </select>
-            </div>
-          )}
-          {method === "MEMBER_CARD" && (
-            <div className="st-row"><span>Card No. :</span>
-              <input
-                ref={payCardRef}
-                className="win green"
-                value={payCard}
-                onChange={(e) => setPayCard(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key !== "Enter") return;
-                  e.preventDefault();
-                  const q = payCard.trim();
-                  if (!q) { onMessage("Enter Card No"); return; }
-                  void api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(q)}`).then((b) => {
-                    setPayBal(rupee(Number(b.balances?.usable ?? 0)));
-                    void save();
-                  }).catch(() => {
-                    setPayBal("");
-                    onMessage("Card not found");
-                  });
-                }}
-              />
-              {payBal ? <span className="st-bal">{payBal}</span> : null}
-            </div>
-          )}
-          <div className="st-row"><span>Balance Amount :</span><input className="win" readOnly value={rupee(Math.max(0, due - Math.round((Number(amount) || 0) * 100)))} /></div>
-          <div className="st-row span2"><span>Remark :</span><input className="win" value={remark} onChange={(e) => setRemark(e.target.value)} /></div>
-        </div>
-        <div className="bill-btns">
-          <span className="st-vno">Voucher No</span>
-          <button type="button" className="fn" onClick={() => {
+        <table className="st-form">
+          <colgroup>
+            <col className="l" /><col /><col className="l" /><col />
+          </colgroup>
+          <tbody>
+            <tr>
+              <td className="lbl">Bill No. :</td>
+              <td><input className="win" readOnly tabIndex={-1} value={inv?.invoice_number ?? ""} /></td>
+              <td className="lbl">Date :</td>
+              <td><input className="win" readOnly tabIndex={-1} value={dateStr} /></td>
+            </tr>
+            <tr>
+              <td className="lbl">Guest Name :</td>
+              <td><input className="win" readOnly tabIndex={-1} value={table.customer_name ?? inv?.customer_name ?? ""} /></td>
+              <td className="lbl">Table No :</td>
+              <td><input className="win" readOnly tabIndex={-1} value={table.code} /></td>
+            </tr>
+            <tr>
+              <td className="lbl">Voucher/Receipt :</td>
+              <td><input className="win" readOnly tabIndex={-1} value={inv?.invoice_number?.replace(/\D/g, "") ?? ""} /></td>
+              <td className="lbl">Bill Amount :</td>
+              <td><input className="win num" readOnly tabIndex={-1} value={rupee(inv?.grand_total ?? 0)} /></td>
+            </tr>
+            <tr>
+              <td className="lbl">Allowance :</td>
+              <td><input className="win num" readOnly tabIndex={-1} value={rupee(inv?.discount ?? 0)} /></td>
+              <td className="lbl">Payment Mode :</td>
+              <td>
+                <select
+                  ref={modeRef}
+                  className="win"
+                  tabIndex={2}
+                  data-cycle="1"
+                  value={method}
+                  onChange={(e) => chooseMode(e.target.value as PaymentMode)}
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      stepMode(e.key === "ArrowDown" ? 1 : -1);
+                      return;
+                    }
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    afterMode();
+                  }}
+                >
+                  {PAY_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                </select>
+              </td>
+            </tr>
+            {method === "CARD" && (
+              <tr>
+                <td /><td />
+                <td className="lbl">Bank Name :</td>
+                <td>
+                  <select
+                    ref={bankRef}
+                    className="win"
+                    tabIndex={3}
+                    data-cycle="1"
+                    value={bankName}
+                    onChange={(e) => { bankValueRef.current = e.target.value; setBankName(e.target.value); }}
+                    onKeyDown={(e) => {
+                      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        stepBank(e.key === "ArrowDown" ? 1 : -1);
+                        return;
+                      }
+                      if (e.key !== "Enter") return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      saveBtnRef.current?.focus();
+                    }}
+                  >
+                    {BANK_NAMES.map((b) => <option key={b} value={b}>{b}</option>)}
+                  </select>
+                </td>
+              </tr>
+            )}
+            {method === "MEMBER_CARD" && (
+              <tr>
+                <td /><td />
+                <td className="lbl">Card No. :</td>
+                <td>
+                  <span className="st-card">
+                    <input
+                      ref={payCardRef}
+                      className="win green"
+                      tabIndex={3}
+                      value={payCard}
+                      onChange={(e) => setPayCard(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter") return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        void acceptCard();
+                      }}
+                    />
+                    {payBal ? <span className="st-bal">{payBal}</span> : null}
+                  </span>
+                </td>
+              </tr>
+            )}
+            <tr>
+              <td className="lbl">Settled Amount :</td>
+              <td>
+                <input
+                  ref={amtRef}
+                  className="win green num"
+                  data-num="dec"
+                  tabIndex={1}
+                  value={amount}
+                  onChange={(e) => setAmount(numText(e.target.value))}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    modeRef.current?.focus();
+                  }}
+                />
+              </td>
+              <td className="lbl">Balance Amount :</td>
+              <td><input className="win num" readOnly tabIndex={-1} value={rupee(Math.max(0, due - Math.round((Number(amount) || 0) * 100)))} /></td>
+            </tr>
+            <tr>
+              <td className="lbl">Remark :</td>
+              <td colSpan={3}><input className="win" tabIndex={-1} value={remark} onChange={(e) => setRemark(e.target.value)} /></td>
+            </tr>
+          </tbody>
+        </table>
+        <div className="st-foot">
+          <span className="st-vno">Voucher No : {inv?.invoice_number ?? ""}</span>
+          <button type="button" className="fn" tabIndex={-1} onClick={() => {
             void api.post(`/api/invoices/${invoiceId}/print`).then(async (r) => {
               const { handleBillPrintResponse } = await import("./printBillHtml");
               await handleBillPrintResponse(r);
             }).catch(() => null);
           }}>Print</button>
-          <button type="button" className="fn" onClick={() => void save()}>Save (F2)</button>
-          <button type="button" className="fn" onClick={onClose}>Cancel (F4)</button>
-          <button type="button" className="fn" onClick={onClose}>Exit</button>
+          <button ref={saveBtnRef} type="button" className="fn" tabIndex={4} onClick={() => void save()}>Save (F2)</button>
+          <button type="button" className="fn" tabIndex={-1} onClick={onClose}>Cancel (F4)</button>
+          <button type="button" className="fn" tabIndex={-1} onClick={onClose}>Exit</button>
+        </div>
+      </div>
+      {warn && (
+        <AlertBox
+          message={warn}
+          onClose={() => {
+            const back = warnBack.current;
+            setWarn("");
+            window.setTimeout(() => focusField(back), 0);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Double-click punch row → per-item kitchen note shown as NAME (notes) on grid + KOT. */
+export function ItemNotesDialog({
+  itemName,
+  initialNotes,
+  onSave,
+  onClose,
+}: {
+  itemName: string;
+  initialNotes: string;
+  onSave: (notes: string) => void | Promise<void>;
+  onClose: () => void;
+}) {
+  const [notes, setNotes] = useState(initialNotes);
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const notesRef = useRef(notes);
+  const saveRef = useRef(onSave);
+  const closeRef = useRef(onClose);
+  notesRef.current = notes;
+  saveRef.current = onSave;
+  closeRef.current = onClose;
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+    function keys(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeRef.current();
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        void (async () => {
+          setBusy(true);
+          try {
+            await saveRef.current(notesRef.current);
+          } finally {
+            setBusy(false);
+          }
+        })();
+      }
+    }
+    window.addEventListener("keydown", keys, true);
+    return () => window.removeEventListener("keydown", keys, true);
+  }, []);
+
+  return (
+    <div className="dialog alert-dlg item-notes-dlg">
+      <div className="dialog-cap">
+        <span className="cap-dot" />
+        Item Notes
+        <CapBtns onClose={onClose} chrome={false} />
+      </div>
+      <div className="dialog-body">
+        <p style={{ marginBottom: 8 }}>{itemName}</p>
+        <div className="su-row" style={{ marginBottom: 10 }}>
+          <span style={{ width: 56 }}>Notes :</span>
+          <input
+            ref={inputRef}
+            className="win green"
+            value={notes}
+            maxLength={80}
+            disabled={busy}
+            onChange={(e) => setNotes(e.target.value)}
+          />
+        </div>
+        <div className="bill-btns">
+          <button
+            type="button"
+            className="fn"
+            disabled={busy}
+            onClick={() => {
+              void (async () => {
+                setBusy(true);
+                try {
+                  await onSave(notesRef.current);
+                } finally {
+                  setBusy(false);
+                }
+              })();
+            }}
+          >
+            OK
+          </button>
+          <button type="button" className="fn" disabled={busy} onClick={onClose}>Cancel</button>
         </div>
       </div>
     </div>
@@ -1292,7 +1601,7 @@ export function AlertBox({ message, onClose }: { message: string; onClose: () =>
       <div className="dialog-cap">
         <span className="cap-dot" />
         THE BOSS
-        <span className="cap-btns"><button type="button" onClick={onClose}>✕</button></span>
+        <CapBtns onClose={onClose} chrome={false} />
       </div>
       <div className="dialog-body">
         <p>{message}</p>
@@ -1308,48 +1617,75 @@ export function ConfirmAsk({
   message = "Exit without save?",
   onYes,
   onNo,
+  defaultFocus = "yes",
+  ignoreEnterMs = 0,
 }: {
   message?: string;
   onYes: () => void;
   onNo: () => void;
+  defaultFocus?: "yes" | "no";
+  /** Ignore Enter/Y for this many ms after open (stops Save? Enter from answering Print?). */
+  ignoreEnterMs?: number;
 }) {
   const yesRef = useRef<HTMLButtonElement>(null);
+  const noRef = useRef<HTMLButtonElement>(null);
   const yes = useRef(onYes);
   const no = useRef(onNo);
+  const openedAt = useRef(Date.now());
   yes.current = onYes;
   no.current = onNo;
   useEffect(() => {
-    yesRef.current?.focus();
+    openedAt.current = Date.now();
+    const focusEl = defaultFocus === "no" ? noRef.current : yesRef.current;
+    focusEl?.focus();
     function keys(e: KeyboardEvent) {
       if (e.key === "Escape" || e.key === "n" || e.key === "N") {
         e.preventDefault();
         e.stopPropagation();
         no.current();
+        return;
       }
       if (e.key === "Enter" || e.key === "y" || e.key === "Y") {
         e.preventDefault();
         e.stopPropagation();
-        yes.current();
+        if (Date.now() - openedAt.current < ignoreEnterMs) return;
+        // Enter activates focused button (No when print ask defaults to No)
+        if (document.activeElement === noRef.current) no.current();
+        else yes.current();
       }
     }
     window.addEventListener("keydown", keys, true);
     return () => window.removeEventListener("keydown", keys, true);
-  }, []);
-  return (
-    <div className="dialog confirm-dlg">
-      <div className="dialog-cap">
-        <span className="cap-dot" />
-        Confirm
-        <span className="cap-btns"><button type="button" onClick={onNo}>✕</button></span>
-      </div>
-      <div className="dialog-body">
-        <p>{message}</p>
-        <div className="bill-btns">
-          <button ref={yesRef} type="button" className="fn" onClick={onYes}>Yes</button>
-          <button type="button" className="fn" onClick={onNo}>No</button>
+  }, [defaultFocus, ignoreEnterMs]);
+
+  function pick(which: "yes" | "no", e: ReactMouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    // Avoid click-through onto controls under the dialog
+    window.setTimeout(() => {
+      if (which === "yes") yes.current();
+      else no.current();
+    }, 0);
+  }
+
+  return createPortal(
+    <div className="confirm-overlay" onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+      <div className="dialog confirm-dlg" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="dialog-cap">
+          <span className="cap-dot" />
+          Confirm
+          <CapBtns onClose={() => no.current()} chrome={false} />
+        </div>
+        <div className="dialog-body">
+          <p>{message}</p>
+          <div className="bill-btns">
+            <button ref={yesRef} type="button" className="fn" onMouseDown={(e) => pick("yes", e)}>Yes</button>
+            <button ref={noRef} type="button" className="fn" onMouseDown={(e) => pick("no", e)}>No</button>
+          </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -1368,27 +1704,77 @@ export function TransferDialog({
   onDone: (fromCode: string, to: Table) => void;
   onMessage: (m: string) => void;
 }) {
+  /** Destination outlet (New Table). Source table is found across all outlets. */
   const [dept, setDept] = useState(outlet === "THE BOSS CLUB" ? "THE BOSS CLUB" : outlet || "BAR");
   const [fromCode, setFromCode] = useState(currentCode);
   const [toCode, setToCode] = useState("");
   const [reason, setReason] = useState("");
+  const [reasonNeed, setReasonNeed] = useState(false);
   const fromRef = useRef<HTMLInputElement>(null);
+  const outletRef = useRef<HTMLInputElement>(null);
   const toRef = useRef<HTMLInputElement>(null);
   const reasonRef = useRef<HTMLInputElement>(null);
   const xferRef = useRef<HTMLButtonElement>(null);
-  const occupied = tables.filter((t) => t.status !== "AVAILABLE" && (t.outlet || "BAR") === dept);
+  const OUTLETS = ["BAR", "RESTAURANT", "NC", "THE BOSS CLUB"] as const;
+  // Printed / settlement tables cannot transfer — only open running tables.
+  const occupiedAll = tables.filter((t) => t.status !== "AVAILABLE" && t.status !== "PAYMENT_PENDING");
+
+  function stepOutlet(dir: 1 | -1) {
+    setDept((cur) => {
+      const i = OUTLETS.indexOf(cur as (typeof OUTLETS)[number]);
+      const idx = i < 0 ? 0 : i;
+      const next = Math.max(0, Math.min(OUTLETS.length - 1, idx + dir));
+      return OUTLETS[next];
+    });
+  }
+
+  /** First letter: B=BAR, R=RESTAURANT, N=NC, T=THE BOSS CLUB; same letter cycles matches. */
+  function pickOutletByChar(ch: string) {
+    const c = ch.toUpperCase();
+    if (!c || c.length !== 1) return false;
+    const matches = OUTLETS.filter((o) => o.toUpperCase().startsWith(c));
+    if (!matches.length) return false;
+    setDept((cur) => {
+      const i = matches.indexOf(cur as (typeof OUTLETS)[number]);
+      if (i >= 0 && matches.length > 1) return matches[(i + 1) % matches.length];
+      return matches[0];
+    });
+    return true;
+  }
 
   useEffect(() => {
-    const running = currentCode && occupied.some((t) => t.code.toLowerCase() === currentCode.trim().toLowerCase());
-    const el = running ? toRef.current : fromRef.current;
+    const running = currentCode && occupiedAll.some((t) => t.code.toLowerCase() === currentCode.trim().toLowerCase());
+    const el = running ? outletRef.current : fromRef.current;
     el?.focus();
     el?.select();
   }, [currentCode]);
 
   useEffect(() => {
-    function keys(e: KeyboardEvent) {
-      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); }
+    function onOutlet() {
+      return outletRef.current && document.activeElement === outletRef.current;
     }
+    function keys(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        onClose();
+        return;
+      }
+      if (!onOutlet()) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        stepOutlet(e.key === "ArrowDown" ? 1 : -1);
+        return;
+      }
+      if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (pickOutletByChar(e.key)) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+        }
+      }
+    }
+    // Capture before formNav moveFormFocus (registered earlier) — still need data-cycle skip there.
     window.addEventListener("keydown", keys, true);
     return () => window.removeEventListener("keydown", keys, true);
   }, [onClose]);
@@ -1402,16 +1788,50 @@ export function TransferDialog({
     };
   }
 
+  function onOutletKeyDown(e: ReactKeyboardEvent<HTMLInputElement>) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      stepOutlet(e.key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (pickOutletByChar(e.key)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      toRef.current?.focus();
+    }
+  }
+
+  /** Find running source table: prefer current billing outlet, else any outlet. */
   function findRunning(code: string) {
     const raw = code.trim().toLowerCase();
     if (!raw) return undefined;
-    return occupied.find((t) => t.code.toLowerCase() === raw);
+    const matches = occupiedAll.filter((t) => t.code.toLowerCase() === raw);
+    if (!matches.length) return undefined;
+    return matches.find((t) => (t.outlet || "BAR") === outlet) ?? matches[0];
   }
 
   function acceptCurrent() {
     if (!fromCode.trim()) {
       onMessage("Enter Current Table No");
       fromRef.current?.focus();
+      return undefined;
+    }
+    const raw = fromCode.trim().toLowerCase();
+    const printed = tables.find(
+      (t) => t.code.toLowerCase() === raw && t.status === "PAYMENT_PENDING",
+    );
+    if (printed) {
+      onMessage("Printed bill table cannot be transferred");
+      fromRef.current?.focus();
+      fromRef.current?.select();
       return undefined;
     }
     const from = findRunning(fromCode);
@@ -1425,16 +1845,45 @@ export function TransferDialog({
     return from;
   }
 
+  function acceptNewTable(from: Table) {
+    const toRaw = toCode.trim();
+    if (!toRaw) {
+      onMessage("Enter New Table No");
+      toRef.current?.focus();
+      return false;
+    }
+    const sameOutlet = (from.outlet || "BAR") === dept;
+    if (sameOutlet && from.code.toLowerCase() === toRaw.toLowerCase()) {
+      onMessage("Cannot transfer a table to itself");
+      toRef.current?.focus();
+      toRef.current?.select();
+      return false;
+    }
+    onMessage("");
+    return true;
+  }
+
   async function transfer() {
     const from = acceptCurrent();
     if (!from) return;
+    if (!acceptNewTable(from)) return;
+    const why = reason.trim();
+    if (!why) {
+      setReasonNeed(true);
+      reasonRef.current?.focus();
+      reasonRef.current?.select();
+      return;
+    }
+    setReasonNeed(false);
     const toRaw = toCode.trim();
-    if (!toRaw) { onMessage("Enter New Table No"); toRef.current?.focus(); return; }
-    if (from.code.toLowerCase() === toRaw.toLowerCase()) { onMessage("Cannot transfer a table to itself"); return; }
     try {
       let to = tables.find((t) => t.code.toLowerCase() === toRaw.toLowerCase() && (t.outlet || "BAR") === dept);
       if (!to) to = await api.post<Table>("/api/tables", { code: toRaw, name: `Table ${toRaw}`, outlet: dept });
-      await api.post("/api/tables/transfer", { fromTableId: from.id, toTableId: to.id, reason: reason.trim() || undefined });
+      if (to.id === from.id) {
+        onMessage("Cannot transfer a table to itself");
+        return;
+      }
+      await api.post("/api/tables/transfer", { fromTableId: from.id, toTableId: to.id, reason: why });
       onDone(from.code, to);
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Transfer failed");
@@ -1443,56 +1892,77 @@ export function TransferDialog({
 
   return (
     <div className="xfer-dlg">
+      <div className="dialog-cap xfer-cap">
+        <span className="cap-dot" />
+        Table Transfer
+        <CapBtns onClose={onClose} chrome={false} />
+      </div>
+      <div className="xfer-main">
       <div className="xfer-form">
-        <div className="xfer-row xfer-outlet">
-          <span>Outlet :</span>
-          <select className="win" value={dept} onChange={(e) => setDept(e.target.value)} onKeyDown={onEnter(() => fromRef.current?.focus())}>
-            <option>BAR</option>
-            <option>RESTAURANT</option>
-            <option>NC</option>
-            <option>THE BOSS CLUB</option>
-          </select>
-        </div>
         <div className="xfer-row">
           <span>Current Table No :</span>
           <input
             ref={fromRef}
             className="win green"
-            list="xfer-from"
             value={fromCode}
             onChange={(e) => setFromCode(e.target.value)}
-            onKeyDown={onEnter(() => { if (acceptCurrent()) toRef.current?.focus(); })}
+            onKeyDown={onEnter(() => { if (acceptCurrent()) outletRef.current?.focus(); })}
+            autoComplete="off"
           />
-          <datalist id="xfer-from">
-            {occupied.map((t) => <option key={t.id} value={t.code} />)}
-          </datalist>
+        </div>
+        <div className="xfer-row xfer-outlet">
+          <span>Outlet :</span>
+          <input
+            ref={outletRef}
+            className="win xfer-outlet-box"
+            readOnly
+            data-cycle="1"
+            value={dept}
+            onFocus={(e) => e.target.select()}
+            onKeyDown={onOutletKeyDown}
+            onClick={() => stepOutlet(1)}
+            title="Up/Down or B/R/N/T"
+          />
           <span>New Table No :</span>
           <input
             ref={toRef}
             className="win"
-            list="xfer-to"
             value={toCode}
             onChange={(e) => setToCode(e.target.value)}
-            onKeyDown={onEnter(() => reasonRef.current?.focus())}
+            onKeyDown={onEnter(() => {
+              const from = acceptCurrent();
+              if (!from) return;
+              if (acceptNewTable(from)) reasonRef.current?.focus();
+            })}
+            autoComplete="off"
           />
-          <datalist id="xfer-to">
-            {tables.filter((t) => t.status === "AVAILABLE" && (t.outlet || "BAR") === dept).map((t) => <option key={t.id} value={t.code} />)}
-          </datalist>
         </div>
         <div className="xfer-row">
           <span>Reason :</span>
           <input
             ref={reasonRef}
-            className="win xfer-reason"
+            className={`win xfer-reason${reasonNeed ? " need" : ""}`}
             value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            onKeyDown={onEnter(() => xferRef.current?.focus())}
+            onChange={(e) => {
+              setReason(e.target.value);
+              if (e.target.value.trim()) setReasonNeed(false);
+            }}
+            onKeyDown={onEnter(() => {
+              if (!reason.trim()) {
+                setReasonNeed(true);
+                reasonRef.current?.focus();
+                reasonRef.current?.select();
+                return;
+              }
+              void transfer();
+            })}
           />
         </div>
       </div>
       <div className="xfer-btns">
         <button ref={xferRef} type="button" className="fn" onClick={() => void transfer()} onKeyDown={onEnter(() => void transfer())}>Transfer</button>
         <button type="button" className="fn" onClick={onClose}>Cancel</button>
+      </div>
       </div>
     </div>
   );
@@ -1533,12 +2003,24 @@ export function ItemTransferDialog({
   const reasonRef = useRef<HTMLInputElement>(null);
   const xferRef = useRef<HTMLButtonElement>(null);
   const busy = useRef(false);
-  const occupied = tables.filter((t) => t.status !== "AVAILABLE" && (t.outlet || "BAR") === outlet);
+  /** Today's open tables only (not free, not bill-printed / settlement). */
+  const openTables = tables.filter(
+    (t) =>
+      (t.outlet || "BAR") === outlet &&
+      (t.status === "OCCUPIED" || t.status === "BILL_REQUESTED"),
+  );
+  const occupied = openTables;
 
   function findRunning(code: string) {
     const raw = code.trim().toLowerCase();
     if (!raw) return undefined;
-    return occupied.find((t) => t.code.toLowerCase() === raw);
+    return openTables.find((t) => t.code.toLowerCase() === raw);
+  }
+
+  function findOpenDest(code: string, fromId: string) {
+    const raw = code.trim().toLowerCase();
+    if (!raw) return undefined;
+    return openTables.find((t) => t.code.toLowerCase() === raw && t.id !== fromId);
   }
 
   async function loadItems(code: string) {
@@ -1638,13 +2120,17 @@ export function ItemTransferDialog({
     if (!from) return;
     const toRaw = toCode.trim();
     if (!toRaw) { onMessage("Enter New Table No"); toRef.current?.focus(); return; }
-    if (from.code.toLowerCase() === toRaw.toLowerCase()) { onMessage("Cannot transfer items to the same table"); return; }
+    const to = findOpenDest(toRaw, from.id);
+    if (!to) {
+      onMessage("New Table No not found (open tables only)");
+      toRef.current?.focus();
+      toRef.current?.select();
+      return;
+    }
     const itemIds = rows.filter((r) => checked[r.id]).map((r) => r.id);
     if (!itemIds.length) { onMessage("Select items to transfer"); return; }
     busy.current = true;
     try {
-      let to = tables.find((t) => t.code.toLowerCase() === toRaw.toLowerCase() && (t.outlet || "BAR") === outlet);
-      if (!to) to = await api.post<Table>("/api/tables", { code: toRaw, name: `Table ${toRaw}`, outlet });
       const result = await api.post<{ sourceClosed: boolean }>("/api/tables/item-transfer", {
         fromTableId: from.id,
         toTableId: to.id,
@@ -1660,6 +2146,11 @@ export function ItemTransferDialog({
 
   return (
     <div className="item-xfer-dlg">
+      <div className="dialog-cap xfer-cap">
+        <span className="cap-dot" />
+        Item Transfer
+        <CapBtns onClose={onClose} chrome={false} />
+      </div>
       <div className="item-xfer-head">
         <div className="item-xfer-form">
           <div className="xfer-row">
@@ -1685,7 +2176,9 @@ export function ItemTransferDialog({
               onKeyDown={onEnter(() => reasonRef.current?.focus())}
             />
             <datalist id="item-xfer-to">
-              {tables.filter((t) => (t.outlet || "BAR") === outlet).map((t) => <option key={t.id} value={t.code} />)}
+              {openTables
+                .filter((t) => t.code.toLowerCase() !== fromCode.trim().toLowerCase())
+                .map((t) => <option key={t.id} value={t.code} />)}
             </datalist>
           </div>
           <div className="xfer-row">

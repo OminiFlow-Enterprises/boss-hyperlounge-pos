@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { api } from "./api";
 import { parseRupeesInput } from "../shared/money";
 import type { NavView } from "../shared/types";
-import { AlertBox, ConfirmAsk } from "./BillDialogs";
+import { AlertBox, CapBtns, ConfirmAsk, PrepareBillDialog } from "./BillDialogs";
 
 const OUTLETS = ["BAR", "CAFE", "NC", "RESTAURANT", "THE BOSS CLUB"];
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -158,34 +158,152 @@ export function PointOfSales({ onExit }: { onExit: () => void }) {
   );
 }
 
+const GST_COLS: Array<[string, string, boolean?]> = [
+  ["bill_no", "Bill No"],
+  ["bill_date", "Bill Date"],
+  ["client_name", "ClientName"],
+  ["gstin", "GSTIN"],
+  ["amount", "Amount", true],
+  ["discount", "Discount", true],
+  ["gross_amount", "Gross Amount", true],
+  ["service_charge", "ServiceCharge", true],
+  ["net_18", "Net 18%", true],
+  ["sgst_9", "SGST 9%", true],
+  ["cgst_9", "CGST 9%", true],
+  ["net_20", "NET 20%", true],
+  ["vat_20", "VAT 20%", true],
+  ["net_surchar", "NETSurCh", true],
+  ["surchar_20", "SurChar", true],
+  ["round_off", "RoundOff", true],
+  ["net_amount", "NetAmount", true],
+  ["mop", "MOP"],
+  ["payment_modes", "PaymentModes"],
+];
+
+function gstAmt(paise?: number) {
+  return ((Number(paise) || 0) / 100).toFixed(2);
+}
+/** Native GST Summery slip amounts (Indian commas). */
+function gstSumAmt(paise?: number) {
+  return ((Number(paise) || 0) / 100).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+function gstSlipDate(isoDayStr: string) {
+  const d = new Date(isoDayStr);
+  if (Number.isNaN(d.getTime())) return isoDayStr;
+  return `${pad(d.getDate())}/${MONTHS[d.getMonth()]}/${d.getFullYear()}`;
+}
+
 export function GstReport({ onExit }: { onExit: () => void }) {
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
-  const [data, setData] = useState<any>(null);
-  async function load() {
-    setData(await api.get(`/api/reports/gst?from=${from}&to=${to}`));
+  const [outletName, setOutletName] = useState("Select");
+  const [billNo, setBillNo] = useState("");
+  const [wise, setWise] = useState<"bill" | "date" | "month">("bill");
+  const [taxReport, setTaxReport] = useState<"all" | "liquor" | "fnb">("all");
+  const [settle, setSettle] = useState<"all" | "single" | "multi">("all");
+  const [gstClient, setGstClient] = useState<"hide" | "gst" | "all">("all");
+  const [cancelBill, setCancelBill] = useState(false);
+  const [complimentary, setComplimentary] = useState(false);
+  const [dateApply, setDateApply] = useState(true);
+  const [withSettlement, setWithSettlement] = useState(false);
+  const [view, setView] = useState<"empty" | "bills" | "summary">("empty");
+  const [data, setData] = useState<any>({ rows: [], totals: {}, footer: {} });
+  const [summary, setSummary] = useState<any>(null);
+  const [sel, setSel] = useState(-1);
+  const selRef = useRef(-1);
+  const gridWrapRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onExit);
+  selRef.current = sel;
+  closeRef.current = onExit;
+
+  function queryParams() {
+    return new URLSearchParams({
+      from,
+      to,
+      outlet: outletName,
+      bill: billNo.trim(),
+      tax: taxReport,
+    });
   }
-  useEffect(() => { load().catch(() => null); }, []);
-  const d = data || { total: 0, discount: 0, service: 0, tax: 0, mop: [] };
-  const gtotal = d.total - d.discount;
-  const rows = [
-    ["Total", inr(d.total)],
-    ["Discount", inr(d.discount)],
-    ["G.Total", inr(gtotal)],
-    ["Service Charge", inr(d.service)],
-    ["Non GST", "0.00"],
-    ["GST 5%", "0.00"],
-    ["GST 18%", inr(d.tax)],
-    ["Vat 20%", "0.00"],
-    ["Surcharge 2.5%", "0.00"],
-    ["Round Off", "0.00"],
-    ["Total Tax", inr(d.tax)],
-    ["Net Amount", inr(d.total)],
-    ["Bill Advance", "0.00"],
-  ];
-  const mopLabel: Record<string, string> = {
-    CASH: "CASH", UPI: "PAYTM", CARD: "BANK TRANSFER", MEMBER_CARD: "PREPAID CARD",
-  };
+
+  function focusSelRow(scrollLast = false) {
+    const wrap = gridWrapRef.current;
+    if (!wrap) return;
+    if (scrollLast) wrap.scrollTop = wrap.scrollHeight;
+    const tr = wrap.querySelector("tbody tr.on") as HTMLElement | null;
+    tr?.focus({ preventScroll: true });
+    if (!scrollLast) tr?.scrollIntoView({ block: "nearest" });
+  }
+
+  async function loadBills() {
+    const next = await api.get<any>(`/api/reports/gst?${queryParams()}`);
+    setData(next);
+    setView("bills");
+    const rows = next.rows || [];
+    setSel(rows.length ? rows.length - 1 : -1);
+    requestAnimationFrame(() => focusSelRow(true));
+  }
+
+  async function loadTaxSummary() {
+    const next = await api.get<any>(`/api/reports/gst?mode=summary&${queryParams()}`);
+    setSummary(next);
+    setData((d: any) => ({ ...d, footer: next.footer || d.footer }));
+    setView("summary");
+    // Start at top of slip; Particular/Amount is below — scroll the Crystal stage
+    requestAnimationFrame(() => {
+      const stage = document.querySelector(".gst-summary-view .cr-stage") as HTMLElement | null;
+      if (stage) stage.scrollTop = 0;
+    });
+  }
+
+  useEffect(() => {
+    function keys(e: KeyboardEvent) {
+      if (document.querySelector(".alert-dlg, .confirm-dlg, .confirm-overlay")) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeRef.current();
+        return;
+      }
+      if (view !== "bills") return;
+      const rows = data.rows || [];
+      if (!rows.length) return;
+      const typing = (e.target as HTMLElement | null)?.closest("input, select, textarea");
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (typing && (e.target as HTMLElement).tagName === "SELECT") return;
+        e.preventDefault();
+        e.stopPropagation();
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        const idx = Math.max(0, selRef.current);
+        const next = e.key === "ArrowDown"
+          ? Math.min(rows.length - 1, idx + 1)
+          : Math.max(0, idx - 1);
+        setSel(next);
+        requestAnimationFrame(() => focusSelRow(false));
+      }
+    }
+    window.addEventListener("keydown", keys, true);
+    return () => window.removeEventListener("keydown", keys, true);
+  });
+
+  useLayoutEffect(() => {
+    if (view !== "bills") return;
+    const rows = data.rows || [];
+    if (!rows.length || sel !== rows.length - 1) return;
+    focusSelRow(true);
+  }, [view, data, sel]);
+
+  const rows = data.rows || [];
+  const totals = data.totals || {};
+  const footer = (view === "summary" ? summary?.footer : data.footer) || {};
+  const s = summary?.summary || {};
+  const particulars = summary?.particulars || [];
+  const fromLabel = gstSlipDate(from);
+  const toLabel = gstSlipDate(to);
+
   return (
     <div className="gst-page">
       <aside className="gst-filter">
@@ -193,71 +311,205 @@ export function GstReport({ onExit }: { onExit: () => void }) {
         <label>From Date : <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
         <label>To Date : <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
         <div className="gst-radios">
-          <label><input type="radio" name="wise" defaultChecked /> Bill Wise</label>
-          <label><input type="radio" name="wise" /> Date Wise</label>
-          <label><input type="radio" name="wise" /> Month Wise</label>
+          <label><input type="radio" name="gst-wise" checked={wise === "bill"} onChange={() => setWise("bill")} /> Bill Wise</label>
+          <label><input type="radio" name="gst-wise" checked={wise === "date"} onChange={() => setWise("date")} /> Date Wise</label>
+          <label><input type="radio" name="gst-wise" checked={wise === "month"} onChange={() => setWise("month")} /> Month Wise</label>
         </div>
-        <label>Outlet Group: <select className="win"><option>Select</option></select></label>
-        <label>Outlet Name: <select className="win"><option>Select</option>{OUTLETS.map((o) => <option key={o}>{o}</option>)}</select></label>
-        <label>MOP : <select className="win"><option>Select</option><option>CASH</option><option>UPI</option><option>CARD</option></select></label>
-        <label>Account : <select className="win"><option>Select</option></select></label>
-        <label>Bill No : <input className="win" /></label>
+        <label>Outlet Group: <select className="win" defaultValue="Select"><option>Select</option></select></label>
+        <label>Outlet Name: <select className="win" value={outletName} onChange={(e) => setOutletName(e.target.value)}>
+          <option>Select</option>{OUTLETS.map((o) => <option key={o}>{o}</option>)}
+        </select></label>
+        <label>MOP : <select className="win" defaultValue="Select"><option>Select</option><option>CASH</option><option>UPI</option><option>CARD</option></select></label>
+        <label>Account : <select className="win" defaultValue="Select"><option>Select</option></select></label>
+        <label>Bill No : <input className="win" value={billNo} onChange={(e) => setBillNo(e.target.value)} /></label>
         <fieldset>
           <legend>Tax Report</legend>
-          <label><input type="checkbox" defaultChecked /> All Tax</label>
-          <label><input type="checkbox" /> Liquor</label>
-          <label><input type="checkbox" /> FnB</label>
+          <div className="gst-radios">
+            <label><input type="radio" name="gst-tax" checked={taxReport === "all"} onChange={() => setTaxReport("all")} /> All Tax</label>
+            <label><input type="radio" name="gst-tax" checked={taxReport === "liquor"} onChange={() => setTaxReport("liquor")} /> Liquor</label>
+            <label><input type="radio" name="gst-tax" checked={taxReport === "fnb"} onChange={() => setTaxReport("fnb")} /> FnB</label>
+          </div>
         </fieldset>
         <fieldset>
           <legend>Settlement (Multi / Single)</legend>
-          <label><input type="checkbox" defaultChecked /> All</label>
-          <label><input type="checkbox" /> Single</label>
-          <label><input type="checkbox" /> Multi</label>
+          <div className="gst-radios">
+            <label><input type="radio" name="gst-settle" checked={settle === "all"} onChange={() => setSettle("all")} /> All</label>
+            <label><input type="radio" name="gst-settle" checked={settle === "single"} onChange={() => setSettle("single")} /> Single</label>
+            <label><input type="radio" name="gst-settle" checked={settle === "multi"} onChange={() => setSettle("multi")} /> Multi</label>
+          </div>
         </fieldset>
-        <label><input type="checkbox" /> Cancel Bill</label>
-        <label><input type="checkbox" /> Complementary</label>
+        <label><input type="checkbox" checked={cancelBill} onChange={(e) => setCancelBill(e.target.checked)} /> Cancel Bill</label>
+        <label><input type="checkbox" checked={complimentary} onChange={(e) => setComplimentary(e.target.checked)} /> Complimentary</label>
         <fieldset>
           <legend>GST Client Details</legend>
-          <label><input type="radio" name="cli" defaultChecked /> Not Show</label>
-          <label><input type="radio" name="cli" /> Only GST</label>
-          <label><input type="radio" name="cli" /> All Client</label>
+          <div className="gst-radios">
+            <label><input type="radio" name="gst-cli" checked={gstClient === "hide"} onChange={() => setGstClient("hide")} /> Not Show</label>
+            <label><input type="radio" name="gst-cli" checked={gstClient === "gst"} onChange={() => setGstClient("gst")} /> Only GST</label>
+            <label><input type="radio" name="gst-cli" checked={gstClient === "all"} onChange={() => setGstClient("all")} /> All Client</label>
+          </div>
         </fieldset>
-        <label><input type="checkbox" defaultChecked /> Date Apply</label>
-        <label><input type="checkbox" /> With Settlement</label>
-        <label>Steward Name <select className="win"><option>Select</option></select></label>
+        <label><input type="checkbox" checked={dateApply} onChange={(e) => setDateApply(e.target.checked)} /> Date Apply</label>
+        <label><input type="checkbox" checked={withSettlement} onChange={(e) => setWithSettlement(e.target.checked)} /> With Settlement</label>
+        <label>Similar Name <select className="win" defaultValue="Select"><option>Select</option></select></label>
         <div className="gst-actions">
           <div className="gst-print-cap">Print</div>
-          <button className="fn" onClick={load}>Smaller Printer</button>
-          <button className="fn" onClick={load}>Refresh</button>
-          <button className="fn">Tax Summery Small Print</button>
-          <button className="fn">Export</button>
-          <button className="fn">Mail</button>
-          <button className="fn" onClick={onExit}>Close</button>
+          <button type="button" className="fn" onClick={() => void loadBills()}>Small Printer</button>
+          <button type="button" className="fn" onClick={() => void loadBills()}>Refresh</button>
+          <button type="button" className="fn" onClick={() => void loadTaxSummary()}>Tax Summery Small Print</button>
+          <button type="button" className="fn" disabled tabIndex={-1}>Export</button>
+          <button type="button" className="fn" disabled tabIndex={-1}>Mail</button>
+          <button type="button" className="fn" onClick={onExit}>Close</button>
         </div>
       </aside>
-      <CrystalChrome onExit={onExit}>
-        <div className="cr-paper gst-paper">
-          <h1>THE BOSS</h1>
-          <h2>GST Summery</h2>
-          <div className="cr-meta">From : {dmy(new Date(from))} &nbsp; To : {dmy(new Date(to))}</div>
-          <table className="gst-sum">
-            <tbody>
-              {rows.map(([k, v]) => (
-                <tr key={k}><td>{k}</td><td className="dots" /><td className="num">{v}</td></tr>
-              ))}
-            </tbody>
-          </table>
-          <table className="gst-sum" style={{ marginTop: 16 }}>
-            <thead><tr><th>Particular</th><th /><th>Amount</th></tr></thead>
-            <tbody>
-              {(d.mop || []).map((m: any) => (
-                <tr key={m.method}><td>{mopLabel[m.method] || m.method}</td><td className="dots" /><td className="num">{inr(m.amount)}</td></tr>
-              ))}
-              {!(d.mop || []).length && <tr><td>CASH</td><td className="dots" /><td className="num">0.00</td></tr>}
-            </tbody>
-          </table>
-        </div>
-      </CrystalChrome>
+      <div className="gst-main">
+        {view === "empty" && (
+          <div className="gst-stage">
+            <table className="gst-empty-grid">
+              <thead>
+                <tr><th>Column1</th><th>Column2</th></tr>
+              </thead>
+              <tbody>
+                <tr><td colSpan={2}>&nbsp;</td></tr>
+              </tbody>
+            </table>
+          </div>
+        )}
+        {view === "bills" && (
+          <>
+            <div className="gst-grid-wrap" ref={gridWrapRef}>
+              <table className="gst-bill-grid">
+                <thead>
+                  <tr>
+                    {GST_COLS.map(([k, label]) => <th key={k}>{label}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r: any, i: number) => (
+                    <tr
+                      key={String(r.invoice_id || i)}
+                      className={i === sel ? "on" : ""}
+                      tabIndex={i === sel ? 0 : -1}
+                    >
+                      {GST_COLS.map(([k, , money]) => (
+                        <td key={k} className={money ? "num" : undefined}>
+                          {money ? gstAmt(r[k]) : String(r[k] ?? "")}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                  {!!rows.length && (
+                    <tr className="gst-total-row">
+                      {GST_COLS.map(([k, , money], i) => (
+                        <td key={k} className={money ? "num" : undefined}>
+                          {i === 0 ? "" : money ? gstAmt(totals[k]) : ""}
+                        </td>
+                      ))}
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="gst-foot-bar">
+              <label>Advance : CA <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.advance)} /></label>
+              <label>BANK TRAN.. <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.bank)} /></label>
+              <label>CASH <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.cash)} /></label>
+              <label>PREPAID C.. <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.prepaid)} /></label>
+              <label>Liquor <input className="win" readOnly tabIndex={-1} value={String(Math.round((Number(footer.liquor) || 0) / 100))} /></label>
+              <label>Food <input className="win" readOnly tabIndex={-1} value={String(Math.round((Number(footer.food) || 0) / 100))} /></label>
+            </div>
+          </>
+        )}
+        {view === "summary" && (
+          <div className="gst-summary-view">
+            <CrystalChrome onExit={onExit}>
+              <div className="cr-paper gst-paper gst-summery-slip">
+                <h1>THE BOSS</h1>
+                <h2>GST Summery</h2>
+                <div className="cr-meta">From : {fromLabel} &nbsp;&nbsp; To : {toLabel}</div>
+                <table className="gst-sum gst-sum-tax">
+                  <colgroup>
+                    <col className="c-lbl" /><col className="c-base" /><col className="c-gap" /><col className="c-amt" />
+                  </colgroup>
+                  <tbody>
+                    <tr><td>Total</td><td colSpan={2} /><td className="num">{gstSumAmt(s.total)}</td></tr>
+                    <tr><td>Discount</td><td colSpan={2} /><td className="num">{gstSumAmt(s.discount)}</td></tr>
+                    <tr><td>S. Total</td><td colSpan={2} /><td className="num">{gstSumAmt(s.s_total)}</td></tr>
+                    <tr><td>Service Charge</td><td colSpan={2} /><td className="num">{gstSumAmt(s.service)}</td></tr>
+                    <tr><td>Non GST</td><td colSpan={2} /><td className="num">{gstSumAmt(s.non_gst)}</td></tr>
+                    <tr className="gst-sum-head">
+                      <td /><td className="ctr">Taxable Value</td><td /><td className="ctr">Tax</td>
+                    </tr>
+                    <tr>
+                      <td>GST 5%</td>
+                      <td className="num">{gstSumAmt(s.gst5_base)}</td>
+                      <td />
+                      <td className="num">{gstSumAmt(s.gst5_tax)}</td>
+                    </tr>
+                    <tr>
+                      <td>GST 18%</td>
+                      <td className="num">{gstSumAmt(s.gst18_base)}</td>
+                      <td />
+                      <td className="num">{gstSumAmt(s.gst18_tax)}</td>
+                    </tr>
+                    <tr>
+                      <td>Vat 20%</td>
+                      <td className="num">{gstSumAmt(s.vat20_base)}</td>
+                      <td />
+                      <td className="num">{gstSumAmt(s.vat20_tax)}</td>
+                    </tr>
+                    <tr>
+                      <td>Surcharge 20%</td>
+                      <td className="num">{gstSumAmt(s.surcharge20_base)}</td>
+                      <td />
+                      <td className="num">{gstSumAmt(s.surcharge20_tax)}</td>
+                    </tr>
+                    <tr><td>Round Off</td><td colSpan={2} /><td className="num">{gstSumAmt(s.round_off)}</td></tr>
+                    <tr><td>Total Tax</td><td colSpan={2} /><td className="num">{gstSumAmt(s.total_tax)}</td></tr>
+                    <tr><td>Net Amount</td><td colSpan={2} /><td className="num">{gstSumAmt(s.net_amount)}</td></tr>
+                    <tr><td>Bill Advance</td><td colSpan={2} /><td className="num">{gstSumAmt(s.bill_advance ?? footer.advance)}</td></tr>
+                  </tbody>
+                </table>
+                <table className="gst-sum-mop">
+                  <thead>
+                    <tr><th>Particular</th><th>Amount</th></tr>
+                  </thead>
+                  <tbody>
+                    {particulars.map((p: any) => {
+                      const label = String(p.label || "");
+                      const slash = label.indexOf(" / ");
+                      const dual = slash > 0 && label.startsWith("BANK TRANSFER");
+                      return (
+                        <tr key={label}>
+                          <td className="mop-name">
+                            {dual ? (
+                              <>
+                                <span>{label.slice(0, slash)}</span>
+                                <span className="mop-sub">{label.slice(slash)}</span>
+                              </>
+                            ) : label}
+                          </td>
+                          <td className="num">{gstSumAmt(p.amount)}</td>
+                        </tr>
+                      );
+                    })}
+                    {!particulars.length && (
+                      <tr><td className="mop-name">CASH</td><td className="num">0.00</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </CrystalChrome>
+            <div className="gst-foot-bar">
+              <label>Advance : CA <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.advance)} /></label>
+              <label>BANK TRAN.. <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.bank)} /></label>
+              <label>CASH <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.cash)} /></label>
+              <label>PREPAID C.. <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.prepaid)} /></label>
+              <label>Liquor <input className="win" readOnly tabIndex={-1} value={String(Math.round((Number(footer.liquor) || 0) / 100))} /></label>
+              <label>Food <input className="win" readOnly tabIndex={-1} value={String(Math.round((Number(footer.food) || 0) / 100))} /></label>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -664,11 +916,7 @@ function SettlementUpdateDialog({
       <div className="dialog-cap">
         <span className="cap-dot" />
         Restaurant Settlement - {outlet}
-        <span className="cap-btns">
-          <button type="button" tabIndex={-1}>–</button>
-          <button type="button" tabIndex={-1}>□</button>
-          <button type="button" onClick={onClose}>✕</button>
-        </span>
+        <CapBtns onClose={onClose} />
       </div>
       <div className="su-body">
         <div className="su-grid">
@@ -1140,36 +1388,244 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
   );
 }
 
+function billDateLabel(iso?: string) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso).slice(0, 10);
+  return `${pad(d.getDate())}/${MONTHS[d.getMonth()]}/${d.getFullYear()}`;
+}
+
+/** Bill Report shows only the running no (10023), not session prefix 26-27/. */
+function shortBillNo(raw?: string | number | null) {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  const slash = s.lastIndexOf("/");
+  const tail = slash >= 0 ? s.slice(slash + 1) : s;
+  return tail.replace(/\D/g, "") || tail;
+}
+
 function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) {
-  const [edit, setEdit] = useState<any>(null);
-  const [tick, setTick] = useState(0);
+  const [from, setFrom] = useState(isoDay());
+  const [to, setTo] = useState(isoDay());
+  const [outletName, setOutletName] = useState(outlet || "BAR");
+  const [bill, setBill] = useState("");
+  const [tableNo, setTableNo] = useState("");
+  const [status, setStatus] = useState<"all" | "active" | "cancelled">("all");
+  const [discounted, setDiscounted] = useState(false);
+  const [data, setData] = useState<any>({ rows: [], total: 0 });
+  const [sel, setSel] = useState<string | null>(null);
+  const [billEdit, setBillEdit] = useState<{
+    orderId: string;
+    table: { id: string; code: string; name: string; status: string; floor_name: string; floor_id: string; current_session_id: string | null; outlet?: string };
+    outlet: string;
+    guest: string;
+    mobile: string;
+  } | null>(null);
+  const [catalog, setCatalog] = useState<Array<{ id: string; name: string; sku: string; base_price?: number }>>([]);
   const [miss, setMiss] = useState("");
+  const selRef = useRef<string | null>(null);
+  selRef.current = sel;
+
+  useEffect(() => {
+    setOutletName(outlet || "BAR");
+  }, [outlet]);
+
+  useEffect(() => {
+    api.get<any[]>("/api/products").then((list) => setCatalog(list || [])).catch(() => null);
+  }, []);
+
+  async function load(nextOutlet = outletName) {
+    const q = new URLSearchParams({
+      from,
+      to,
+      outlet: nextOutlet,
+      bill: shortBillNo(bill) || bill.trim(),
+      table: tableNo,
+      status,
+      discounted: discounted ? "1" : "0",
+    });
+    const next = await api.get<any>(`/api/reports/bills?${q}`);
+    setData(next);
+    const rows = next.rows || [];
+    setSel(rows.length ? String(rows[rows.length - 1].invoice_id || rows[rows.length - 1].invoice_number) : null);
+  }
+
+  function onFilterEnter(e: KeyboardEvent) {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    e.stopPropagation();
+    void load();
+  }
+
+  useEffect(() => {
+    load(outlet || "BAR").catch(() => null);
+  }, [outlet]);
+
+  function openRestaurantBill(row: any) {
+    const orderId = String(row?.order_id || "").trim();
+    const tableId = String(row?.table_id || "").trim();
+    if (!orderId || !tableId) {
+      setMiss("Could not open this bill");
+      return;
+    }
+    const code = String(row.table_code || row.table_no || "");
+    setBillEdit({
+      orderId,
+      table: {
+        id: tableId,
+        code,
+        name: String(row.table_no || code),
+        status: "PAYMENT_PENDING",
+        floor_name: "",
+        floor_id: "",
+        current_session_id: null,
+        outlet: String(row.outlet_name || outletName || "BAR"),
+      },
+      outlet: String(row.outlet_name || outletName || "BAR"),
+      guest: String(row.guest || ""),
+      mobile: String(row.mobile || ""),
+    });
+  }
+
+  useEffect(() => {
+    function keys(e: KeyboardEvent) {
+      if (billEdit || document.querySelector(".bill-dlg, .su-dlg, .alert-dlg, .confirm-dlg")) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onExit();
+        return;
+      }
+      const typing = (e.target as HTMLElement | null)?.closest("input, select, textarea");
+      if (typing && e.key === "Enter") {
+        // Filter fields: Enter runs Show (handled on the control)
+        return;
+      }
+      const rows = data.rows || [];
+      if (!rows.length) return;
+      const idx = Math.max(0, rows.findIndex((r: any) => String(r.invoice_id || r.invoice_number) === selRef.current));
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (typing) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const next = e.key === "ArrowDown"
+          ? rows[Math.min(rows.length - 1, idx + 1)]
+          : rows[Math.max(0, idx - 1)];
+        setSel(String(next.invoice_id || next.invoice_number));
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        const row = rows[idx];
+        if (row) openRestaurantBill(row);
+      }
+    }
+    window.addEventListener("keydown", keys, true);
+    return () => window.removeEventListener("keydown", keys, true);
+  });
+
+  const rows = data.rows || [];
+  const total = Number(data.total) || rows.reduce((s: number, r: any) => s + (Number(r.net_amount) || 0), 0);
+
   return (
-    <>
-      <GridReport
-        key={tick}
-        title="Bill Report"
-        endpoint="/api/reports/bills"
-        columns={[["invoice_number","Bill No"],["table_no","Table"],["guest","Guest"],["grand_total","Amount"],["status","Status"],["created_at","Date"]]}
-        onExit={onExit}
-        cellSelect
-        onEdit={(row) => {
-          if (row.payment_id) setEdit(row);
-          else setMiss("No settlement for this bill");
-        }}
-      />
+    <div className="set-page bill-rpt-page">
+      <div className="set-filter bill-rpt-filter">
+        <div className="set-fields">
+          <div className="set-row">
+            <label>Outlet Name : <select className="win" value={outletName} onChange={(e) => setOutletName(e.target.value)} onKeyDown={onFilterEnter}>
+              {OUTLETS.map((o) => <option key={o}>{o}</option>)}
+            </select></label>
+            <label>Bill No. : <input className="win" value={bill} onChange={(e) => setBill(e.target.value)} onKeyDown={onFilterEnter} /></label>
+            <label>Table/Room No. : <input className="win" value={tableNo} onChange={(e) => setTableNo(e.target.value)} onKeyDown={onFilterEnter} /></label>
+          </div>
+          <div className="set-row">
+            <label>Date From : <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} onKeyDown={onFilterEnter} /></label>
+            <label>To Date : <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} onKeyDown={onFilterEnter} /></label>
+            <label className="set-check"><input type="radio" name="bill-status" checked={status === "all"} onChange={() => setStatus("all")} /> Show All</label>
+            <label className="set-check"><input type="radio" name="bill-status" checked={status === "cancelled"} onChange={() => setStatus("cancelled")} /> Cancelled Only</label>
+            <label className="set-check"><input type="radio" name="bill-status" checked={status === "active"} onChange={() => setStatus("active")} /> Active Only</label>
+            <label className="set-check"><input type="checkbox" checked={discounted} onChange={(e) => setDiscounted(e.target.checked)} /> Discounted Bill Only</label>
+          </div>
+        </div>
+        <div className="set-btns">
+          <button type="button" className="fn" onClick={() => void load()}>Show</button>
+          <button type="button" className="fn" disabled tabIndex={-1}>Mail</button>
+          <button type="button" className="fn" onClick={() => {
+            const row = rows.find((r: any) => String(r.invoice_id || r.invoice_number) === sel);
+            if (row) openRestaurantBill(row);
+          }}>Details</button>
+          <button type="button" className="fn" onClick={() => window.print()}>Print</button>
+          <button type="button" className="fn" disabled tabIndex={-1}>Export</button>
+          <button type="button" className="fn" onClick={onExit}>Exit</button>
+        </div>
+      </div>
+      <div className="set-grid-wrap">
+        <table className="data set-table bill-rpt-table">
+          <thead>
+            <tr>
+              {["Bill Date", "BillNo", "TableNo", "Net Amount", "Remark", "UserName", "CASH", "card", "B.T.C.", "WALLET", "ROOM TRANSFER", "Other MOD", "ALLOWAN"].map((h) => (
+                <th key={h}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r: any) => {
+              const key = String(r.invoice_id || r.invoice_number);
+              const on = key === sel;
+              const tableLabel = `T : ${r.table_code || r.table_no || ""}`;
+              return (
+                <tr
+                  key={key}
+                  className={on ? "on" : ""}
+                  tabIndex={0}
+                  onClick={() => setSel(key)}
+                  onDoubleClick={() => openRestaurantBill(r)}
+                >
+                  <td>{billDateLabel(r.created_at)}</td>
+                  <td>{shortBillNo(r.invoice_number)}</td>
+                  <td>{tableLabel}</td>
+                  <td className="num">{inr(r.net_amount)}</td>
+                  <td>{r.remark || ""}</td>
+                  <td>{r.username || ""}</td>
+                  <td className="num">{Number(r.cash) ? inr(r.cash) : ""}</td>
+                  <td className="num">{Number(r.card) ? inr(r.card) : ""}</td>
+                  <td className="num">{Number(r.btc) ? inr(r.btc) : ""}</td>
+                  <td className="num">{Number(r.wallet) ? inr(r.wallet) : ""}</td>
+                  <td className="num">{Number(r.room_transfer) ? inr(r.room_transfer) : ""}</td>
+                  <td className="num">{Number(r.other_mod) ? inr(r.other_mod) : ""}</td>
+                  <td className="num">{Number(r.allowance) ? inr(r.allowance) : ""}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="bill-rpt-foot">
+        <span className="hint">Mouse double click to alter bill</span>
+        <label>Total Amount : <input className="win" readOnly value={inr(total)} /></label>
+        <span className="hint right">Mail button enable after print</span>
+      </div>
       {miss && <AlertBox message={miss} onClose={() => setMiss("")} />}
-      {edit?.payment_id && (
-        <SettlementUpdateDialog
-          paymentId={edit.payment_id}
-          outlet={edit.outlet_name || outlet || "BAR"}
-          bills={[{ payment_id: edit.payment_id, bill_no: String(edit.invoice_number ?? "") }]}
-          onSwitch={() => {}}
-          onClose={() => setEdit(null)}
-          onChanged={() => setTick((n) => n + 1)}
+      {billEdit && (
+        <PrepareBillDialog
+          orderId={billEdit.orderId}
+          table={billEdit.table}
+          outlet={billEdit.outlet}
+          waiter=""
+          guest={billEdit.guest}
+          mobile={billEdit.mobile}
+          catalog={catalog}
+          onClose={() => setBillEdit(null)}
+          onChanged={() => { void load(); }}
+          onPrinted={() => {
+            setBillEdit(null);
+            void load();
+          }}
+          onMessage={setMiss}
         />
       )}
-    </>
+    </div>
   );
 }
 
@@ -1250,11 +1706,7 @@ function KotAddTableDialog({
       <div className="dialog-cap">
         <span className="cap-dot" />
         Add Table
-        <span className="cap-btns">
-          <button type="button" tabIndex={-1}>–</button>
-          <button type="button" tabIndex={-1}>□</button>
-          <button type="button" onClick={onClose}>✕</button>
-        </span>
+        <CapBtns onClose={onClose} />
       </div>
       <div className="kot-add-body">
         <div className="kot-add-main">
@@ -1360,39 +1812,214 @@ function KotAddTableDialog({
 }
 
 function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) {
+  const [from, setFrom] = useState(isoDay());
+  const [to, setTo] = useState(isoDay());
+  const [outletName, setOutletName] = useState(outlet || "BAR");
+  const [kotNo, setKotNo] = useState("");
+  const [tableNo, setTableNo] = useState("");
+  const [billNo, setBillNo] = useState("");
+  const [complementary, setComplementary] = useState("Select");
+  const [data, setData] = useState<any>({ rows: [] });
+  const [sel, setSel] = useState<string | null>(null);
   const [kotKey, setKotKey] = useState<string | null>(null);
+  const [miss, setMiss] = useState("");
+  const selRef = useRef<string | null>(null);
+  const gridWrapRef = useRef<HTMLDivElement>(null);
+  selRef.current = sel;
+
+  function focusSelRow(scrollLast = false) {
+    const wrap = gridWrapRef.current;
+    if (!wrap) return;
+    if (scrollLast) wrap.scrollTop = wrap.scrollHeight;
+    const tr = wrap.querySelector("tbody tr.on") as HTMLElement | null;
+    tr?.focus({ preventScroll: true });
+    if (!scrollLast) tr?.scrollIntoView({ block: "nearest" });
+  }
+
+  useEffect(() => {
+    setOutletName(outlet || "BAR");
+  }, [outlet]);
+
+  async function load(nextOutlet = outletName) {
+    const q = new URLSearchParams({
+      from,
+      to,
+      outlet: nextOutlet,
+      kot: kotNo.trim(),
+      table: tableNo.trim(),
+      bill: billNo.trim(),
+      complementary,
+    });
+    const next = await api.get<any>(`/api/reports/kots?${q}`);
+    setData(next);
+    const rows = next.rows || [];
+    setSel(rows.length ? String(rows[rows.length - 1].id || rows[rows.length - 1].kot_number) : null);
+  }
+
+  function onFilterEnter(e: KeyboardEvent) {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    e.stopPropagation();
+    void load();
+  }
+
+  useEffect(() => {
+    load(outlet || "BAR").catch(() => null);
+  }, [outlet]);
+
+  useLayoutEffect(() => {
+    const rows = data.rows || [];
+    if (!rows.length || !sel) return;
+    const lastKey = String(rows[rows.length - 1].id || rows[rows.length - 1].kot_number);
+    // After open / Show: land on last row so Up/Down work without a click
+    if (sel === lastKey) focusSelRow(true);
+  }, [data, sel]);
+
   function openRow(row: any) {
     const key = String(row?.id || row?.kot_number || "").trim();
     if (key) setKotKey(key);
   }
+
+  async function reprintSelected() {
+    const rows = data.rows || [];
+    const row = rows.find((r: any) => String(r.id || r.kot_number) === selRef.current);
+    const id = String(row?.id || "").trim();
+    if (!id) {
+      setMiss("Select a KOT first");
+      return;
+    }
+    try {
+      await api.post(`/api/kots/${id}/reprint`);
+    } catch (e) {
+      setMiss(e instanceof Error ? e.message : "Reprint failed");
+    }
+  }
+
+  useEffect(() => {
+    function keys(e: KeyboardEvent) {
+      if (kotKey || document.querySelector(".kot-view, .bill-dlg, .su-dlg, .alert-dlg, .confirm-dlg, .confirm-overlay")) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onExit();
+        return;
+      }
+      if (e.key === "F1") {
+        e.preventDefault();
+        e.stopPropagation();
+        void reprintSelected();
+        return;
+      }
+      const typing = (e.target as HTMLElement | null)?.closest("input, select, textarea");
+      if (typing && e.key === "Enter") return;
+      const rows = data.rows || [];
+      if (!rows.length) return;
+      const idx = Math.max(0, rows.findIndex((r: any) => String(r.id || r.kot_number) === selRef.current));
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (typing) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const next = e.key === "ArrowDown"
+          ? rows[Math.min(rows.length - 1, idx + 1)]
+          : rows[Math.max(0, idx - 1)];
+        setSel(String(next.id || next.kot_number));
+        requestAnimationFrame(() => focusSelRow(false));
+        return;
+      }
+      if (e.key === "Enter") {
+        if (typing) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const row = rows[idx];
+        if (row) openRow(row);
+      }
+    }
+    window.addEventListener("keydown", keys, true);
+    return () => window.removeEventListener("keydown", keys, true);
+  });
+
+  const rows = data.rows || [];
+  const titleOutlet = outletName || outlet || "BAR";
+
   return (
-    <>
-      <GridReport
-        title={`${outlet || ""} KOT Report`.trim()}
-        endpoint={`/api/reports/kots${outlet === "BAR" ? "?station=BAR" : outlet ? "?station=KITCHEN" : ""}`}
-        columns={[
-          ["kot_number", "KOT No"],
-          ["manual_kot", "Manual KOTNo"],
-          ["table_no", "Table No"],
-          ["kot_date", "KOT Date"],
-          ["kot_time", "Kot Time"],
-          ["bill_no", "BillNo"],
-          ["net_amount", "NetAmount"],
-          ["steward", "StwardName"],
-          ["kot_remark", "KOTRemark"],
-          ["user_id", "UserID"],
-        ]}
-        onExit={onExit}
-        cellSelect
-        onEdit={openRow}
-      />
+    <div className="set-page kot-rpt-page">
+      <div className="set-filter bill-rpt-filter">
+        <div className="set-fields">
+          <div className="set-title">Select Filter &nbsp;— Restaurant KOT Report - {titleOutlet}</div>
+          <div className="set-row">
+            <label>Date From : <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} onKeyDown={onFilterEnter} /></label>
+            <label>To Date : <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} onKeyDown={onFilterEnter} /></label>
+            <label>Complementary : <select className="win" value={complementary} onChange={(e) => setComplementary(e.target.value)} onKeyDown={onFilterEnter}>
+              <option>Select</option><option>Yes</option><option>No</option>
+            </select></label>
+          </div>
+          <div className="set-row">
+            <label>KOT No : <input className="win" value={kotNo} onChange={(e) => setKotNo(e.target.value)} onKeyDown={onFilterEnter} /></label>
+            <label>Table No. : <input className="win" value={tableNo} onChange={(e) => setTableNo(e.target.value)} onKeyDown={onFilterEnter} /></label>
+            <label>Bill No : <input className="win" value={billNo} onChange={(e) => setBillNo(e.target.value)} onKeyDown={onFilterEnter} /></label>
+            <label>Outlet : <select className="win" value={outletName} onChange={(e) => setOutletName(e.target.value)} onKeyDown={onFilterEnter}>
+              {OUTLETS.map((o) => <option key={o}>{o}</option>)}
+            </select></label>
+          </div>
+        </div>
+        <div className="set-btns">
+          <button type="button" className="fn" onClick={() => void load()}>Show</button>
+          <button type="button" className="fn" disabled tabIndex={-1}>Excel</button>
+          <button type="button" className="fn" onClick={() => window.print()}>Print</button>
+          <button type="button" className="fn" onClick={onExit}>Exit</button>
+        </div>
+      </div>
+      <div className="set-grid-wrap" ref={gridWrapRef}>
+        <table className="data set-table bill-rpt-table">
+          <thead>
+            <tr>
+              {["KOT No", "Manual KOTNo", "Table No", "KOT Date", "Kot Time", "BillNo", "NetAmount", "StwardName", "KOTRemark", "UserID"].map((h) => (
+                <th key={h}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r: any) => {
+              const key = String(r.id || r.kot_number);
+              const on = key === sel;
+              return (
+                <tr
+                  key={key}
+                  className={on ? "on" : ""}
+                  tabIndex={on ? 0 : -1}
+                  onClick={() => {
+                    setSel(key);
+                    requestAnimationFrame(() => focusSelRow(false));
+                  }}
+                  onDoubleClick={() => openRow(r)}
+                >
+                  <td>{r.kot_number}</td>
+                  <td>{r.manual_kot || ""}</td>
+                  <td>{r.table_code || r.table_no || ""}</td>
+                  <td>{r.kot_date}</td>
+                  <td>{r.kot_time}</td>
+                  <td>{r.bill_no || "0"}</td>
+                  <td className="num">{inr(r.net_amount)}</td>
+                  <td>{r.steward || ""}</td>
+                  <td>{r.kot_remark || ""}</td>
+                  <td>{r.user_id || ""}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="bill-rpt-foot">
+        <span className="hint">F1 : KOT Reprint</span>
+      </div>
+      {miss && <AlertBox message={miss} onClose={() => setMiss("")} />}
       {kotKey && (
         <KotAddTableDialog
           kotKey={kotKey}
           onClose={() => setKotKey(null)}
         />
       )}
-    </>
+    </div>
   );
 }
 

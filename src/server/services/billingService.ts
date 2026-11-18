@@ -3,7 +3,7 @@ import { formatINR } from "../../shared/money.js";
 import { AppError, InsufficientBalanceError } from "../lib/errors.js";
 import { audit, enqueueSync } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
-import { idempotencyKey, nextNumber, nextSequence, nowIso, peekNextNumber, uuid } from "../lib/ids.js";
+import { idempotencyKey, nextBillNumber, nextSequence, nowIso, peekNextBillNumber, uuid } from "../lib/ids.js";
 import type { PaymentLine, ServiceChargeMode } from "../../shared/types.js";
 import { purchaseOnCard, refundToCard, getCard } from "./cardService.js";
 import { closeTable, getTable, setTableStatus } from "./tableService.js";
@@ -199,7 +199,7 @@ function openInvoiceNumber(ctx: AppContext, orderId: string): string {
     .prepare("SELECT invoice_number FROM invoices WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')")
     .get(orderId) as { invoice_number: string } | undefined;
   if (existing) return existing.invoice_number;
-  return peekNextNumber(ctx.db, "invoice", "INV-");
+  return peekNextBillNumber(ctx.db);
 }
 
 export function generateInvoice(
@@ -282,7 +282,7 @@ export function generateInvoice(
   }
 
   const id = uuid();
-  const invoiceNumber = nextNumber(ctx.db, "invoice", "INV-");
+  const invoiceNumber = nextBillNumber(ctx.db);
   ctx.db
     .prepare(
       `INSERT INTO invoices (

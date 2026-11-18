@@ -3,6 +3,11 @@ declare global {
     bossPrint?: {
       printHtml: (html: string, deviceName?: string) => Promise<{ ok: boolean; error?: string }>;
     };
+    bossWindow?: {
+      minimize: () => Promise<{ ok: boolean }>;
+      maximize: () => Promise<{ ok: boolean }>;
+      close: () => Promise<{ ok: boolean }>;
+    };
   }
 }
 

@@ -1,0 +1,86 @@
+﻿{
+    "invoice":  {
+                    "id":  "2b7d2074-82ef-4923-bbea-92be6446d638",
+                    "invoice_number":  "INV-10021",
+                    "session_id":  "80763240-25c0-46e4-a465-9a1d98739c82",
+                    "order_id":  "38c3f19a-732b-4046-9bf5-946c1a88042f",
+                    "table_id":  "0af474f1-b52d-4dbc-aa8b-585b2a455ffc",
+                    "customer_id":  null,
+                    "card_id":  null,
+                    "food_total":  122800,
+                    "drinks_total":  162427,
+                    "service_charge":  28523,
+                    "service_charge_mode":  "EXCLUSIVE",
+                    "service_charge_pct":  10,
+                    "discount":  0,
+                    "tax":  60629,
+                    "other_charges":  0,
+                    "grand_total":  374400,
+                    "status":  "UNPAID",
+                    "cashier_id":  "7c8fccde-10b0-4682-b7e0-be3239001c53",
+                    "created_at":  "2026-11-18T11:03:44.165Z",
+                    "paid_at":  null
+                },
+    "items":  [
+                  {
+                      "id":  "65a07b29-81c7-43f4-81ff-e7e2552cc851",
+                      "invoice_id":  "2b7d2074-82ef-4923-bbea-92be6446d638",
+                      "order_item_id":  "eebf5682-0c79-41f2-92e0-23400676e960",
+                      "product_id":  "boss-item-1175",
+                      "name":  "GUAVA MIRAGE",
+                      "station":  "BAR",
+                      "qty":  1,
+                      "unit_price":  79900,
+                      "amount":  79900
+                  },
+                  {
+                      "id":  "5c5147da-01e5-42ad-b2c0-4b6aa588f948",
+                      "invoice_id":  "2b7d2074-82ef-4923-bbea-92be6446d638",
+                      "order_item_id":  "45bf439b-5a57-4952-9d0c-533165c670cf",
+                      "product_id":  "boss-item-94",
+                      "name":  "FARM EXOTICA PIZZA",
+                      "station":  "KITCHEN",
+                      "qty":  1,
+                      "unit_price":  74900,
+                      "amount":  74900
+                  },
+                  {
+                      "id":  "0609620f-f471-477f-bb88-c41be900f7ef",
+                      "invoice_id":  "2b7d2074-82ef-4923-bbea-92be6446d638",
+                      "order_item_id":  "bed04132-5441-45b1-beaa-a93c6b47070e",
+                      "product_id":  "boss-item-174",
+                      "name":  "MELON MANGO OASIS",
+                      "station":  "BAR",
+                      "qty":  1,
+                      "unit_price":  74900,
+                      "amount":  74900
+                  },
+                  {
+                      "id":  "421d1842-ad57-4603-9e6b-f649d7d972cb",
+                      "invoice_id":  "2b7d2074-82ef-4923-bbea-92be6446d638",
+                      "order_item_id":  "e2eb5fd1-8bd6-4d96-af49-65ebe80140c1",
+                      "product_id":  "boss-item-964",
+                      "name":  "ANGRY MUSHROOM TOAST",
+                      "station":  "KITCHEN",
+                      "qty":  1,
+                      "unit_price":  47900,
+                      "amount":  47900
+                  },
+                  {
+                      "id":  "0221f4b9-6bf0-487f-a671-c528a477d33a",
+                      "invoice_id":  "2b7d2074-82ef-4923-bbea-92be6446d638",
+                      "order_item_id":  "5e95781e-5be0-4672-90a7-c19044216c58",
+                      "product_id":  "boss-item-455",
+                      "name":  "BLUE PINE 750ML",
+                      "station":  "BAR",
+                      "qty":  1,
+                      "unit_price":  7627,
+                      "amount":  7627
+                  }
+              ],
+    "payments":  [
+
+                 ],
+    "paid":  0,
+    "due":  374400
+}

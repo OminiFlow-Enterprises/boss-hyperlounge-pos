@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>KOT 10055 preview</title>
+<style>
+  html, body { margin: 0; background: #777; font-family: "Consolas", "Courier New", monospace; }
+  .slip {
+    width: 48ch;
+    margin: 24px auto;
+    padding: 16px 14px 28px;
+    background: #fff;
+    color: #111;
+    font-size: 13px;
+    line-height: 1.25;
+    white-space: pre;
+    box-shadow: 0 8px 24px rgba(0,0,0,.35);
+  }
+  .c { text-align: center; white-space: normal; }
+  .title { font-size: 28px; font-weight: 900; letter-spacing: 1px; }
+  .sub { font-weight: 800; margin-bottom: 8px; }
+  .meta { font-weight: 700; }
+  .banner { text-align: center; font-weight: 900; text-decoration: underline; text-underline-offset: 2px; }
+  .copy { text-align: center; font-weight: 700; margin-bottom: 6px; }
+  .rule { border-top: 3px solid #111; margin: 4px 0; }
+  .head, .item {
+    display: grid;
+    grid-template-columns: 1fr 1ch 3ch;
+    font-weight: 700;
+    white-space: normal;
+  }
+  .head { font-weight: 900; }
+  .q { text-align: right; }
+  .item.cancel {
+    position: relative;
+    text-decoration: line-through;
+    text-decoration-thickness: 2px;
+  }
+  .item.cancel::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0;
+    top: 50%;
+    border-top: 2px solid #111;
+    transform: translateY(-50%);
+    pointer-events: none;
+  }
+  .hint {
+    margin: 12px auto 0;
+    width: 48ch;
+    color: #eee;
+    font: 12px/1.4 Tahoma, sans-serif;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <div class="slip">
+    <div class="c title">KITCHEN</div>
+    <div class="c sub">Restaurant KOT</div>
+    <div class="meta">KOT No.   : 10055</div>
+    <div class="meta">Table No. : 23</div>
+    <div class="meta">Date      : 18 Nov 2026  17:57:43</div>
+    <div class="meta">Stward    : A</div>
+    <br/>
+    <div class="banner">RUNNING ORDER</div>
+    <div class="copy">Original Copy</div>
+    <div class="rule"></div>
+    <div class="head"><span>Item Name</span><span>|</span><span class="q">Qty</span></div>
+    <div class="rule"></div>
+    <div class="item cancel"><span class="n">AAA</span><span class="bar">|</span><span class="q">-2</span></div>
+    <div class="rule"></div>
+    <div class="meta">sds</div>
+  </div>
+  <div class="hint">KOT HTML preview — cancel/minus rows must show a straight strike through the item.</div>
+</body>
+</html>

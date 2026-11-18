@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Bill 26-27/24151</title>
+<style>@page { size: 80mm auto; margin: 0; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  width: 80mm;
+  max-width: 80mm;
+  margin: 0;
+  padding: 0;
+  background: #fff;
+  color: #000;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 11px;
+  line-height: 1.3;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+.slip {
+  width: 72mm;
+  max-width: 300px;
+  margin: 0 auto;
+  padding: 2mm 3mm 5mm;
+  color: #000;
+  background: #fff;
+  overflow: hidden;
+}
+.center { text-align: center; }
+.biz-name {
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1.15;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+.biz-unit {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-top: 1px;
+  text-transform: uppercase;
+}
+.biz-line {
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.5;
+  margin-top: 1px;
+}
+.outlet {
+  font-size: 13px;
+  font-weight: 700;
+  margin: 8px 0;
+  text-transform: uppercase;
+}
+.meta {
+  display: grid;
+  grid-template-columns: 60% 40%;
+  width: 100%;
+  font-size: 11px;
+  line-height: 1.35;
+  margin-bottom: 4px;
+}
+.meta-left .row {
+  display: grid;
+  grid-template-columns: 4.2em auto 1fr;
+  align-items: baseline;
+  white-space: nowrap;
+}
+.meta-right .row {
+  display: grid;
+  grid-template-columns: 2.4em 1fr;
+  align-items: baseline;
+  white-space: nowrap;
+}
+.meta .lbl { font-weight: 700; }
+.meta .colon { font-weight: 700; padding-right: 0; }
+.meta .val { font-weight: 400; min-width: 0; }
+.meta-right .lbl { font-weight: 400; padding-right: 0.35em; }
+.items {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 11px;
+  margin-top: 2px;
+}
+.items col.c-name { width: 44%; }
+.items col.c-rate { width: 20%; }
+.items col.c-qty { width: 12%; }
+.items col.c-amt { width: 24%; }
+.items thead th {
+  font-weight: 700;
+  font-size: 11px;
+  padding: 2px 0;
+  border-top: 1px solid #000;
+  border-bottom: 1px solid #000;
+  line-height: 1.2;
+}
+.items thead th.n { text-align: left; }
+.items thead th.r { text-align: right; }
+.items tbody td {
+  font-weight: 400;
+  font-size: 11px;
+  padding: 2px 0;
+  vertical-align: top;
+  line-height: 1.25;
+  border-bottom: 1px dashed #000;
+}
+.items tbody tr:last-child td { border-bottom: none; }
+.items td.n {
+  text-align: left;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  white-space: normal;
+}
+.items td.r { text-align: right; white-space: nowrap; }
+.totals-wrap {
+  border-top: 1px solid #000;
+  padding-top: 2px;
+  width: 100%;
+}
+.totals {
+  display: grid;
+  grid-template-columns: 1fr 20% 24%;
+  width: 100%;
+  font-size: 11px;
+  line-height: 1.3;
+}
+.totals .row { display: contents; }
+.totals .lab {
+  text-align: right;
+  font-weight: 400;
+  font-size: 11px;
+  padding: 1px 3px 1px 0;
+  white-space: nowrap;
+}
+.totals .lab::after { content: " :"; }
+.totals .base {
+  text-align: right;
+  font-weight: 400;
+  font-size: 11px;
+  padding: 1px 0;
+  white-space: nowrap;
+}
+.totals .amt {
+  text-align: right;
+  font-weight: 400;
+  font-size: 11px;
+  padding: 1px 0;
+  white-space: nowrap;
+}
+.totals .row.total-row .lab,
+.totals .row.total-row .amt {
+  font-weight: 700;
+  font-size: 11px;
+  padding-top: 1px;
+}
+.totals .row.net-row .lab,
+.totals .row.net-row .amt {
+  font-weight: 700;
+  font-size: 16px;
+  padding-top: 6px;
+  line-height: 1.2;
+}
+.totals .row.net-row .base { padding-top: 6px; }
+.words {
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.3;
+  margin-top: 6px;
+  text-align: left;
+  word-break: break-word;
+}
+.thanks {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  margin: 6px 0 0;
+}
+.sign {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 8px;
+}
+@media print {
+  html, body {
+    width: 80mm;
+    max-width: 80mm;
+    margin: 0;
+    padding: 0;
+  }
+  .slip {
+    width: 72mm;
+    max-width: 300px;
+    margin: 0 auto;
+    padding: 2mm 3mm 5mm;
+    overflow: hidden;
+  }
+}</style>
+</head>
+<body>
+  <div class="slip">
+    <div class="center">
+      <div class="biz-name">THE BOSS</div>
+      <div class="biz-unit">(A UNIT OF BROTZEIT95)</div>
+      <div class="biz-line">THE GRAND WALK,</div>
+      <div class="biz-line">LAXMI MANDIR TIRAHA, TONK ROAD</div>
+      <div class="biz-line">JAIPUR - 302015</div>
+      <div class="biz-line">Contact No.:+91-7900890041</div>
+      <div class="biz-line">GSTIN : 08ABFFB3127P1Z7</div>
+      <div class="biz-line">HSN/SAC Code : 996331</div>
+      <div class="biz-line">TIN NO. 08694753852</div>
+      <div class="outlet">BAR</div>
+    </div>
+
+    <div class="meta">
+      <div class="meta-left">
+        <div class="row"><span class="lbl">Bill No.</span><span class="colon">:</span><span class="val">26-27/24151</span></div>
+        <div class="row"><span class="lbl">Table No.</span><span class="colon">:</span><span class="val">BEYOND UD</span></div>
+        <div class="row"><span class="lbl">Waiter.</span><span class="colon">:</span><span class="val">A</span></div>
+        <div class="row"><span class="lbl">Name</span><span class="colon">:</span><span class="val"></span></div>
+      </div>
+      <div class="meta-right">
+        <div class="row"><span class="lbl">Date</span><span class="val">06 Nov 2026</span></div>
+        <div class="row"><span class="lbl">Time</span><span class="val">23:58:00</span></div>
+        <div class="row"><span class="lbl">Pax</span><span class="val">:</span></div>
+      </div>
+    </div>
+
+    <table class="items">
+      <colgroup>
+        <col class="c-name" /><col class="c-rate" /><col class="c-qty" /><col class="c-amt" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th class="n">ItemName</th>
+          <th class="r">Rate</th>
+          <th class="r">Qty</th>
+          <th class="r">Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        
+      <tr>
+        <td class="n">BOMBAY SAPPHIRE BTL</td>
+        <td class="r">9999.00</td>
+        <td class="r">1</td>
+        <td class="r">9999.00</td>
+      </tr>
+      <tr>
+        <td class="n">KINGFISHER ULTRA PINT</td>
+        <td class="r">549.00</td>
+        <td class="r">4</td>
+        <td class="r">2196.00</td>
+      </tr>
+      <tr>
+        <td class="n">BREEZER 275 ML JAMAICAN</td>
+        <td class="r">579.00</td>
+        <td class="r">3</td>
+        <td class="r">1737.00</td>
+      </tr>
+      <tr>
+        <td class="n">JAGER BOMB</td>
+        <td class="r">599.00</td>
+        <td class="r">2</td>
+        <td class="r">1198.00</td>
+      </tr>
+      <tr>
+        <td class="n">TONIC WATER</td>
+        <td class="r">229.00</td>
+        <td class="r">4</td>
+        <td class="r">916.00</td>
+      </tr>
+      <tr>
+        <td class="n">ABSOLUTE 30 ML</td>
+        <td class="r">449.00</td>
+        <td class="r">2</td>
+        <td class="r">898.00</td>
+      </tr>
+      <tr>
+        <td class="n">REDBULL</td>
+        <td class="r">329.00</td>
+        <td class="r">2</td>
+        <td class="r">658.00</td>
+      </tr>
+      <tr>
+        <td class="n">AERATED DRINK</td>
+        <td class="r">199.00</td>
+        <td class="r">1</td>
+        <td class="r">199.00</td>
+      </tr>
+      </tbody>
+    </table>
+
+    <div class="totals-wrap">
+      <div class="totals">
+        <div class="row total-row">
+          <div class="lab">Total</div>
+          <div class="base"></div>
+          <div class="amt">17801.00</div>
+        </div>
+        
+      <div class="row">
+        <div class="lab">Discount 15.00 %</div>
+        <div class="base"></div>
+        <div class="amt">2670.15</div>
+      </div>
+      <div class="row">
+        <div class="lab">Vat 20%</div>
+        <div class="base">13623.80</div>
+        <div class="amt">2724.76</div>
+      </div>
+      <div class="row">
+        <div class="lab">Surcharge</div>
+        <div class="base">2724.76</div>
+        <div class="amt">544.95</div>
+      </div>
+      <div class="row">
+        <div class="lab">CGST 9.0%</div>
+        <div class="base">1507.05</div>
+        <div class="amt">135.63</div>
+      </div>
+      <div class="row">
+        <div class="lab">SGST 9.0%</div>
+        <div class="base">1507.05</div>
+        <div class="amt">135.63</div>
+      </div>
+      <div class="row">
+        <div class="lab">Round Off</div>
+        <div class="base"></div>
+        <div class="amt">0.17</div>
+      </div>
+        <div class="row net-row">
+          <div class="lab">Net Total</div>
+          <div class="base"></div>
+          <div class="amt">18672.00</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="words">Rs. Eighteen Thousand Six Hundred Seventy Two Only</div>
+    <div class="thanks">~~** Thanks for coming--Visit Again**~</div>
+    <div class="sign"><span>E.&.O.E</span><span>Guest Signature</span></div>
+  </div>
+</body>
+</html>
