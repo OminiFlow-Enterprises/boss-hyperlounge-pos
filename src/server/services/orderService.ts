@@ -7,7 +7,10 @@ import { printerForStation } from "../hardware/index.js";
 import { deductStock, restoreStock } from "./inventoryService.js";
 import { displayTaxRate } from "./itemService.js";
 import { resolvePrice } from "./pricingService.js";
-import { getTable } from "./tableService.js";
+import { syncClubCardCharge } from "./billingService.js";
+import { attachTableCard, getTable } from "./tableService.js";
+import { printedTableNo } from "./tableLabel.js";
+import { formatTableNo } from "../../shared/tableLabel.js";
 import type { KotStatus, Station } from "../../shared/types.js";
 
 export function getOpenOrderForSession(ctx: AppContext, sessionId: string) {
@@ -217,30 +220,33 @@ export function cancelItem(ctx: AppContext, itemId: string, reason: string) {
     | { id: string; order_id: string; name: string; qty: number; kot_id: string | null; voided: number }
     | undefined;
   if (!item || item.voided) throw new AppError("Item not found");
-  ctx.db.prepare("UPDATE order_items SET voided = 1, status = 'VOID' WHERE id = ?").run(itemId);
-  if (item.kot_id) {
-    const kot = ctx.db.prepare("SELECT * FROM kots WHERE id = ?").get(item.kot_id) as {
-      id: string;
-      kot_number: string;
-      station: Station;
-      order_id: string;
-      session_id: string;
-      table_id: string;
-      waiter_id: string | null;
-    };
-    createKot(ctx, {
-      orderId: kot.order_id,
-      sessionId: kot.session_id,
-      tableId: kot.table_id,
-      waiterId: kot.waiter_id,
-      station: kot.station,
-      type: "CANCEL",
-      items: [{ orderItemId: item.id, productId: "", name: item.name, qty: item.qty, notes: reason }],
-    });
-    restoreStock(ctx, (ctx.db.prepare("SELECT product_id FROM order_items WHERE id = ?").get(itemId) as { product_id: string }).product_id, item.qty, `VOID:${item.id}`);
-  }
-  audit(ctx, "ITEM_CANCEL", "order_item", itemId, reason, item, { voided: true });
-  return item;
+  return ctx.db.transaction(() => {
+    ctx.db.prepare("UPDATE order_items SET voided = 1, status = 'VOID' WHERE id = ?").run(itemId);
+    if (item.kot_id) {
+      const kot = ctx.db.prepare("SELECT * FROM kots WHERE id = ?").get(item.kot_id) as {
+        id: string;
+        kot_number: string;
+        station: Station;
+        order_id: string;
+        session_id: string;
+        table_id: string;
+        waiter_id: string | null;
+      };
+      createKot(ctx, {
+        orderId: kot.order_id,
+        sessionId: kot.session_id,
+        tableId: kot.table_id,
+        waiterId: kot.waiter_id,
+        station: kot.station,
+        type: "CANCEL",
+        items: [{ orderItemId: item.id, productId: "", name: item.name, qty: item.qty, notes: reason }],
+      });
+      restoreStock(ctx, (ctx.db.prepare("SELECT product_id FROM order_items WHERE id = ?").get(itemId) as { product_id: string }).product_id, item.qty, `VOID:${item.id}`);
+    }
+    audit(ctx, "ITEM_CANCEL", "order_item", itemId, reason, item, { voided: true });
+    syncClubCardCharge(ctx, item.order_id);
+    return item;
+  })();
 }
 
 function createKot(
@@ -302,7 +308,7 @@ function createKot(
 export async function sendKot(
   ctx: AppContext,
   orderId: string,
-  opts?: { remark?: string; steward?: string } | string,
+  opts?: { remark?: string; steward?: string; cardNumber?: string } | string,
 ) {
   assertPermission(ctx.actor.role, "SEND_KOT");
   const options = typeof opts === "string" ? { remark: opts } : opts ?? {};
@@ -316,6 +322,8 @@ export async function sendKot(
       }
     | undefined;
   if (!order) throw new AppError("Order not found", 404);
+  const punchedCard = String(options.cardNumber ?? "").trim();
+  if (punchedCard) attachTableCard(ctx, order.table_id, punchedCard);
   const openOrder = order;
   const slipRemark = String(options.remark ?? "").trim();
   const stewardName = String(options.steward ?? "").trim();
@@ -351,12 +359,13 @@ export async function sendKot(
   const additions = pending.filter((i) => i.qty > 0);
   const reductions = pending.filter((i) => i.qty < 0);
   if (!additions.length && !reductions.length) throw new AppError("No new items to send to kitchen/bar");
+  syncClubCardCharge(ctx, orderId, true);
 
   const existingKots = ctx.db
     .prepare("SELECT COUNT(*) AS n FROM kots WHERE session_id = ? AND type IN ('NEW','ADDITION')")
     .get(order.session_id) as { n: number };
   const kotType = existingKots.n > 0 ? "ADDITION" : "NEW";
-  const table = getTable(ctx, order.table_id);
+  getTable(ctx, order.table_id);
   const waiterFromStaff = order.waiter_id
     ? (ctx.db.prepare("SELECT name FROM staff WHERE id = ?").get(order.waiter_id) as { name: string } | undefined)
     : undefined;
@@ -391,7 +400,7 @@ export async function sendKot(
     const banner = type === "NEW" ? "NEW ORDER" : "RUNNING ORDER";
     const print = await printerForStation(ctx.hardware, station).printKOT({
       kotNumber: kot.kot_number,
-      tableCode: table.code,
+      tableCode: printedTableNo(ctx, { tableId: openOrder.table_id, orderId: openOrder.id }),
       waiter: steward,
       station,
       reprint: false,
@@ -565,32 +574,35 @@ export function modifyItemQty(ctx: AppContext, itemId: string, newQty: number) {
   }
   if (newQty < item.qty) throw new AppError("Reduce quantity via cancel item after KOT is sent");
   const added = newQty - item.qty;
-  ctx.db.prepare("UPDATE order_items SET qty = ? WHERE id = ?").run(newQty, item.id);
-  const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(item.order_id) as {
-    id: string;
-    session_id: string;
-    table_id: string;
-    waiter_id: string | null;
-  };
-  const kot = createKot(ctx, {
-    orderId: order.id,
-    sessionId: order.session_id,
-    tableId: order.table_id,
-    waiterId: order.waiter_id,
-    station: item.station,
-    type: "ADDITION",
-    items: [
-      {
-        orderItemId: item.id,
-        productId: item.product_id,
-        name: item.name,
-        qty: added,
-        notes: item.notes,
-      },
-    ],
-  });
-  audit(ctx, "KOT_ADDITION", "order_item", item.id, null, item.qty, newQty);
-  return { item: ctx.db.prepare("SELECT * FROM order_items WHERE id = ?").get(item.id), kot };
+  return ctx.db.transaction(() => {
+    ctx.db.prepare("UPDATE order_items SET qty = ? WHERE id = ?").run(newQty, item.id);
+    const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(item.order_id) as {
+      id: string;
+      session_id: string;
+      table_id: string;
+      waiter_id: string | null;
+    };
+    const kot = createKot(ctx, {
+      orderId: order.id,
+      sessionId: order.session_id,
+      tableId: order.table_id,
+      waiterId: order.waiter_id,
+      station: item.station,
+      type: "ADDITION",
+      items: [
+        {
+          orderItemId: item.id,
+          productId: item.product_id,
+          name: item.name,
+          qty: added,
+          notes: item.notes,
+        },
+      ],
+    });
+    audit(ctx, "KOT_ADDITION", "order_item", item.id, null, item.qty, newQty);
+    syncClubCardCharge(ctx, item.order_id, true);
+    return { item: ctx.db.prepare("SELECT * FROM order_items WHERE id = ?").get(item.id), kot };
+  })();
 }
 
 /** Sets the billed quantity of a line without printing a KOT. Qty 0 removes the line. */
@@ -608,6 +620,7 @@ export function setBillLineQty(ctx: AppContext, orderId: string, ids: string[], 
   const sum = items.reduce((total, item) => total + item.qty, 0);
   if (qty === sum) return { qty };
 
+  return ctx.db.transaction(() => {
   function apply(item: { id: string; product_id: string; qty: number; kot_id: string | null }, next: number) {
     const delta = next - item.qty;
     if (item.kot_id && delta > 0) deductStock(ctx, item.product_id, delta, `BILL:${item.id}`);
@@ -628,7 +641,9 @@ export function setBillLineQty(ctx: AppContext, orderId: string, ids: string[], 
     }
   }
   audit(ctx, "BILL_QTY", "order", orderId, null, sum, qty);
+  syncClubCardCharge(ctx, orderId);
   return { qty };
+  })();
 }
 
 /** Replaces the product on a bill line and keeps the quantity. Does not print a KOT. */
@@ -653,6 +668,7 @@ export function setBillLineProduct(ctx: AppContext, orderId: string, ids: string
   if (!productId) throw new AppError("Select an item");
   if (items.every((item) => item.product_id === productId)) return { id: items[0].id };
 
+  return ctx.db.transaction(() => {
   let cardTypeId: string | null = null;
   if (order.card_id) {
     const card = ctx.db.prepare("SELECT card_type_id FROM member_cards WHERE id = ?").get(order.card_id) as
@@ -686,7 +702,9 @@ export function setBillLineProduct(ctx: AppContext, orderId: string, ids: string
     ctx.db.prepare("UPDATE order_items SET qty = 0, voided = 1, status = 'VOID' WHERE id = ?").run(extra.id);
   }
   audit(ctx, "BILL_ITEM", "order", orderId, null, items.map((item) => item.product_id), productId);
+  syncClubCardCharge(ctx, orderId);
   return ctx.db.prepare("SELECT * FROM order_items WHERE id = ?").get(first.id);
+  })();
 }
 
 /** Sets the billed price of a line, in paise, without printing a KOT. */
@@ -703,11 +721,14 @@ export function setBillLinePrice(ctx: AppContext, orderId: string, ids: string[]
   if (!items.length) throw new AppError("Item not found");
   if (items.every((item) => item.unit_price === unitPrice)) return { unitPrice };
   const before = items[0].unit_price;
-  for (const item of items) {
-    ctx.db.prepare("UPDATE order_items SET unit_price = ? WHERE id = ?").run(unitPrice, item.id);
-  }
-  audit(ctx, "BILL_PRICE", "order", orderId, null, before, unitPrice);
-  return { unitPrice };
+  return ctx.db.transaction(() => {
+    for (const item of items) {
+      ctx.db.prepare("UPDATE order_items SET unit_price = ? WHERE id = ?").run(unitPrice, item.id);
+    }
+    audit(ctx, "BILL_PRICE", "order", orderId, null, before, unitPrice);
+    syncClubCardCharge(ctx, orderId);
+    return { unitPrice };
+  })();
 }
 
 export async function reprintKot(ctx: AppContext, kotId: string) {
@@ -715,6 +736,7 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
     | {
         id: string;
         kot_number: string;
+        order_id: string;
         table_id: string;
         station: Station;
         type: string;
@@ -727,7 +749,7 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
   const items = ctx.db
     .prepare(`SELECT ki.qty, ki.name, ki.notes FROM kot_items ki WHERE ki.kot_id = ?`)
     .all(kotId) as Array<{ qty: number; name: string; notes: string | null }>;
-  const table = getTable(ctx, kot.table_id);
+  getTable(ctx, kot.table_id);
   const waiter = kot.waiter_id
     ? (ctx.db.prepare("SELECT name FROM staff WHERE id = ?").get(kot.waiter_id) as { name: string } | undefined)
     : undefined;
@@ -738,7 +760,7 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
   audit(ctx, "KOT_REPRINT", "kot", kotId, "*** REPRINT ***", null, kot.kot_number);
   const print = await printerForStation(ctx.hardware, kot.station).printKOT({
     kotNumber: kot.kot_number,
-    tableCode: table.code,
+    tableCode: printedTableNo(ctx, { tableId: kot.table_id, orderId: kot.order_id }),
     waiter: waiter?.name,
     station: kot.station,
     reprint: true,
@@ -791,18 +813,31 @@ export function voidKot(ctx: AppContext, kotId: string, reason: string) {
     product_id: string;
     qty: number;
   }>;
-  for (const item of items) {
-    ctx.db.prepare("UPDATE order_items SET voided = 1, status = 'VOID' WHERE id = ?").run(item.order_item_id);
-    if (item.product_id) restoreStock(ctx, item.product_id, item.qty, `KOTVOID:${kotId}`);
-  }
-  const result = advanceKot(ctx, kotId, "VOID");
-  audit(ctx, "KOT_CANCEL", "kot", kotId, reason, null, "VOID");
-  return result;
+  return ctx.db.transaction(() => {
+    for (const item of items) {
+      ctx.db.prepare("UPDATE order_items SET voided = 1, status = 'VOID' WHERE id = ?").run(item.order_item_id);
+      if (item.product_id) restoreStock(ctx, item.product_id, item.qty, `KOTVOID:${kotId}`);
+    }
+    const kot = ctx.db.prepare("SELECT order_id FROM kots WHERE id = ?").get(kotId) as { order_id: string } | undefined;
+    const result = advanceKot(ctx, kotId, "VOID");
+    audit(ctx, "KOT_CANCEL", "kot", kotId, reason, null, "VOID");
+    if (kot) syncClubCardCharge(ctx, kot.order_id);
+    return result;
+  })();
 }
 
 export function listKots(ctx: AppContext, station?: Station) {
   const sql = `
-    SELECT k.*, t.code AS table_code, o.order_number, s.name AS waiter_name
+    SELECT k.*, t.code AS table_code,
+           COALESCE(NULLIF(t.outlet, ''), 'BAR') AS outlet_name,
+           (
+             SELECT c.card_number FROM member_cards c
+              WHERE c.id = COALESCE(
+                o.card_id,
+                (SELECT s2.card_id FROM table_sessions s2 WHERE s2.id = k.session_id)
+              )
+           ) AS order_card,
+           o.order_number, s.name AS waiter_name
     FROM kots k
     JOIN dining_tables t ON t.id = k.table_id
     JOIN orders o ON o.id = k.order_id
@@ -812,23 +847,39 @@ export function listKots(ctx: AppContext, station?: Station) {
   `;
   const kots = (station ? ctx.db.prepare(sql).all(station) : ctx.db.prepare(sql).all()) as Array<{
     id: string;
+    table_code: string;
+    outlet_name: string;
+    order_card: string | null;
   }>;
   return kots.map((k) => ({
     ...k,
+    table_label: formatTableNo(k.table_code, k.order_card, k.outlet_name),
     items: ctx.db.prepare("SELECT * FROM kot_items WHERE kot_id = ?").all(k.id),
   }));
 }
 
 export function listOrders(ctx: AppContext) {
-  return ctx.db
+  const rows = ctx.db
     .prepare(
       `SELECT o.*, t.code AS table_code,
+              COALESCE(NULLIF(t.outlet, ''), 'BAR') AS outlet_name,
+              (
+                SELECT c.card_number FROM member_cards c
+                 WHERE c.id = COALESCE(
+                   o.card_id,
+                   (SELECT s.card_id FROM table_sessions s WHERE s.id = o.session_id)
+                 )
+              ) AS order_card,
               (SELECT COALESCE(SUM(qty * unit_price),0) FROM order_items WHERE order_id = o.id AND voided = 0) AS total
        FROM orders o
        JOIN dining_tables t ON t.id = o.table_id
        ORDER BY o.created_at DESC`,
     )
-    .all();
+    .all() as Array<{ table_code: string; outlet_name: string; order_card: string | null }>;
+  return rows.map((row) => ({
+    ...row,
+    table_label: formatTableNo(row.table_code, row.order_card, row.outlet_name),
+  }));
 }
 
 export function getOrderDetail(ctx: AppContext, orderId: string) {

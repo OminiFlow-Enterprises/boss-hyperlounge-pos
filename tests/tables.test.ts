@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { rupeesToPaise } from "../src/shared/money.js";
 import { openTable, transferTable, mergeTables, getTableByCode, splitTable, createTable, transferItems, listTables } from "../src/server/services/tableService.js";
 import { addItem, createOrder, sendKot, getOrderDetail, reprintKot, setBillLineQty, setBillLineProduct, setBillLinePrice } from "../src/server/services/orderService.js";
-import { generateInvoice, settleInvoice, previewBill } from "../src/server/services/billingService.js";
+import { generateInvoice, settleInvoice, previewBill, cardSpendable, settleClubFromCard } from "../src/server/services/billingService.js";
 import { issueCard, rechargeCard, checkBalance } from "../src/server/services/cardService.js";
 import { InsufficientBalanceError } from "../src/server/lib/errors.js";
 import { setSetting } from "../src/server/services/settingsService.js";
@@ -296,6 +296,73 @@ describe("tables, KOT and billing", () => {
     const again = generateInvoice(cashier, order.id, { serviceChargePct: 0, discountPct: 0 }) as { id: string; grand_total: number };
     expect(again.id).toBe(first.id);
     expect(again.grand_total).toBe(bill.grandTotal);
+  });
+
+  it("deducts the Boss Club card when the order is punched and does not charge it again", async () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const cashier = ctx("cashier");
+    setSetting(cashier, "service_charge_pct", "0");
+    const card = issueCard(cashier, {
+      customer: { name: "Club Guest", mobile: "9000001001" },
+      cardNumber: "1001",
+      cardTypeCode: "REGULAR",
+    });
+    rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(2000), paymentMode: "CASH", applyBonus: false });
+
+    const club = createTable(waiter, { code: "C1", outlet: "THE BOSS CLUB" });
+    openTable(waiter, { tableId: club.id, cardId: card.id });
+    const clubOrder = createOrder(waiter, club.id) as { id: string };
+    addItem(waiter, { orderId: clubOrder.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
+    const clubNet = previewBill(cashier, clubOrder.id, { serviceChargePct: 0 }).grandTotal;
+    expect(checkBalance(cashier, "1001").balances.usable).toBe(rupeesToPaise(2000));
+    await sendKot(waiter, clubOrder.id);
+    const afterPunch = checkBalance(cashier, "1001").balances.usable;
+    expect(afterPunch).toBe(rupeesToPaise(2000) - clubNet);
+
+    const rest = createTable(waiter, { code: "R1", outlet: "RESTAURANT" });
+    openTable(waiter, { tableId: rest.id });
+    const restOrder = createOrder(waiter, rest.id) as { id: string };
+    addItem(waiter, { orderId: restOrder.id, productId: seeded.products["FOOD-PZ"], qty: 4 });
+    const invoice = generateInvoice(cashier, restOrder.id, { serviceChargePct: 0 }) as { id: string; grand_total: number };
+    expect(invoice.grand_total).toBeGreaterThan(afterPunch);
+    expect(() =>
+      settleInvoice(cashier, invoice.id, [{ method: "MEMBER_CARD", amount: invoice.grand_total, memberCardId: card.id }]),
+    ).toThrow(InsufficientBalanceError);
+
+    const part = settleInvoice(cashier, invoice.id, [{ method: "MEMBER_CARD", amount: afterPunch, memberCardId: card.id }]);
+    expect(part.complete).toBe(false);
+    expect(cardSpendable(cashier, card.id).usable).toBe(0);
+
+    const beforeClubSettle = checkBalance(cashier, "1001").balances.usable;
+    const clubPaid = settleClubFromCard(cashier, (generateInvoice(cashier, clubOrder.id, { serviceChargePct: 0 }) as { id: string }).id);
+    expect(clubPaid.complete).toBe(true);
+    expect(checkBalance(cashier, "1001").balances.usable).toBe(beforeClubSettle);
+  });
+
+  it("puts the Boss Club card balance back when the punched item is cancelled", async () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const cashier = ctx("cashier");
+    setSetting(cashier, "service_charge_pct", "0");
+    const card = issueCard(cashier, {
+      customer: { name: "Club Guest", mobile: "9000001002" },
+      cardNumber: "1002",
+      cardTypeCode: "REGULAR",
+    });
+    rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(2000), paymentMode: "CASH", applyBonus: false });
+    const club = createTable(waiter, { code: "C2", outlet: "THE BOSS CLUB" });
+    openTable(waiter, { tableId: club.id, cardId: card.id });
+    const clubOrder = createOrder(waiter, club.id) as { id: string };
+    const line = addItem(waiter, { orderId: clubOrder.id, productId: seeded.products["FOOD-PZ"], qty: 2 }) as { id: string };
+    await sendKot(waiter, clubOrder.id);
+    const net2 = previewBill(cashier, clubOrder.id, { serviceChargePct: 0 }).grandTotal;
+    expect(checkBalance(cashier, "1002").balances.usable).toBe(rupeesToPaise(2000) - net2);
+    setBillLineQty(cashier, clubOrder.id, [line.id], 1);
+    const net1 = previewBill(cashier, clubOrder.id, { serviceChargePct: 0 }).grandTotal;
+    expect(checkBalance(cashier, "1002").balances.usable).toBe(rupeesToPaise(2000) - net1);
+    setBillLineQty(cashier, clubOrder.id, [line.id], 0);
+    expect(checkBalance(cashier, "1002").balances.usable).toBe(rupeesToPaise(2000));
   });
 
   it("creates a new table from a typed code and reuses the same code", () => {

@@ -17,6 +17,7 @@ import * as staff from "../services/staffService.js";
 import * as inventory from "../services/inventoryService.js";
 import * as settings from "../services/settingsService.js";
 import * as items from "../services/itemService.js";
+import * as complimentary from "../services/complimentaryService.js";
 
 declare global {
   namespace Express {
@@ -84,9 +85,31 @@ export function createApp(options: CreateAppOptions) {
   app.post(
     "/api/auth/login",
     wrap((req, res) => {
-      const actor = staff.login(req.ctx, req.body.username, req.body.pin, req.body.terminalId ?? req.ctx.actor.terminalId);
+      const actor = staff.login(
+        req.ctx,
+        req.body.username,
+        req.body.password ?? req.body.pin,
+        req.body.terminalId ?? req.ctx.actor.terminalId,
+      );
       currentActor = actor;
       res.json(actor);
+    }),
+  );
+
+  app.post("/api/auth/logout", (_req, res) => {
+    currentActor = null;
+    res.json({ ok: true });
+  });
+
+  app.post(
+    "/api/auth/change-password",
+    wrap((req, res) => {
+      res.json(staff.changePassword(
+        req.ctx,
+        req.body.username,
+        req.body.oldPassword ?? req.body.pin,
+        req.body.newPassword ?? req.body.newPin,
+      ));
     }),
   );
 
@@ -119,11 +142,35 @@ export function createApp(options: CreateAppOptions) {
     res.json(cards.createOrFindCustomer(req.ctx, req.body));
   }));
 
+  app.get("/api/complimentary", wrap((req, res) => {
+    res.json(complimentary.listComplimentary(req.ctx));
+  }));
+  app.post("/api/complimentary", wrap((req, res) => {
+    res.json(complimentary.createComplimentary(req.ctx, String(req.body?.name ?? "")));
+  }));
+  app.put("/api/complimentary/:id", wrap((req, res) => {
+    res.json(complimentary.updateComplimentary(req.ctx, req.params.id, String(req.body?.name ?? "")));
+  }));
+  app.delete("/api/complimentary/:id", wrap((req, res) => {
+    res.json(complimentary.deleteComplimentary(req.ctx, req.params.id));
+  }));
+
   app.get("/api/cards/balance/check", wrap((req, res) => {
-    res.json(cards.checkBalance(req.ctx, String(req.query.q ?? "")));
+    const result = cards.checkBalance(req.ctx, String(req.query.q ?? ""), req.query.exact === "1");
+    const except = String(req.query.exceptOrderId ?? "").trim() || undefined;
+    const spend = billing.cardSpendable(req.ctx, result.card.id, except);
+    res.json({
+      ...result,
+      balances: { ...result.balances, reserved: spend.reserved, available: spend.available },
+    });
   }));
   app.get("/api/cards/recharged-today", wrap((req, res) => {
-    res.json(cards.cardsRechargedToday(req.ctx));
+    const except = String(req.query.exceptOrderId ?? "").trim() || undefined;
+    const rows = cards.cardsRechargedToday(req.ctx);
+    res.json(rows.map((row) => {
+      const spend = billing.cardSpendable(req.ctx, row.id, except);
+      return { ...row, reserved: spend.reserved, available: spend.available };
+    }));
   }));
   app.get("/api/cards", wrap((req, res) => {
     if (req.query.q) {
@@ -177,6 +224,9 @@ export function createApp(options: CreateAppOptions) {
   app.post("/api/tables/:id/open", wrap((req, res) => {
     res.json(tables.openTable(req.ctx, { tableId: req.params.id, ...req.body }));
   }));
+  app.post("/api/tables/:id/card", wrap((req, res) => {
+    res.json(tables.attachTableCard(req.ctx, req.params.id, String(req.body?.cardNumber ?? "")));
+  }));
   app.post("/api/tables/:id/checkin", wrap((req, res) => {
     res.json(tables.checkIn(req.ctx, { tableId: req.params.id, ...req.body }));
   }));
@@ -223,7 +273,8 @@ export function createApp(options: CreateAppOptions) {
   app.post("/api/orders/:id/send-kot", wrap(async (req, res) => {
     const remark = typeof req.body?.remark === "string" ? req.body.remark : undefined;
     const steward = typeof req.body?.steward === "string" ? req.body.steward : undefined;
-    res.json(await orders.sendKot(req.ctx, req.params.id, { remark, steward }));
+    const cardNumber = typeof req.body?.cardNumber === "string" ? req.body.cardNumber : undefined;
+    res.json(await orders.sendKot(req.ctx, req.params.id, { remark, steward, cardNumber }));
   }));
   app.post("/api/order-items/:id/qty", wrap((req, res) => {
     res.json(orders.modifyItemQty(req.ctx, req.params.id, Number(req.body.qty)));
@@ -262,6 +313,9 @@ export function createApp(options: CreateAppOptions) {
   app.post("/api/invoices/:id/pay", wrap((req, res) => {
     res.json(billing.settleInvoice(req.ctx, req.params.id, req.body.lines, req.body));
   }));
+  app.post("/api/invoices/:id/settle-club", wrap((req, res) => {
+    res.json(billing.settleClubFromCard(req.ctx, req.params.id));
+  }));
   app.post("/api/invoices/:id/print", wrap(async (req, res) => {
     res.json(await billing.printReceipt(req.ctx, req.params.id));
   }));
@@ -278,6 +332,8 @@ export function createApp(options: CreateAppOptions) {
 
   app.get("/api/staff", wrap((req, res) => res.json(staff.listStaff(req.ctx))));
   app.post("/api/staff", wrap((req, res) => res.json(staff.createStaff(req.ctx, req.body))));
+  app.put("/api/staff/:id", wrap((req, res) => res.json(staff.updateStaff(req.ctx, req.params.id, req.body))));
+  app.delete("/api/staff/:id", wrap((req, res) => res.json(staff.deleteStaff(req.ctx, req.params.id))));
 
   app.get("/api/settings", wrap((req, res) => res.json(settings.getAllSettings(req.ctx))));
   app.put("/api/settings", requirePerm("SETTINGS"), wrap((req, res) => {

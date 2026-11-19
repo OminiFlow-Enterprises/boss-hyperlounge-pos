@@ -157,6 +157,9 @@ describe("member cards", () => {
     const check = checkBalance(cashier, "9000000099");
     expect(check.card.card_number).toBe("HL-2099");
     expect(check.balances.usable).toBe(rupeesToPaise(100));
+    expect(checkBalance(cashier, "HL-2099", true).card.card_number).toBe("HL-2099");
+    expect(() => checkBalance(cashier, "HL-209", true)).toThrow(/Card not found/);
+    expect(() => checkBalance(cashier, "9000000099", true)).toThrow(/Card not found/);
   });
 
   it("credits advance booking onto the card so billing can show the balance", () => {

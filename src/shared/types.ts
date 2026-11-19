@@ -50,6 +50,12 @@ export interface Actor {
   role: StaffRole;
   terminalId: string;
   terminalName: string;
+  username?: string;
+  /** Null until this user is saved from User Master. */
+  rights?: Record<string, boolean> | null;
+  allowComplementary?: boolean | null;
+  tableTransfer?: boolean | null;
+  itemTransfer?: boolean | null;
 }
 
 export interface CardBalances {

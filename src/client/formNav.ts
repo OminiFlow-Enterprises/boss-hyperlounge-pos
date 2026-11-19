@@ -1,6 +1,6 @@
 type ArrowDir = "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown";
 
-const FORM_ROOT = ".dialog, .xfer-dlg, .item-xfer-dlg, .im-dlg, .su-dlg, .kot-add-dlg, .adv-form, .set-filter, .rpt-bar, .login-dlg";
+const FORM_ROOT = ".dialog, .xfer-dlg, .item-xfer-dlg, .im-dlg, .su-dlg, .kot-add-dlg, .adv-form, .set-filter, .rpt-bar, .login-dlg, .login-box, .um-screen";
 
 function textLike(el: HTMLInputElement) {
   return !["checkbox", "radio", "button", "submit", "reset", "file", "hidden", "image"].includes(el.type);
@@ -59,11 +59,11 @@ function nearestField(from: HTMLElement, dir: ArrowDir, fields: HTMLElement[]) {
 
 function focusFormField(el: HTMLElement) {
   el.focus();
-  if (el instanceof HTMLInputElement && textLike(el)) {
+  if (el instanceof HTMLInputElement && textLike(el) && el.dataset.edit !== "text") {
     el.dataset.replace = "1";
     el.select();
   }
-  if (el.closest(".bill-grid-wrap, .item-xfer-grid, .im-depts")) {
+  if (el.closest(".bill-grid-wrap, .item-xfer-grid")) {
     el.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 }
@@ -74,8 +74,15 @@ export function moveFormFocus(e: KeyboardEvent) {
   const active = document.activeElement as HTMLElement | null;
   if (!active?.matches("input, select, textarea, button")) return false;
   if (active.dataset.list === "open") return false;
-  // Outlet / cycle fields own Up/Down (and Left/Right) themselves
+  // "1" owns every arrow. "ud" owns Up/Down only (dropdowns). Text edits keep Left/Right for the caret.
   if (active.dataset.cycle === "1" || active.classList.contains("xfer-outlet-box")) return false;
+  if (active.dataset.cycle === "ud" && (e.key === "ArrowUp" || e.key === "ArrowDown")) return false;
+  if (
+    (e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+    active instanceof HTMLInputElement &&
+    textLike(active) &&
+    active.dataset.edit === "text"
+  ) return false;
   if (active.closest(".cap-btns, .caption-btns")) return false;
   const root = active.closest(FORM_ROOT);
   if (!root) return false;
@@ -87,9 +94,32 @@ export function moveFormFocus(e: KeyboardEvent) {
   return true;
 }
 
+export function cardNoDigits(raw: string) {
+  return String(raw ?? "").replace(/\D/g, "").slice(0, 4);
+}
+
+export function cardNoReady(raw: string) {
+  return /^\d{4}$/.test(String(raw ?? "").trim());
+}
+
+export function stayOnCard(el: HTMLInputElement | null | undefined) {
+  if (!el) return;
+  const end = cardNoDigits(el.value).length;
+  requestAnimationFrame(() => {
+    el.focus();
+    delete el.dataset.replace;
+    try { el.setSelectionRange(end, end); } catch { /* read-only */ }
+  });
+}
+
 export function armReplaceOnFocus(e: FocusEvent) {
   const el = e.target;
   if (!(el instanceof HTMLInputElement) || !textLike(el)) return;
+  if (el.dataset.edit === "text") return;
+  if (el.dataset.num === "card") {
+    const n = el.value.replace(/\D/g, "").length;
+    if (n > 0 && n < 4) return;
+  }
   el.dataset.replace = "1";
   const apply = () => {
     if (document.activeElement === el && el.dataset.replace === "1") el.select();
@@ -110,10 +140,18 @@ export function replaceOnFirstKey(e: KeyboardEvent) {
 }
 
 function numericMode(el: HTMLInputElement) {
-  return el.dataset.num === "int" || el.dataset.num === "dec" ? el.dataset.num : "";
+  if (el.dataset.num === "card" || el.dataset.num === "int" || el.dataset.num === "dec") return el.dataset.num;
+  return "";
 }
 
-function numericTextOk(text: string, mode: "int" | "dec", el: HTMLInputElement) {
+function numericTextOk(text: string, mode: "int" | "dec" | "card", el: HTMLInputElement) {
+  if (mode === "card") {
+    if (!/^\d+$/.test(text)) return false;
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    const next = el.value.slice(0, start) + text + el.value.slice(end);
+    return /^\d{0,4}$/.test(next);
+  }
   if (mode === "int") return /^\d*$/.test(text);
   if (!/^[\d.]*$/.test(text)) return false;
   const start = el.selectionStart ?? el.value.length;
@@ -139,6 +177,7 @@ export function blockLetterInsert(e: InputEvent) {
   if (!(el instanceof HTMLInputElement) || el.readOnly) return;
   const mode = numericMode(el);
   if (!mode || e.data == null) return;
+  if (mode === "card") return;
   if (!e.inputType.startsWith("insert")) return;
   if (numericTextOk(e.data, mode, el)) return;
   e.preventDefault();

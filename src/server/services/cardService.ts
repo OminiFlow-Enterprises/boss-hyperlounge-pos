@@ -677,11 +677,12 @@ export function unblockCard(ctx: AppContext, cardId: string, reason: string) {
   return getCard(ctx, cardId);
 }
 
-export function checkBalance(ctx: AppContext, query: string) {
+export function checkBalance(ctx: AppContext, query: string, exact = false) {
   const q = query.trim();
   if (!q) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
   let card: CardRow | null = findCardByScan(ctx, q);
-  if (!card) {
+  // Order punch must match the typed card number. Balance check may still use a partial match.
+  if (!card && !exact) {
     card = searchCards(ctx, q)[0] ?? null;
   }
   if (!card) {

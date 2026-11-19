@@ -3,7 +3,8 @@ import { createPortal } from "react-dom";
 import { api, ApiError } from "./api";
 import { parseRupeesInput } from "../shared/money";
 import type { NavView } from "../shared/types";
-import { AlertBox, CapBtns, ConfirmAsk, PrepareBillDialog } from "./BillDialogs";
+import { AlertBox, CapBtns, ConfirmAsk, PrepareBillDialog, SettleDialog } from "./BillDialogs";
+import { cardNoDigits, cardNoReady, stayOnCard } from "./formNav";
 
 const OUTLETS = ["BAR", "CAFE", "NC", "RESTAURANT", "THE BOSS CLUB"];
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
@@ -1328,7 +1329,7 @@ function SettlementUpdateDialog({
     setMode(label);
     setAmount(rupees(next.amount));
     setBankName(bank);
-    setPayCard(String(next.card_number || ""));
+    setPayCard(cardNoDigits(String(next.card_number || "")));
     setPayBal("");
     setRemark(next.remark || "");
   }
@@ -1345,13 +1346,15 @@ function SettlementUpdateDialog({
   }, [paymentId]);
 
   async function cardCovers(paise: number) {
-    const q = payCard.trim();
-    if (!q) { showWarn("Enter Card No", "card"); return false; }
+    const q = cardNoDigits(payCard);
+    if (!cardNoReady(q)) { stayOnCard(payCardRef.current); return false; }
     try {
       const found = await api.get<Array<{ id: string }>>(`/api/cards?q=${encodeURIComponent(q)}`);
       if (!found[0]?.id) { showWarn("Card not found", "card"); return false; }
-      const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(q)}`);
-      const usable = Number(b.balances?.usable ?? 0);
+      const params = new URLSearchParams({ q });
+      if (row?.outlet_name === "THE BOSS CLUB" && row?.order_id) params.set("exceptOrderId", String(row.order_id));
+      const b = await api.get<any>(`/api/cards/balance/check?${params}`);
+      const usable = Number(b.balances?.available ?? b.balances?.usable ?? 0);
       setPayBal(rupees(usable));
       const originalPrepaid = row?.method === "MEMBER_CARD";
       const need = originalPrepaid ? Math.max(0, paise - Number(row?.amount || 0)) : paise;
@@ -1515,7 +1518,7 @@ function SettlementUpdateDialog({
                 <td className="lbl">Card No. :</td>
                 <td>
                   <span className="st-card">
-                    <input ref={payCardRef} className="win green" tabIndex={3} value={payCard} onChange={(e) => setPayCard(e.target.value)} />
+                    <input ref={payCardRef} className="win green" data-num="card" inputMode="numeric" maxLength={4} tabIndex={3} value={payCard} onChange={(e) => setPayCard(cardNoDigits(e.target.value))} onBlur={() => { if (payCard && !cardNoReady(payCard)) stayOnCard(payCardRef.current); }} />
                     {payBal ? <span className="st-bal">{payBal}</span> : null}
                   </span>
                 </td>
@@ -1798,6 +1801,7 @@ export function CardBlock({ onExit }: { onExit: () => void }) {
   const [q, setQ] = useState("");
   const [msg, setMsg] = useState("");
   const [askExit, setAskExit] = useState(false);
+  const cardRef = useRef<HTMLInputElement>(null);
   function requestExit() {
     if (q.trim()) setAskExit(true);
     else onExit();
@@ -1814,8 +1818,10 @@ export function CardBlock({ onExit }: { onExit: () => void }) {
     return () => window.removeEventListener("keydown", keys, true);
   });
   async function block() {
+    const number = cardNoDigits(q);
+    if (!cardNoReady(number)) { stayOnCard(cardRef.current); return; }
     try {
-      const found = await api.get<any[]>(`/api/cards?q=${encodeURIComponent(q)}`);
+      const found = await api.get<any[]>(`/api/cards?q=${encodeURIComponent(number)}`);
       if (!found[0]) { setMsg("Card not found"); return; }
       await api.post(`/api/cards/${found[0].id}/block`, { reason: "Blocked from Card Block" });
       setMsg(`Blocked ${found[0].card_number}`);
@@ -1826,7 +1832,7 @@ export function CardBlock({ onExit }: { onExit: () => void }) {
   return (
     <div className="card-block">
       <div className="cb-head">Enter Card No.</div>
-      <input className="win cb-input" value={q} onChange={(e) => setQ(e.target.value)} />
+      <input ref={cardRef} className="win cb-input" data-num="card" inputMode="numeric" maxLength={4} value={q} onChange={(e) => setQ(cardNoDigits(e.target.value))} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void block(); } }} onBlur={() => { if (q && !cardNoReady(q)) stayOnCard(cardRef.current); }} />
       <div className="cb-btns">
         <button className="fn" onClick={block}>Block Card</button>
         <button className="fn" onClick={requestExit}>Exit</button>
@@ -1883,7 +1889,10 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
     return true;
   }
   function checkCard() {
-    if (!/^\d{4}$/.test(form.cardNo)) return fail("Card No must be 4 digits", cardRef.current);
+    if (!cardNoReady(form.cardNo)) {
+      stayOnCard(cardRef.current);
+      return false;
+    }
     return true;
   }
   function checkAdvance() {
@@ -2032,7 +2041,7 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
           <span>Date : {dmy()} {new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
         </div>
         <label>Guest Name <input ref={guestRef} className="win green" tabIndex={1} autoFocus value={form.guestName} onChange={(e) => setForm({ ...form, guestName: e.target.value })} onKeyDown={onEnter(checkGuest, () => cardRef.current?.focus())} /></label>
-        <label>Card No <input ref={cardRef} className="win green" tabIndex={2} inputMode="numeric" maxLength={4} value={form.cardNo} onChange={(e) => setForm({ ...form, cardNo: e.target.value.replace(/\D/g, "").slice(0, 4) })} onKeyDown={onEnter(checkCard, () => advanceRef.current?.focus())} /></label>
+        <label>Card No <input ref={cardRef} className="win green" data-num="card" tabIndex={2} inputMode="numeric" maxLength={4} value={form.cardNo} onChange={(e) => setForm({ ...form, cardNo: cardNoDigits(e.target.value) })} onBlur={() => { if (form.cardNo && !cardNoReady(form.cardNo)) stayOnCard(cardRef.current); }} onKeyDown={onEnter(checkCard, () => advanceRef.current?.focus())} /></label>
         <label>Advance <input ref={advanceRef} className="win" data-num="dec" tabIndex={3} inputMode="decimal" value={form.advance} onChange={(e) => setAdvance(e.target.value)} onFocus={(e) => e.target.select()} onBlur={() => setForm((f) => ({ ...f, advance: formatAdvance(f.advance) }))} onKeyDown={onEnter(() => { const okAmt = checkAdvance(); if (okAmt) setForm((f) => ({ ...f, advance: formatAdvance(f.advance) })); return okAmt; }, () => mopRef.current?.focus())} /></label>
         <label>MOP <span className="st-drop"><input ref={mopRef} className="win" readOnly tabIndex={4} data-cycle="1" value={form.mop} /><span className="st-drop-btn" aria-hidden="true" /></span></label>
         {form.mop === "BANK TRANSFER" && (
@@ -2083,13 +2092,18 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
   const [sel, setSel] = useState<string | null>(null);
   const [billEdit, setBillEdit] = useState<{
     orderId: string;
-    table: { id: string; code: string; name: string; status: string; floor_name: string; floor_id: string; current_session_id: string | null; outlet?: string };
+    table: { id: string; code: string; name: string; status: string; floor_name: string; floor_id: string; current_session_id: string | null; card_number?: string; outlet?: string };
     outlet: string;
     guest: string;
     mobile: string;
   } | null>(null);
   const [catalog, setCatalog] = useState<Array<{ id: string; name: string; sku: string; base_price?: number }>>([]);
   const [miss, setMiss] = useState("");
+  const [settle, setSettle] = useState<{
+    invoiceId: string;
+    table: { id: string; code: string; status: string; card_number?: string; outlet?: string };
+    outlet: string;
+  } | null>(null);
   const selRef = useRef<string | null>(null);
   selRef.current = sel;
 
@@ -2135,17 +2149,18 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
       setMiss("Could not open this bill");
       return;
     }
-    const code = String(row.table_code || row.table_no || "");
+    const code = String(row.table_code || "");
     setBillEdit({
       orderId,
       table: {
         id: tableId,
-        code,
-        name: String(row.table_no || code),
+        code: code || String(row.table_no || ""),
+        name: String(row.table_label || row.table_no || code),
         status: "PAYMENT_PENDING",
         floor_name: "",
         floor_id: "",
         current_session_id: null,
+        card_number: String(row.order_card || ""),
         outlet: String(row.outlet_name || outletName || "BAR"),
       },
       outlet: String(row.outlet_name || outletName || "BAR"),
@@ -2156,7 +2171,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
 
   useEffect(() => {
     function keys(e: KeyboardEvent) {
-      if (billEdit || document.querySelector(".bill-dlg, .su-dlg, .alert-dlg, .confirm-dlg")) return;
+      if (billEdit || settle || document.querySelector(".bill-dlg, .settle-dlg, .su-dlg, .alert-dlg, .confirm-dlg")) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
@@ -2240,7 +2255,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
             {rows.map((r: any) => {
               const key = String(r.invoice_id || r.invoice_number);
               const on = key === sel;
-              const tableLabel = `T : ${r.table_code || r.table_no || ""}`;
+              const tableLabel = `T : ${r.table_label || r.table_code || r.table_no || ""}`;
               return (
                 <tr
                   key={key}
@@ -2289,6 +2304,31 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
             setBillEdit(null);
             void load();
           }}
+          onSettle={(inv) => {
+            if (!billEdit) return;
+            const outletName = billEdit.outlet;
+            const invoiceId = String(inv.id);
+            setBillEdit(null);
+            if (outletName === "THE BOSS CLUB") {
+              void api.post(`/api/invoices/${invoiceId}/settle-club`, {}).then(() => load()).catch((e) => {
+                setMiss(e instanceof Error ? e.message : "Could not settle");
+              });
+              return;
+            }
+            setSettle({ invoiceId, table: billEdit.table, outlet: outletName });
+            void load();
+          }}
+          onMessage={setMiss}
+        />
+      )}
+      {settle && (
+        <SettleDialog
+          invoiceId={settle.invoiceId}
+          table={settle.table}
+          outlet={settle.outlet}
+          cardNo=""
+          onClose={() => { setSettle(null); void load(); }}
+          onDone={() => { setSettle(null); void load(); }}
           onMessage={setMiss}
         />
       )}
@@ -2662,7 +2702,7 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
                 >
                   <td>{r.kot_number}</td>
                   <td>{r.manual_kot || ""}</td>
-                  <td>{r.table_code || r.table_no || ""}</td>
+                  <td>{r.table_label || r.table_code || r.table_no || ""}</td>
                   <td>{r.kot_date}</td>
                   <td>{r.kot_time}</td>
                   <td>{r.bill_no || "0"}</td>
@@ -2775,16 +2815,29 @@ function CardBillDialog({
         if (!list.length) return;
         e.preventDefault();
         e.stopPropagation();
-        setSel((i) => e.key === "ArrowDown" ? Math.min(list.length - 1, i + 1) : Math.max(0, i - 1));
+        const next = e.key === "ArrowDown"
+          ? Math.min(list.length - 1, selRef.current + 1)
+          : Math.max(0, selRef.current - 1);
+        selRef.current = next;
+        setSel(next);
+        const btn = document.querySelectorAll<HTMLButtonElement>(".cs-dlg [data-invoice-id]")[next];
+        btn?.focus();
         return;
       }
       if (e.key === "Enter") {
-        if ((e.target as HTMLElement).closest("[data-cs-exit]")) return;
-        const row = list[selRef.current];
-        if (!row) return;
+        const el = e.target instanceof Element ? e.target : null;
+        if (el?.closest("[data-cs-exit]")) return;
+        const fromBtn = el?.closest("[data-invoice-id]")?.getAttribute("data-invoice-id") || "";
+        const invoiceId = fromBtn || list[selRef.current]?.invoice_id;
+        if (!invoiceId) return;
         e.preventDefault();
         e.stopPropagation();
-        void printInvoice(row.invoice_id);
+        const idx = list.findIndex((r) => r.invoice_id === invoiceId);
+        if (idx >= 0) {
+          selRef.current = idx;
+          setSel(idx);
+        }
+        void printInvoice(invoiceId);
       }
     }
     window.addEventListener("keydown", keys, true);
@@ -2827,8 +2880,14 @@ function CardBillDialog({
                     <button
                       type="button"
                       className="fn"
+                      data-invoice-id={r.invoice_id}
                       disabled={busy === r.invoice_id}
-                      onClick={() => void printInvoice(r.invoice_id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        selRef.current = i;
+                        setSel(i);
+                        void printInvoice(r.invoice_id);
+                      }}
                     >
                       Print
                     </button>
@@ -2856,6 +2915,7 @@ export function CardSettlementReport({ onExit }: { onExit: () => void }) {
   const [openId, setOpenId] = useState<string | null>(null);
   const [warn, setWarn] = useState("");
   const fromRef = useRef<HTMLInputElement>(null);
+  const cardRef = useRef<HTMLInputElement>(null);
   const selRef = useRef<string | null>(null);
   const rowsRef = useRef<CardSettleRow[]>([]);
   const loadGen = useRef(0);
@@ -2887,6 +2947,10 @@ export function CardSettlementReport({ onExit }: { onExit: () => void }) {
         if (e.key === "Enter") {
           e.preventDefault();
           e.stopPropagation();
+          if (target === cardRef.current && card && !cardNoReady(card)) {
+            stayOnCard(cardRef.current);
+            return;
+          }
           void load();
         }
         return;
@@ -2922,11 +2986,11 @@ export function CardSettlementReport({ onExit }: { onExit: () => void }) {
           <div className="set-row">
             <label>Date From : <input ref={fromRef} className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
             <label>To Date : <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
-            <label>Card No : <input className="win" value={card} onChange={(e) => setCard(e.target.value)} /></label>
+            <label>Card No : <input ref={cardRef} className="win" data-num="card" inputMode="numeric" maxLength={4} value={card} onChange={(e) => setCard(cardNoDigits(e.target.value))} onBlur={() => { if (card && !cardNoReady(card)) stayOnCard(cardRef.current); }} /></label>
           </div>
         </div>
         <div className="set-btns">
-          <button className="fn" onClick={() => void load()}>Show</button>
+          <button className="fn" onClick={() => { if (card && !cardNoReady(card)) { stayOnCard(cardRef.current); return; } void load(); }}>Show</button>
           <button className="fn" onClick={onExit}>Exit</button>
         </div>
       </div>

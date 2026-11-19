@@ -2,12 +2,19 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEve
 import { createPortal } from "react-dom";
 import { api, ApiError } from "./api";
 import { parseRupeesInput } from "../shared/money";
+import { formatTableNo } from "../shared/tableLabel";
 import { itemMatchScore } from "../shared/itemSearch";
 import type { PaymentMode } from "../shared/types";
+import { cardNoDigits, cardNoReady, stayOnCard } from "./formNav";
+import { ComplimentaryMasterDialog, type CompAccount } from "./ComplimentaryMaster";
 
-type Table = { id: string; code: string; status: string; customer_name?: string; running_total?: number; outlet?: string };
+type Table = { id: string; code: string; status: string; customer_name?: string; card_number?: string; running_total?: number; outlet?: string };
+
+function shownTableNo(table: { code: string; card_number?: string | null; outlet?: string | null }, outlet?: string) {
+  return formatTableNo(table.code, table.card_number, table.outlet || outlet);
+}
 type BillProduct = { id: string; name: string; sku: string; base_price?: number };
-type TodayCard = { id: string; card_number: string; customer_name: string; usable: number; recharged: number };
+type TodayCard = { id: string; card_number: string; customer_name: string; usable: number; available?: number; recharged: number };
 
 const PAY_MODES: Array<{ id: PaymentMode; label: string }> = [
   { id: "CASH", label: "CASH" },
@@ -131,7 +138,7 @@ export function PrepareTablePick({
           onMouseEnter={() => setPick(i)}
           onClick={() => onPick(t)}
         >
-          {t.code}
+          {shownTableNo(t)}
         </div>
       ))}
     </div>
@@ -148,6 +155,7 @@ export function PrepareBillDialog({
   catalog,
   onClose,
   onPrinted,
+  onSettle,
   onChanged,
   onReopen,
   onMessage,
@@ -161,6 +169,8 @@ export function PrepareBillDialog({
   catalog: BillProduct[];
   onClose: () => void;
   onPrinted: (invoice: any) => void;
+  /** Save (F5) + Yes opens settlement. Does not ask to print. */
+  onSettle: (invoice: any) => void;
   onChanged?: () => void;
   onReopen?: () => void;
   onMessage: (m: string) => void;
@@ -185,7 +195,13 @@ export function PrepareBillDialog({
   const [gstin, setGstin] = useState("");
   const [address, setAddress] = useState("");
   const [remark, setRemark] = useState("");
-  const [comp, setComp] = useState(false);
+  const nc = outlet === "NC";
+  const [comp, setComp] = useState(nc);
+  const [accounts, setAccounts] = useState<CompAccount[]>([]);
+  const [compId, setCompId] = useState("");
+  const [masterOpen, setMasterOpen] = useState(false);
+  const compRef = useRef<HTMLSelectElement>(null);
+  const remarkRef = useRef<HTMLInputElement>(null);
   const [rowSel, setRowSel] = useState(0);
   const gridRef = useRef<HTMLDivElement>(null);
   const discRef = useRef<HTMLInputElement>(null);
@@ -211,8 +227,8 @@ export function PrepareBillDialog({
   const [addQty, setAddQty] = useState("1");
   const [pending, setPending] = useState<BillProduct | null>(null);
   const [dropBox, setDropBox] = useState<{ top: number; left: number; width: number; up: boolean } | null>(null);
-  const [ask, setAsk] = useState<null | "save" | "print">(null);
-  const savedInvoice = useRef<any>(null);
+  const [ask, setAsk] = useState<null | "save">(null);
+  const [saving, setSaving] = useState(false);
 
   function discountBody(next?: { discountPct?: number; discountAmt?: number; mode?: "pct" | "amt"; excludeItemIds?: string[] }) {
     const mode = next?.mode ?? discMode.current;
@@ -281,13 +297,21 @@ export function PrepareBillDialog({
       if (cancel) return;
       try {
         await load(next);
-        setTimeout(() => { discRef.current?.focus(); discRef.current?.select(); }, 0);
+        setTimeout(() => {
+          if (outlet === "NC") compRef.current?.focus();
+          else { discRef.current?.focus(); discRef.current?.select(); }
+        }, 0);
       } catch (e) {
         onMessage(e instanceof Error ? e.message : "Could not open bill");
       }
     })();
     return () => { cancel = true; };
   }, [orderId]);
+
+  useEffect(() => {
+    if (!nc) return;
+    api.get<CompAccount[]>("/api/complimentary").then(setAccounts).catch(() => setAccounts([]));
+  }, [nc]);
 
   function scrollBillRow(index: number) {
     const grid = gridRef.current;
@@ -332,17 +356,18 @@ export function PrepareBillDialog({
   const shown = useMemo(() => {
     const source = (bill?.items ?? []) as any[];
     const items = source.map((it, i) => {
+      if (nc && i !== rowSel) return { ...it, amount: 0, tax: 0 };
       if (i !== rowSel) return it;
       const raw = editQty.trim();
       const qty = raw === "" ? 0 : Number(raw);
       const priceRaw = editPrice.trim();
       const unit = priceRaw === "" ? 0 : Math.round(Number(priceRaw) * 100);
       if (!Number.isFinite(qty) || !Number.isFinite(unit)) return it;
-      const amount = Math.round(qty * unit);
-      const tax = Math.round(amount * (Number(it.tax_rate) / 100));
+      const amount = nc ? 0 : Math.round(qty * unit);
+      const tax = nc ? 0 : Math.round(amount * (Number(it.tax_rate) / 100));
       return { ...it, qty, amount, tax };
     });
-    const extra = pending ? Math.round((Number(addQty) || 0) * Number(pending.base_price || 0)) : 0;
+    const extra = nc || !pending ? 0 : Math.round((Number(addQty) || 0) * Number(pending.base_price || 0));
     const foodTotal = items.filter((it) => it.station === "KITCHEN").reduce((s, it) => s + Number(it.amount), 0);
     const drinksTotal = items.filter((it) => it.station !== "KITCHEN").reduce((s, it) => s + Number(it.amount), 0) + extra;
     const subtotal = foodTotal + drinksTotal;
@@ -375,7 +400,7 @@ export function PrepareBillDialog({
       grand,
       extra,
     };
-  }, [bill, rowSel, editQty, editPrice, addQty, pending, noDisc, svcPct, discPct, discAmt, delivery]);
+  }, [bill, rowSel, editQty, editPrice, addQty, pending, noDisc, svcPct, discPct, discAmt, delivery, nc]);
 
   useEffect(() => {
     const it = bill?.items?.[rowSel];
@@ -553,7 +578,10 @@ export function PrepareBillDialog({
       setAddQty("1");
       await load();
       onChanged?.();
-      requestAnimationFrame(() => addNameRef.current?.focus());
+      requestAnimationFrame(() => {
+        if (outlet === "NC") remarkRef.current?.focus();
+        else addNameRef.current?.focus();
+      });
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Could not add item");
     } finally {
@@ -569,7 +597,7 @@ export function PrepareBillDialog({
 
   useEffect(() => {
     function keys(e: KeyboardEvent) {
-      if (ask || document.querySelector(".confirm-dlg, .alert-dlg")) return;
+      if (ask || saving || masterOpen || document.querySelector(".cm-dlg, .confirm-dlg, .alert-dlg")) return;
       if (e.key === "Escape") {
         if (addOpen || nameOpen) {
           e.preventDefault();
@@ -583,7 +611,12 @@ export function PrepareBillDialog({
         onClose();
       }
       if (e.key === "F10") { e.preventDefault(); e.stopPropagation(); void printBill(true); }
-      if (e.key === "F5") { e.preventDefault(); e.stopPropagation(); setAsk("save"); }
+      if (e.key === "F5") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (nc) void saveNc();
+        else setAsk("save");
+      }
       if (e.key === "F4") {
         const typing = document.activeElement === addNameRef.current || document.activeElement === addQtyRef.current || document.activeElement === editNameRef.current || (document.activeElement as HTMLElement | null)?.classList.contains("price");
         if (!typing) {
@@ -613,14 +646,19 @@ export function PrepareBillDialog({
     if (busy.current) return null;
     busy.current = true;
     try {
+      if (nc && !compId) {
+        onMessage("Select Complimentary A/C");
+        compRef.current?.focus();
+        return null;
+      }
       const invoice = await api.post<any>("/api/invoices/generate", {
         orderId,
         ...discountBody(),
-        serviceChargePct: svcPctValue(svcPct),
-        otherCharges: Math.round((Number(delivery) || 0) * 100),
+        serviceChargePct: nc ? 0 : svcPctValue(svcPct),
+        otherCharges: nc ? 0 : Math.round((Number(delivery) || 0) * 100),
         reason: remark || undefined,
+        complimentaryAccountId: nc ? compId : undefined,
       });
-      savedInvoice.current = invoice;
       return invoice;
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Could not save bill");
@@ -656,19 +694,25 @@ export function PrepareBillDialog({
     onPrinted(invoice);
   }
 
-  function finishAfterSave(doPrint: boolean) {
-    const invoice = savedInvoice.current;
-    const shouldPrint = doPrint === true;
-    // Defer unmount so the Yes/No click cannot fall through onto Print Bill (F10)
+  async function saveNc() {
+    if (busy.current || saving) return;
+    if (!compId) {
+      onMessage("Select Complimentary A/C");
+      compRef.current?.focus();
+      return;
+    }
+    setSaving(true);
+    const inv = await saveBill();
+    setSaving(false);
+    if (inv?.id) onPrinted(inv);
+  }
+
+  function settleAfterSave(invoice: any) {
+    // Let the Yes key finish so it cannot land on Settlement
     window.setTimeout(() => {
-      setAsk(null);
       (document.activeElement as HTMLElement | null)?.blur?.();
-      if (!invoice) return;
-      void (async () => {
-        if (shouldPrint) await printInvoice(invoice);
-        onPrinted(invoice);
-      })();
-    }, 100);
+      onSettle(invoice);
+    }, 200);
   }
 
   const now = new Date();
@@ -691,26 +735,61 @@ export function PrepareBillDialog({
             <tr>
               <td className="lbl">Table No. :</td>
               <td>
-                <select className="win" value={table.code} onChange={() => undefined}>
-                  <option>{table.code}</option>
+                <select className="win" value={shownTableNo(table, outlet)} onChange={() => undefined}>
+                  <option>{shownTableNo(table, outlet)}</option>
                 </select>
               </td>
-              <td className="lbl">Name :</td>
-              <td>
-                <div className="name-cell">
-                  <label className="chk"><input type="checkbox" /> A/C</label>
-                  <input className="win" value={name} onChange={(e) => setName(e.target.value)} />
-                  <button type="button" className="fn bh-plus">+</button>
-                </div>
-              </td>
-              <td className="lbl">Pax :</td>
-              <td><input className="win" data-num="int" value={pax} onChange={(e) => setPax(e.target.value.replace(/\D/g, ""))} /></td>
+              {nc ? (
+                <>
+                  <td className="lbl">Compl. A/C :</td>
+                  <td colSpan={3}>
+                    <div className="name-cell">
+                      <select
+                        ref={compRef}
+                        className="win green"
+                        value={compId}
+                        onChange={(e) => setCompId(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key !== "Enter") return;
+                          e.preventDefault();
+                          remarkRef.current?.focus();
+                        }}
+                      >
+                        <option value="" />
+                        {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                      </select>
+                      <button type="button" className="fn bh-plus" title="Add complimentary account" onClick={() => setMasterOpen(true)}>+</button>
+                    </div>
+                  </td>
+                </>
+              ) : (
+                <>
+                  <td className="lbl">Name :</td>
+                  <td>
+                    <div className="name-cell">
+                      <label className="chk"><input type="checkbox" /> A/C</label>
+                      <input className="win" value={name} onChange={(e) => setName(e.target.value)} />
+                      <button type="button" className="fn bh-plus">+</button>
+                    </div>
+                  </td>
+                  <td className="lbl">Pax :</td>
+                  <td><input className="win" data-num="int" value={pax} onChange={(e) => setPax(e.target.value.replace(/\D/g, ""))} /></td>
+                </>
+              )}
             </tr>
             <tr>
               <td className="lbl">Bill No. :</td>
               <td><input className="win" value={bill?.invoiceNumber ?? ""} readOnly /></td>
               <td className="lbl">Mobile No. :</td>
-              <td colSpan={3}><input className="win" data-num="int" value={mob} onChange={(e) => setMob(e.target.value.replace(/\D/g, ""))} /></td>
+              {nc ? (
+                <>
+                  <td><input className="win" data-num="int" value={mob} onChange={(e) => setMob(e.target.value.replace(/\D/g, ""))} /></td>
+                  <td className="lbl">Pax :</td>
+                  <td><input className="win" data-num="int" value={pax} onChange={(e) => setPax(e.target.value.replace(/\D/g, ""))} /></td>
+                </>
+              ) : (
+                <td colSpan={3}><input className="win" data-num="int" value={mob} onChange={(e) => setMob(e.target.value.replace(/\D/g, ""))} /></td>
+              )}
             </tr>
             <tr>
               <td className="lbl">Date :</td>
@@ -725,7 +804,7 @@ export function PrepareBillDialog({
             </tr>
             <tr>
               <td colSpan={2}>
-                <label className="chk"><input type="checkbox" checked={comp} onChange={(e) => setComp(e.target.checked)} /> I want make this complimentary</label>
+                <label className="chk"><input type="checkbox" checked={nc || comp} onChange={(e) => { if (!nc) setComp(e.target.checked); }} /> I want make this complimentary</label>
               </td>
               <td className="lbl">Address :</td>
               <td colSpan={3}><input className="win" value={address} onChange={(e) => setAddress(e.target.value)} /></td>
@@ -828,6 +907,10 @@ export function PrepareBillDialog({
                           const raw = (e.target as HTMLInputElement).value;
                           const row = e.currentTarget.closest("tr");
                           void commitQty(it, raw).then(() => {
+                            if (outlet === "NC") {
+                              remarkRef.current?.focus();
+                              return;
+                            }
                             const price = row?.querySelector<HTMLInputElement>("input.price");
                             price?.focus();
                             price?.select();
@@ -855,7 +938,10 @@ export function PrepareBillDialog({
                           skipPriceBlur.current = true;
                           const raw = (e.target as HTMLInputElement).value;
                           const next = i + 1;
-                          void commitPrice(it, raw).then(() => focusLine(next));
+                          void commitPrice(it, raw).then(() => {
+                            if (outlet === "NC") remarkRef.current?.focus();
+                            else focusLine(next);
+                          });
                         }}
                       />
                     ) : rupee(shown.items[i]?.unit_price ?? it.unit_price)}
@@ -989,7 +1075,11 @@ export function PrepareBillDialog({
                     <tr><td className="lbl">Point Redeem :</td><td><input className="win" data-num="dec" defaultValue="0.00" /></td></tr>
                     <tr><td className="lbl">Verify By :</td><td><input className="win" /></td></tr>
                     <tr><td className="lbl">Offer By :</td><td><input className="win" /></td></tr>
-                    <tr><td className="lbl">Remark :</td><td><input className="win" value={remark} onChange={(e) => setRemark(e.target.value)} /></td></tr>
+                    <tr><td className="lbl">Remark :</td><td><input ref={remarkRef} className="win" value={remark} onChange={(e) => setRemark(e.target.value)} onKeyDown={(e) => {
+                      if (e.key !== "Enter") return;
+                      e.preventDefault();
+                      printRef.current?.focus();
+                    }} /></td></tr>
                   </tbody>
                 </table>
               </td>
@@ -1005,7 +1095,8 @@ export function PrepareBillDialog({
                             ref={discRef}
                             className="win pct green"
                             data-num="dec"
-                            value={discMode.current === "amt" ? (shown.discountable ? ((shown.discount / shown.discountable) * 100).toFixed(2) : "0.00") : discPct}
+                            value={nc ? "0.00" : (discMode.current === "amt" ? (shown.discountable ? ((shown.discount / shown.discountable) * 100).toFixed(2) : "0.00") : discPct)}
+                            readOnly={nc}
                             onChange={(e) => { const v = numText(e.target.value); discMode.current = "pct"; wantPct.current = Number(v) || 0; setDiscPct(v); }}
                             onBlur={(e) => { discMode.current = "pct"; wantPct.current = Number(e.target.value) || 0; void load({ mode: "pct", discountPct: wantPct.current }); }}
                             onKeyDown={(e) => {
@@ -1021,7 +1112,8 @@ export function PrepareBillDialog({
                           <input
                             className="win amt"
                             data-num="dec"
-                            value={discMode.current === "amt" ? discAmt : rupee(shown.discount)}
+                            value={nc ? "0.00" : (discMode.current === "amt" ? discAmt : rupee(shown.discount))}
+                            readOnly={nc}
                             onChange={(e) => { const v = numText(e.target.value); discMode.current = "amt"; wantAmt.current = Number(v) || 0; setDiscAmt(v); }}
                             onBlur={(e) => { discMode.current = "amt"; wantAmt.current = Number(e.target.value) || 0; void load({ mode: "amt", discountAmt: wantAmt.current }); }}
                             onKeyDown={(e) => {
@@ -1043,7 +1135,8 @@ export function PrepareBillDialog({
                           <input
                             className="win pct"
                             data-num="dec"
-                            value={svcPct}
+                            value={nc ? "0" : svcPct}
+                            readOnly={nc}
                             onChange={(e) => setSvcPct(numText(e.target.value))}
                             onBlur={(e) => {
                               const serviceChargePct = svcPctValue(e.target.value);
@@ -1064,9 +1157,9 @@ export function PrepareBillDialog({
                       </td>
                     </tr>
                     <tr><td className="lbl">Tax Amount :</td><td><input className="win" readOnly value={rupee(shown.tax)} /></td></tr>
-                    <tr><td className="lbl">Delivery Charge :</td><td><input className="win" data-num="dec" value={delivery} onChange={(e) => setDelivery(numText(e.target.value))} onBlur={() => void load()} /></td></tr>
+                    <tr><td className="lbl">Delivery Charge :</td><td><input className="win" data-num="dec" readOnly={nc} value={nc ? "0" : delivery} onChange={(e) => { if (!nc) setDelivery(numText(e.target.value)); }} onBlur={() => { if (!nc) void load(); }} /></td></tr>
                     <tr><td className="lbl">Round Off :</td><td><input className="win" readOnly value={rupee(shown.roundOff)} /></td></tr>
-                    <tr><td className="lbl">Net Amount :</td><td><input className="win" readOnly value={Math.round(shown.grand / 100)} /></td></tr>
+                    <tr><td className="lbl">Net Amount :</td><td><input className="win" readOnly value={nc ? 0 : Math.round(shown.grand / 100)} /></td></tr>
                   </tbody>
                 </table>
               </td>
@@ -1074,40 +1167,51 @@ export function PrepareBillDialog({
           </tbody>
         </table>
 
-        <div className="bill-btns" style={ask ? { pointerEvents: "none" } : undefined}>
-          <button ref={printRef} type="button" className="fn" disabled={Boolean(ask)} onClick={() => { if (!ask) void printBill(true); }} onKeyDown={(e) => {
-            if (e.key === "Enter") { e.preventDefault(); if (!ask) void printBill(true); }
+        <div className="bill-btns" style={ask || saving ? { pointerEvents: "none" } : undefined}>
+          <button ref={printRef} type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => { if (!ask && !saving) void printBill(true); }} onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); if (!ask && !saving) void printBill(true); }
           }}>Print Bill (F10)</button>
-          <button type="button" className="fn" disabled={Boolean(ask)} onClick={() => onReopen?.()}>Reopen Bill</button>
-          <button type="button" className="fn" disabled={Boolean(ask)} onClick={() => setAsk("save")}>Save (F5)</button>
+          <button type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => onReopen?.()}>Reopen Bill</button>
+          <button type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => { if (nc) void saveNc(); else setAsk("save"); }}>Save (F5)</button>
           <button type="button" className="fn" onClick={() => void load()}>Print Estimate</button>
           <button type="button" className="fn">Share Bill</button>
           <button type="button" className="fn" onClick={onClose}>Exit</button>
         </div>
       </div>
+      {masterOpen && (
+        <ComplimentaryMasterDialog
+          onClose={() => setMasterOpen(false)}
+          onSaved={(row) => {
+            setAccounts((prev) => {
+              const rest = prev.filter((a) => a.id !== row.id);
+              return [...rest, row].sort((a, b) => a.code - b.code);
+            });
+            setCompId(row.id);
+          }}
+          onDeleted={(id) => {
+            setAccounts((prev) => prev.filter((a) => a.id !== id));
+            setCompId((cur) => (cur === id ? "" : cur));
+          }}
+        />
+      )}
       {ask === "save" && (
         <ConfirmAsk
           message="Do you want to save?"
           onYes={() => {
             window.setTimeout(() => {
               setAsk(null);
+              setSaving(true);
               void (async () => {
                 const inv = await saveBill();
-                // Wait so Enter from Save? cannot also answer Print?
-                if (inv) window.setTimeout(() => setAsk("print"), 350);
+                if (!inv?.id) {
+                  setSaving(false);
+                  return;
+                }
+                settleAfterSave(inv);
               })();
             }, 100);
           }}
           onNo={() => window.setTimeout(() => setAsk(null), 100)}
-        />
-      )}
-      {ask === "print" && (
-        <ConfirmAsk
-          message="Do you want to print?"
-          defaultFocus="no"
-          ignoreEnterMs={400}
-          onYes={() => finishAfterSave(true)}
-          onNo={() => finishAfterSave(false)}
         />
       )}
     </div>
@@ -1135,7 +1239,7 @@ export function SettleDialog({
   const [method, setMethod] = useState<PaymentMode>("CASH");
   const [amount, setAmount] = useState("");
   const [remark, setRemark] = useState("");
-  const [payCard, setPayCard] = useState(cardNo);
+  const [payCard, setPayCard] = useState(cardNoDigits(cardNo));
   const [payBal, setPayBal] = useState("");
   const [todayCards, setTodayCards] = useState<TodayCard[]>([]);
   const [cardListOpen, setCardListOpen] = useState(false);
@@ -1162,9 +1266,13 @@ export function SettleDialog({
   cardListOpenRef.current = cardListOpen;
   cardPickRef.current = cardPick;
 
+  function cardSuggestReady(value = payCardRefValue.current) {
+    return value.trim().length >= 4;
+  }
+
   const cardMatches = useMemo(() => {
     const q = payCard.trim().toLowerCase();
-    if (!q) return todayCards;
+    if (q.length < 4) return [];
     return todayCards.filter((c) => c.card_number.toLowerCase().startsWith(q));
   }, [payCard, todayCards]);
   const cardMatchesRef = useRef(cardMatches);
@@ -1217,7 +1325,7 @@ export function SettleDialog({
     else if (mode === "MEMBER_CARD") window.setTimeout(() => {
       payCardRef.current?.focus();
       payCardRef.current?.select();
-      setCardListOpen(true);
+      setCardListOpen(cardSuggestReady());
     }, 0);
     else window.setTimeout(() => saveBtnRef.current?.focus(), 0);
   }
@@ -1236,19 +1344,22 @@ export function SettleDialog({
 
   useEffect(() => { load().catch((e) => onMessage(e.message)); }, [invoiceId]);
 
+  const holdExcept = outlet === "THE BOSS CLUB" ? String(snap?.invoice?.order_id || "") : "";
+
   useEffect(() => {
     if (method !== "MEMBER_CARD") {
       setCardListOpen(false);
       return;
     }
     let gone = false;
-    api.get<TodayCard[]>("/api/cards/recharged-today").then((rows) => {
+    const q = holdExcept ? `?exceptOrderId=${encodeURIComponent(holdExcept)}` : "";
+    api.get<TodayCard[]>(`/api/cards/recharged-today${q}`).then((rows) => {
       if (gone) return;
       setTodayCards(rows);
-      if (document.activeElement === payCardRef.current) setCardListOpen(true);
+      if (document.activeElement === payCardRef.current && cardSuggestReady()) setCardListOpen(true);
     }).catch(() => { if (!gone) setTodayCards([]); });
     return () => { gone = true; };
-  }, [method]);
+  }, [method, holdExcept]);
 
   useLayoutEffect(() => {
     if (!cardListOpen) return;
@@ -1271,6 +1382,7 @@ export function SettleDialog({
 
   function chosenCardNumber() {
     const typed = payCardRefValue.current.trim();
+    if (!cardSuggestReady(typed)) return typed;
     const list = cardMatchesRef.current;
     const exact = list.find((c) => c.card_number.toLowerCase() === typed.toLowerCase());
     if (exact) return exact.card_number;
@@ -1287,6 +1399,7 @@ export function SettleDialog({
   }
 
   function moveCardPick(dir: 1 | -1) {
+    if (!cardSuggestReady()) return;
     const list = cardMatchesRef.current;
     if (!list.length) return;
     if (!cardListOpenRef.current) {
@@ -1372,9 +1485,10 @@ export function SettleDialog({
       showWarn("Select bank name", "bank");
       return;
     }
-    const cardRaw = (cardOverride ?? (method === "MEMBER_CARD" ? chosenCardNumber() : payCard)).trim();
-    if (method === "MEMBER_CARD" && !cardRaw) {
-      showWarn("Enter Card No", "card");
+    let cardRaw = (cardOverride ?? (method === "MEMBER_CARD" ? chosenCardNumber() : payCard)).trim();
+    if (!cardNoReady(cardRaw)) cardRaw = cardNoDigits(cardRaw);
+    if (method === "MEMBER_CARD" && !cardNoReady(cardRaw)) {
+      stayOnCard(payCardRef.current);
       return;
     }
     busy.current = true;
@@ -1383,9 +1497,11 @@ export function SettleDialog({
       let payPaise = paise;
       if (method === "MEMBER_CARD") {
         try {
-          const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(cardRaw)}`);
+          const params = new URLSearchParams({ q: cardRaw });
+          if (holdExcept) params.set("exceptOrderId", holdExcept);
+          const b = await api.get<any>(`/api/cards/balance/check?${params}`);
           memberCardId = b.card?.id as string | undefined;
-          const usable = Number(b.balances?.usable ?? 0);
+          const usable = Number(b.balances?.available ?? b.balances?.usable ?? 0);
           const number = String(b.card?.card_number || cardRaw);
           setPayCard(number);
           setPayBal(rupee(usable));
@@ -1435,8 +1551,9 @@ export function SettleDialog({
   }
 
   async function acceptCard() {
-    const number = chosenCardNumber();
-    if (!number) { showWarn("Enter Card No", "card"); return; }
+    let number = chosenCardNumber().trim();
+    if (!cardNoReady(number)) number = cardNoDigits(number);
+    if (!cardNoReady(number)) { stayOnCard(payCardRef.current); return; }
     setCardListOpen(false);
     if (number !== payCardRefValue.current) setPayCard(number);
     await save(number);
@@ -1470,7 +1587,7 @@ export function SettleDialog({
               <td className="lbl">Guest Name :</td>
               <td><input className="win" readOnly tabIndex={-1} value={table.customer_name ?? inv?.customer_name ?? ""} /></td>
               <td className="lbl">Table No :</td>
-              <td><input className="win" readOnly tabIndex={-1} value={table.code} /></td>
+              <td><input className="win" readOnly tabIndex={-1} value={shownTableNo(table, outlet)} /></td>
             </tr>
             <tr>
               <td className="lbl">Voucher/Receipt :</td>
@@ -1527,12 +1644,16 @@ export function SettleDialog({
                         className="win green"
                         tabIndex={3}
                         autoComplete="off"
+                        data-num="card"
+                        inputMode="numeric"
+                        maxLength={4}
                         value={payCard}
                         onChange={(e) => {
-                          setPayCard(e.target.value);
+                          const next = cardNoDigits(e.target.value);
+                          setPayCard(next);
                           setCardPick(0);
                           cardPickedRef.current = false;
-                          setCardListOpen(true);
+                          setCardListOpen(cardSuggestReady(next));
                           setPayBal("");
                         }}
                         onFocus={() => {
@@ -1540,10 +1661,15 @@ export function SettleDialog({
                             skipCardOpenRef.current = false;
                             return;
                           }
-                          setCardListOpen(true);
+                          setCardListOpen(cardSuggestReady());
                         }}
                         onBlur={() => window.setTimeout(() => {
                           if (document.activeElement === payCardRef.current) return;
+                          const typed = cardNoDigits(payCardRefValue.current);
+                          if (typed && !cardNoReady(typed)) {
+                            stayOnCard(payCardRef.current);
+                            return;
+                          }
                           setCardListOpen(false);
                         }, 160)}
                       />
@@ -1554,6 +1680,11 @@ export function SettleDialog({
                         aria-label="Cards recharged today"
                         onMouseDown={(e) => {
                           e.preventDefault();
+                          if (!cardSuggestReady()) {
+                            setCardListOpen(false);
+                            payCardRef.current?.focus();
+                            return;
+                          }
                           setCardListOpen((open) => {
                             if (open) skipCardOpenRef.current = true;
                             return !open;
@@ -1617,14 +1748,16 @@ export function SettleDialog({
               onMouseDown={(e) => {
                 e.preventDefault();
                 cardPickedRef.current = true;
-                setPayCard(c.card_number);
+                const picked = cardNoDigits(c.card_number);
+                setPayCard(picked);
                 setCardListOpen(false);
-                void save(c.card_number);
+                if (!cardNoReady(picked)) { stayOnCard(payCardRef.current); return; }
+                void save(picked);
               }}
             >
               <span className="no">{c.card_number}</span>
               <span className="nm">{c.customer_name}</span>
-              <span className="bal">{rupee(c.usable)}</span>
+              <span className="bal">{rupee(c.available ?? c.usable)}</span>
             </div>
           ))}
         </div>,

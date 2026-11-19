@@ -14,7 +14,19 @@ CREATE TABLE IF NOT EXISTS staff (
   pin_hash TEXT NOT NULL,
   role TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  user_role TEXT,
+  discount_pct REAL,
+  old_date_record INTEGER,
+  mis_report TEXT,
+  hide_collection INTEGER,
+  hide_estimate INTEGER,
+  allow_complementary INTEGER,
+  advance_card_update INTEGER,
+  show_checkin_rooms INTEGER,
+  bill_flags TEXT,
+  rights_json TEXT,
+  outlet_rights TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -386,7 +398,16 @@ CREATE TABLE IF NOT EXISTS invoices (
   status TEXT NOT NULL DEFAULT 'UNPAID',
   cashier_id TEXT,
   created_at TEXT NOT NULL,
-  paid_at TEXT
+  paid_at TEXT,
+  complimentary_account_id TEXT,
+  complimentary_name TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS complimentary_accounts (
+  id TEXT PRIMARY KEY,
+  code INTEGER NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS invoice_items (

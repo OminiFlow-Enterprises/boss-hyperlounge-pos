@@ -1,4 +1,5 @@
 import { assertPermission } from "../../shared/permissions.js";
+import { formatTableNo } from "../../shared/tableLabel.js";
 import type { AppContext } from "../lib/context.js";
 import { AppError } from "../lib/errors.js";
 import { nowIso, todayDate, uuid } from "../lib/ids.js";
@@ -161,6 +162,33 @@ export function dayClose(ctx: AppContext, date = todayDate()) {
   return { id, ...rec };
 }
 
+const INVOICE_ORDER_CARD = `(
+  SELECT c.card_number FROM member_cards c
+   WHERE c.id = COALESCE(
+     i.card_id,
+     (SELECT o.card_id FROM orders o WHERE o.id = i.order_id),
+     (SELECT s.card_id FROM table_sessions s WHERE s.id = i.session_id)
+   )
+)`;
+
+const KOT_ORDER_CARD = `(
+  SELECT c.card_number FROM member_cards c
+   WHERE c.id = COALESCE(
+     (SELECT o.card_id FROM orders o WHERE o.id = k.order_id),
+     (SELECT s.card_id FROM table_sessions s WHERE s.id = k.session_id)
+   )
+)`;
+
+function stampClubTable<T extends Record<string, unknown>>(row: T): T {
+  const outlet = String(row.outlet_name ?? row.outlet ?? "");
+  const code = String(row.table_code ?? "").trim();
+  const card = String(row.order_card ?? "").trim();
+  if (!code) return row;
+  const label = formatTableNo(code, card, outlet);
+  if (label === code) return row;
+  return { ...row, table_label: label, table_no: label } as T;
+}
+
 function dateRange(from?: string, to?: string) {
   const start = from || todayDate();
   const end = to || start;
@@ -173,6 +201,9 @@ export function itemWiseSales(ctx: AppContext, from?: string, to?: string) {
   const rows = ctx.db
     .prepare(
       `SELECT ii.name AS item_name, i.invoice_number AS bill_no, t.code AS table_no,
+              t.code AS table_code,
+              COALESCE(NULLIF(t.outlet, ''), 'BAR') AS outlet_name,
+              ${INVOICE_ORDER_CARD} AS order_card,
               k.kot_number AS kot, COALESCE(k.created_at, i.created_at) AS kot_at,
               ii.qty AS qty, ii.amount AS amount, ii.station AS station,
               COALESCE(p.tax_rate, 0) AS tax_rate, i.status AS bill_status
@@ -185,8 +216,8 @@ export function itemWiseSales(ctx: AppContext, from?: string, to?: string) {
        WHERE i.created_at BETWEEN ? AND ?
        ORDER BY ii.station, ii.name, i.created_at`,
     )
-    .all(range.from, range.to);
-  return { from: range.start, to: range.end, rows };
+    .all(range.from, range.to) as Array<Record<string, unknown>>;
+  return { from: range.start, to: range.end, rows: rows.map(stampClubTable) };
 }
 
 export function gstSummary(ctx: AppContext, from?: string, to?: string) {
@@ -564,6 +595,8 @@ export function settlementReport(
       `SELECT p.id AS payment_id, p.receipt_no, p.voucher_no, p.remark,
               i.id AS invoice_id, i.invoice_number AS bill_no, i.grand_total AS bill_amount,
               COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
+              t.code AS table_code,
+              ${INVOICE_ORDER_CARD} AS order_card,
               p.created_at AS voucher_date, p.amount AS settled, i.status, i.discount AS allowance,
               p.method AS method, COALESCE(p.reference, '') AS account,
               s.name AS username, w.name AS waiter, cu.name AS guest,
@@ -583,6 +616,7 @@ export function settlementReport(
   let allowance = 0;
   const totals = { CASH: 0, CARD: 0, UPI: 0, MEMBER_CARD: 0 };
   for (const row of rows) {
+    stampClubTable(row);
     const method = String(row.method || "");
     const amount = Number(row.settled) || 0;
     if (method === "CASH") totals.CASH += amount;
@@ -615,7 +649,7 @@ export function settlementReport(
 }
 
 function settlementRow(ctx: AppContext, paymentId: string) {
-  return ctx.db
+  const row = ctx.db
     .prepare(
       `SELECT p.id AS payment_id, p.receipt_no, p.voucher_no, COALESCE(p.remark, '') AS remark,
               p.method, p.amount, COALESCE(p.reference, '') AS account, p.created_at AS voucher_date,
@@ -623,6 +657,8 @@ function settlementRow(ctx: AppContext, paymentId: string) {
               i.id AS invoice_id, i.invoice_number AS bill_no, i.grand_total AS bill_amount,
               i.discount AS allowance, i.status, i.order_id,
               COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
+              t.code AS table_code,
+              ${INVOICE_ORDER_CARD} AS order_card,
               COALESCE(t.outlet, 'BAR') AS outlet_name,
               cu.name AS guest,
               (SELECT COALESCE(SUM(amount), 0) FROM payments WHERE invoice_id = i.id) AS paid
@@ -634,6 +670,7 @@ function settlementRow(ctx: AppContext, paymentId: string) {
        WHERE p.id = ?`,
     )
     .get(paymentId) as Record<string, unknown> | undefined;
+  return row ? stampClubTable(row) : undefined;
 }
 
 export function settlementDetail(ctx: AppContext, paymentId: string) {
@@ -758,8 +795,8 @@ export function kotReport(
   }
   if (filters?.tableNo?.trim()) {
     const q = `%${filters.tableNo.trim()}%`;
-    where.push("(t.code LIKE ? OR t.name LIKE ?)");
-    args.push(q, q);
+    where.push(`(t.code LIKE ? OR t.name LIKE ? OR ${KOT_ORDER_CARD} LIKE ? OR (${KOT_ORDER_CARD} || '/' || t.code) LIKE ?)`);
+    args.push(q, q, q, q);
   }
   if (filters?.billNo?.trim()) {
     const bill = filters.billNo.trim().replace(/^.*\//, "");
@@ -782,6 +819,7 @@ export function kotReport(
   const sql = `SELECT k.id, k.kot_number, '' AS manual_kot,
                       COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
                       t.code AS table_code,
+                      ${KOT_ORDER_CARD} AS order_card,
                       k.created_at, k.notes AS kot_remark, k.station, k.status, k.type,
                       COALESCE(s.name, '') AS steward,
                       COALESCE(s.username, k.station, '') AS user_id,
@@ -800,13 +838,13 @@ export function kotReport(
     const created = String(r.created_at || "");
     const kotRaw = String(r.kot_number || "");
     const billRaw = String(r.bill_no || "");
-    return {
+    return stampClubTable({
       ...r,
       kot_number: kotRaw.replace(/\D/g, "") || kotRaw,
       bill_no: billRaw.includes("/") ? billRaw.slice(billRaw.lastIndexOf("/") + 1).replace(/\D/g, "") || billRaw : billRaw.replace(/\D/g, "") || billRaw || "0",
       kot_date: stampKotDate(created),
       kot_time: stampKotTime(created),
-    };
+    });
   });
   return { from: range.start, to: range.end, outlet: outlet || "", rows };
 }
@@ -819,6 +857,8 @@ export function kotDetail(ctx: AppContext, kotKey: string) {
       `SELECT k.id, k.kot_number, k.notes, k.station, k.status, k.type, k.created_at, k.order_id, k.table_id,
               COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
               t.code AS table_code,
+              COALESCE(NULLIF(t.outlet, ''), 'BAR') AS outlet_name,
+              ${KOT_ORDER_CARD} AS order_card,
               COALESCE(s.name, '') AS waiter,
               (SELECT i.invoice_number FROM invoices i WHERE i.order_id = k.order_id ORDER BY i.created_at DESC LIMIT 1) AS bill_no
        FROM kots k
@@ -857,7 +897,7 @@ export function kotDetail(ctx: AppContext, kotKey: string) {
   const netAmount = items.reduce((s, i) => s + i.rate * i.qty, 0);
   const totalAmount = tableItems.reduce((s, i) => s + Number(i.amount || 0), 0);
 
-  return {
+  return stampClubTable({
     ...kot,
     date_label: (() => {
       const iso = String(kot.created_at || "");
@@ -873,7 +913,7 @@ export function kotDetail(ctx: AppContext, kotKey: string) {
     table_items: tableItems,
     net_amount: netAmount,
     total_amount: totalAmount,
-  };
+  });
 }
 
 export function billReport(
@@ -905,8 +945,8 @@ export function billReport(
   }
   if (filters?.tableNo?.trim()) {
     const q = `%${filters.tableNo.trim()}%`;
-    where.push("(t.code LIKE ? OR t.name LIKE ?)");
-    args.push(q, q);
+    where.push(`(t.code LIKE ? OR t.name LIKE ? OR ${INVOICE_ORDER_CARD} LIKE ? OR (${INVOICE_ORDER_CARD} || '/' || t.code) LIKE ?)`);
+    args.push(q, q, q, q);
   }
   const status = filters?.status || "all";
   if (status === "active") where.push("i.status IN ('UNPAID','PARTIAL')");
@@ -918,12 +958,17 @@ export function billReport(
     .prepare(
       `SELECT i.id AS invoice_id, i.order_id, i.invoice_number, i.table_id,
               COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
-              t.code AS table_code, i.grand_total, i.status, i.created_at, i.discount,
+              t.code AS table_code,
+              ${INVOICE_ORDER_CARD} AS order_card,
+              i.grand_total, i.status, i.created_at, i.discount,
               i.food_total, i.drinks_total, cu.name AS guest, cu.mobile AS mobile,
               COALESCE(NULLIF(t.outlet, ''), 'BAR') AS outlet_name,
               s.name AS username,
               (SELECT p.id FROM payments p WHERE p.invoice_id = i.id ORDER BY p.created_at DESC LIMIT 1) AS payment_id,
-              (SELECT COALESCE(p.remark, '') FROM payments p WHERE p.invoice_id = i.id ORDER BY p.created_at DESC LIMIT 1) AS remark
+              COALESCE(
+                NULLIF((SELECT COALESCE(p.remark, '') FROM payments p WHERE p.invoice_id = i.id ORDER BY p.created_at DESC LIMIT 1), ''),
+                COALESCE(i.complimentary_name, '')
+              ) AS remark
        FROM invoices i
        JOIN dining_tables t ON t.id = i.table_id
        LEFT JOIN customers cu ON cu.id = i.customer_id
@@ -950,7 +995,7 @@ export function billReport(
       else if (m === "CARD" || m === "UPI") card += amt;
       else other += amt;
     }
-    return {
+    return stampClubTable({
       ...row,
       net_amount: Number(row.grand_total) || 0,
       cash,
@@ -962,7 +1007,7 @@ export function billReport(
       allowance: Number(row.discount) || 0,
       remark: String(row.remark || ""),
       username: String(row.username || ""),
-    };
+    });
   });
 
   const total = rows.reduce((s, r) => s + (Number(r.net_amount) || 0), 0);
@@ -1045,6 +1090,8 @@ export function cardSettlementBills(ctx: AppContext, bookingId: string) {
       `SELECT i.id AS invoice_id,
               MIN(i.invoice_number) AS invoice_number,
               MIN(COALESCE(NULLIF(t.name, ''), t.code)) AS table_no,
+              MIN(t.code) AS table_code,
+              MIN(${INVOICE_ORDER_CARD}) AS order_card,
               MIN(COALESCE(NULLIF(t.outlet, ''), 'BAR')) AS outlet,
               SUM(p.amount) AS amount
        FROM payments p
@@ -1058,7 +1105,7 @@ export function cardSettlementBills(ctx: AppContext, bookingId: string) {
        ORDER BY MIN(p.created_at), invoice_number`,
     )
     .all(card.id, booking.created_at, next) as Array<Record<string, unknown>>;
-  return { booking_id: booking.id, card_no: booking.card_no, rows };
+  return { booking_id: booking.id, card_no: booking.card_no, rows: rows.map(stampClubTable) };
 }
 
 export function listBookings(ctx: AppContext) {

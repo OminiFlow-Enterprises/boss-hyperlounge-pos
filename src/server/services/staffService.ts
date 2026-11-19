@@ -5,16 +5,185 @@ import type { AppContext } from "../lib/context.js";
 import { nowIso, uuid } from "../lib/ids.js";
 import { hashPin, verifyPin } from "../db/seed.js";
 import type { Actor, StaffRole } from "../../shared/types.js";
+import {
+  billPreset,
+  blankOutlets,
+  flagsPreset,
+  mergeOutlets,
+  rightsPreset,
+  roleLabel,
+  type BillFlags,
+  type OutletRight,
+  type UserFlags,
+  type UserRoleLabel,
+} from "../../shared/userRights.js";
 import { deptRatesByProduct } from "./itemService.js";
 
+type StaffRow = {
+  id: string;
+  name: string;
+  username: string;
+  pin_hash: string;
+  role: string;
+  active: number;
+  user_role: string | null;
+  discount_pct: number | null;
+  old_date_record: number | null;
+  mis_report: string | null;
+  hide_collection: number | null;
+  hide_estimate: number | null;
+  allow_complementary: number | null;
+  advance_card_update: number | null;
+  show_checkin_rooms: number | null;
+  bill_flags: string | null;
+  rights_json: string | null;
+  outlet_rights: string | null;
+};
+
+export type StaffInput = {
+  name?: string;
+  username?: string;
+  pin?: string;
+  password?: string;
+  role?: string;
+  userRole?: string;
+  discount?: string | number;
+  oldDateRecord?: string | number;
+  misReport?: string;
+  flags?: UserFlags;
+  bill?: BillFlags;
+  rights?: Record<string, boolean>;
+  outlets?: OutletRight[];
+};
+
+function parseJson<T>(raw: string | null): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function bit(value: number | null): boolean | null {
+  if (value == null) return null;
+  return Number(value) === 1;
+}
+
+function mapStaff(row: StaffRow) {
+  const userRole = roleLabel(row.role, row.user_role);
+  const flagsConfigured = row.hide_collection != null;
+  const bill = parseJson<BillFlags>(row.bill_flags);
+  return {
+    id: row.id,
+    name: row.name,
+    username: row.username,
+    role: row.role,
+    userRole,
+    active: row.active,
+    configured: row.rights_json != null,
+    discount: row.discount_pct == null ? "0.00" : Number(row.discount_pct).toFixed(2),
+    oldDateRecord: row.old_date_record == null ? 1 : Number(row.old_date_record),
+    misReport: row.mis_report || "Full",
+    flags: flagsConfigured
+      ? {
+          hideCollection: bit(row.hide_collection) === true,
+          hideEstimate: bit(row.hide_estimate) === true,
+          allowComplementary: bit(row.allow_complementary) === true,
+          advanceCardUpdate: bit(row.advance_card_update) === true,
+          showCheckinRooms: bit(row.show_checkin_rooms) === true,
+        }
+      : null,
+    bill,
+    rights: parseJson<Record<string, boolean>>(row.rights_json),
+    outlets: parseJson<OutletRight[]>(row.outlet_rights),
+  };
+}
+
+function actorFrom(staff: StaffRow, terminal: { id: string; name: string }): Actor {
+  const mapped = mapStaff(staff);
+  return {
+    staffId: staff.id,
+    staffName: staff.name,
+    role: (staff.role as StaffRole) || "CASHIER",
+    terminalId: terminal.id,
+    terminalName: terminal.name,
+    username: staff.username,
+    rights: mapped.rights,
+    allowComplementary: mapped.flags ? mapped.flags.allowComplementary : null,
+    tableTransfer: mapped.bill ? mapped.bill.tableTransfer : null,
+    itemTransfer: mapped.bill ? mapped.bill.itemTransfer : null,
+  };
+}
+
+function findActive(ctx: AppContext, username: string) {
+  return ctx.db
+    .prepare("SELECT * FROM staff WHERE lower(username) = lower(?) AND active = 1")
+    .get(username.trim()) as StaffRow | undefined;
+}
+
+function assertCanManageUsers(ctx: AppContext) {
+  const row = ctx.db
+    .prepare("SELECT rights_json FROM staff WHERE id = ?")
+    .get(ctx.actor.staffId) as { rights_json: string | null } | undefined;
+  if (!row || row.rights_json == null || row.rights_json === "") return;
+  const rights = parseJson<Record<string, boolean>>(row.rights_json);
+  if (rights && (rights["master.user"] || rights.master)) return;
+  throw new AppError("Permission denied", 403, "PERMISSION_DENIED");
+}
+
+function userRoleOf(input: StaffInput): UserRoleLabel {
+  if (input.userRole === "ADMIN" || input.userRole === "OPERATOR") return input.userRole;
+  if (input.role === "OWNER" || input.role === "MANAGER" || input.role === "ADMIN") return "ADMIN";
+  if (input.role) return "OPERATOR";
+  throw new AppError("Select user role");
+}
+
+function profileOf(input: StaffInput, userRole: UserRoleLabel) {
+  const flags = input.flags ?? flagsPreset(userRole);
+  const bill = input.bill ?? billPreset(userRole);
+  const rights = input.rights ?? rightsPreset(userRole);
+  const discount = Number(input.discount ?? 0);
+  const oldDate = Math.round(Number(input.oldDateRecord ?? 1));
+  const mis = input.misReport === "User" || input.misReport === "None" ? input.misReport : "Full";
+  return {
+    role: userRole === "ADMIN" ? "OWNER" : "CASHIER",
+    userRole,
+    discount: Number.isFinite(discount) && discount > 0 ? discount : 0,
+    oldDate: Number.isFinite(oldDate) && oldDate > 0 ? oldDate : 1,
+    mis,
+    flags,
+    bill,
+    rights,
+    outlets: mergeOutlets(input.outlets ?? blankOutlets()),
+  };
+}
+
+const PROFILE_SQL = `user_role=?, discount_pct=?, old_date_record=?, mis_report=?,
+  hide_collection=?, hide_estimate=?, allow_complementary=?, advance_card_update=?, show_checkin_rooms=?,
+  bill_flags=?, rights_json=?, outlet_rights=?`;
+
+function profileArgs(profile: ReturnType<typeof profileOf>) {
+  return [
+    profile.userRole,
+    profile.discount,
+    profile.oldDate,
+    profile.mis,
+    profile.flags.hideCollection ? 1 : 0,
+    profile.flags.hideEstimate ? 1 : 0,
+    profile.flags.allowComplementary ? 1 : 0,
+    profile.flags.advanceCardUpdate ? 1 : 0,
+    profile.flags.showCheckinRooms ? 1 : 0,
+    JSON.stringify(profile.bill),
+    JSON.stringify(profile.rights),
+    JSON.stringify(profile.outlets),
+  ];
+}
+
 export function login(ctx: AppContext, username: string, pin: string, terminalId: string): Actor {
-  const staff = ctx.db
-    .prepare("SELECT * FROM staff WHERE username = ? AND active = 1")
-    .get(username.trim()) as
-    | { id: string; name: string; pin_hash: string; role: StaffRole }
-    | undefined;
+  const staff = findActive(ctx, username);
   if (!staff || !verifyPin(pin, staff.pin_hash)) {
-    throw new AppError("Invalid staff PIN", 401, "AUTH_FAILED");
+    throw new AppError("Invalid Username or Password", 401, "AUTH_FAILED");
   }
   const terminal = ctx.db.prepare("SELECT * FROM terminals WHERE id = ?").get(terminalId) as
     | { id: string; name: string }
@@ -23,34 +192,88 @@ export function login(ctx: AppContext, username: string, pin: string, terminalId
   ctx.db
     .prepare("INSERT INTO sessions (id, staff_id, terminal_id, started_at) VALUES (?, ?, ?, ?)")
     .run(uuid(), staff.id, terminal.id, nowIso());
-  return {
-    staffId: staff.id,
-    staffName: staff.name,
-    role: staff.role,
-    terminalId: terminal.id,
-    terminalName: terminal.name,
-  };
+  return actorFrom(staff, terminal);
+}
+
+export function changePassword(ctx: AppContext, username: string, oldPassword: string, newPassword: string) {
+  const name = String(username ?? "").trim();
+  const next = String(newPassword ?? "");
+  if (!name || !oldPassword || !next) throw new AppError("Enter username and password");
+  const staff = findActive(ctx, name);
+  if (!staff || !verifyPin(String(oldPassword), staff.pin_hash)) {
+    throw new AppError("Invalid Username or Password", 401, "AUTH_FAILED");
+  }
+  ctx.db.prepare("UPDATE staff SET pin_hash = ? WHERE id = ?").run(hashPin(next), staff.id);
+  audit(ctx, "STAFF_PASSWORD", "staff", staff.id, null, null, { username: staff.username });
+  return { ok: true };
 }
 
 export function listStaff(ctx: AppContext) {
-  return ctx.db
-    .prepare("SELECT id, name, username, role, active, created_at FROM staff ORDER BY name")
-    .all();
+  const rows = ctx.db
+    .prepare("SELECT * FROM staff WHERE active = 1 ORDER BY username COLLATE NOCASE")
+    .all() as StaffRow[];
+  return rows.map(mapStaff);
 }
 
-export function createStaff(
-  ctx: AppContext,
-  input: { name: string; username: string; pin: string; role: StaffRole },
-) {
-  assertPermission(ctx.actor.role, "MANAGE_STAFF");
+export function createStaff(ctx: AppContext, input: StaffInput) {
+  assertCanManageUsers(ctx);
+  const username = String(input.username ?? input.name ?? "").trim();
+  if (!username) throw new AppError("Enter username");
+  const userRole = userRoleOf(input);
+  const password = String(input.password ?? input.pin ?? "");
+  if (!password) throw new AppError("Enter password");
+  const taken = findActive(ctx, username);
+  if (taken) throw new AppError("Username already exists");
   const id = uuid();
+  const profile = profileOf(input, userRole);
   ctx.db
     .prepare(
-      "INSERT INTO staff (id, name, username, pin_hash, role, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
+      `INSERT INTO staff (
+         id, name, username, pin_hash, role, active, created_at,
+         user_role, discount_pct, old_date_record, mis_report,
+         hide_collection, hide_estimate, allow_complementary, advance_card_update, show_checkin_rooms,
+         bill_flags, rights_json, outlet_rights
+       ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, input.name, input.username, hashPin(input.pin), input.role, nowIso());
-  audit(ctx, "STAFF_CREATE", "staff", id, null, null, { username: input.username, role: input.role });
-  return { id };
+    .run(id, username, username, hashPin(password), profile.role, nowIso(), ...profileArgs(profile));
+  audit(ctx, "STAFF_CREATE", "staff", id, null, null, { username, userRole });
+  return mapStaff(ctx.db.prepare("SELECT * FROM staff WHERE id = ?").get(id) as StaffRow);
+}
+
+export function updateStaff(ctx: AppContext, id: string, input: StaffInput) {
+  assertCanManageUsers(ctx);
+  const existing = ctx.db.prepare("SELECT * FROM staff WHERE id = ? AND active = 1").get(id) as StaffRow | undefined;
+  if (!existing) throw new AppError("User not found");
+  const username = String(input.username ?? existing.username).trim();
+  if (!username) throw new AppError("Enter username");
+  const userRole = userRoleOf({ ...input, userRole: input.userRole ?? roleLabel(existing.role, existing.user_role) });
+  const taken = ctx.db
+    .prepare("SELECT id FROM staff WHERE lower(username) = lower(?) AND active = 1 AND id <> ?")
+    .get(username, id) as { id: string } | undefined;
+  if (taken) throw new AppError("Username already exists");
+  const password = String(input.password ?? input.pin ?? "");
+  const profile = profileOf(input, userRole);
+  ctx.db
+    .prepare(
+      `UPDATE staff SET name=?, username=?, role=?, ${PROFILE_SQL} WHERE id=?`,
+    )
+    .run(username, username, profile.role, ...profileArgs(profile), id);
+  if (password) {
+    ctx.db.prepare("UPDATE staff SET pin_hash = ? WHERE id = ?").run(hashPin(password), id);
+  }
+  audit(ctx, "STAFF_UPDATE", "staff", id, null, null, { username, userRole });
+  return mapStaff(ctx.db.prepare("SELECT * FROM staff WHERE id = ?").get(id) as StaffRow);
+}
+
+export function deleteStaff(ctx: AppContext, id: string) {
+  assertCanManageUsers(ctx);
+  if (id === ctx.actor.staffId) throw new AppError("Cannot delete the logged in user");
+  const existing = ctx.db.prepare("SELECT * FROM staff WHERE id = ? AND active = 1").get(id) as StaffRow | undefined;
+  if (!existing) throw new AppError("User not found");
+  const retired = `${existing.username}~${id.slice(0, 8)}`;
+  ctx.db.prepare("UPDATE staff SET active = 0, username = ? WHERE id = ?").run(retired, id);
+  audit(ctx, "STAFF_DELETE", "staff", id, null, { username: existing.username }, null);
+  return { ok: true };
 }
 
 export function listProducts(ctx: AppContext) {

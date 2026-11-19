@@ -4,6 +4,7 @@ import { audit } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
 import { businessDayStart, nextNumber, nowIso, uuid } from "../lib/ids.js";
 import type { ServiceChargeMode, SplitType, TableStatus } from "../../shared/types.js";
+import { findCardByScan } from "./cardService.js";
 import { previewBill } from "./billingService.js";
 import { dayCloseHour } from "./settingsService.js";
 
@@ -184,7 +185,7 @@ export function getTable(ctx: AppContext, tableId: string) {
 
 export function openTable(
   ctx: AppContext,
-  input: { tableId: string; customerId?: string; cardId?: string; waiterId?: string; outlet?: string },
+  input: { tableId: string; customerId?: string; cardId?: string; cardNumber?: string; waiterId?: string; outlet?: string },
 ) {
   assertPermission(ctx.actor.role, "CREATE_ORDER");
   const table = getTable(ctx, input.tableId);
@@ -192,6 +193,15 @@ export function openTable(
     throw new AppError(`Table ${table.code} is ${table.status}`);
   }
   const outlet = table.outlet || input.outlet?.trim() || "BAR";
+  let cardId = input.cardId ?? null;
+  let customerId = input.customerId ?? null;
+  const cardNumber = input.cardNumber?.trim();
+  if (cardNumber) {
+    const card = findCardByScan(ctx, cardNumber);
+    if (!card) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
+    cardId = card.id;
+    if (!customerId) customerId = card.customer_id;
+  }
   const sessionId = uuid();
   const now = nowIso();
   ctx.db
@@ -199,12 +209,32 @@ export function openTable(
       `INSERT INTO table_sessions (id, table_id, customer_id, card_id, waiter_id, status, opened_at, outlet)
        VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?)`,
     )
-    .run(sessionId, table.id, input.customerId ?? null, input.cardId ?? null, input.waiterId ?? ctx.actor.staffId, now, outlet);
+    .run(sessionId, table.id, customerId, cardId, input.waiterId ?? ctx.actor.staffId, now, outlet);
   ctx.db
     .prepare("UPDATE dining_tables SET status = 'OCCUPIED', current_session_id = ? WHERE id = ?")
     .run(sessionId, table.id);
   audit(ctx, "TABLE_OPEN", "dining_table", table.id, null, "AVAILABLE", "OCCUPIED");
   return { table: getTable(ctx, table.id), sessionId };
+}
+
+/** Stamp the prepaid card onto the open session and its unsettled orders. */
+export function attachTableCard(ctx: AppContext, tableId: string, cardNumber: string) {
+  const number = cardNumber.trim();
+  if (!number) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
+  const card = findCardByScan(ctx, number);
+  if (!card) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
+  const table = getTable(ctx, tableId);
+  if (!table.current_session_id) throw new AppError("Open the table first");
+  ctx.db
+    .prepare("UPDATE table_sessions SET card_id = ?, customer_id = COALESCE(customer_id, ?) WHERE id = ?")
+    .run(card.id, card.customer_id, table.current_session_id);
+  ctx.db
+    .prepare(
+      `UPDATE orders SET card_id = ?, customer_id = COALESCE(customer_id, ?)
+        WHERE session_id = ? AND status IN ('OPEN','BILL_REQUESTED','SETTLING')`,
+    )
+    .run(card.id, card.customer_id, table.current_session_id);
+  return card;
 }
 
 export function checkIn(

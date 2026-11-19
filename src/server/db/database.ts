@@ -111,6 +111,33 @@ export function migrate(db: Database.Database): void {
       fill.run(nextSequence(db, "settlement_receipt", 32901), nextSequence(db, "settlement_voucher", 47201), row.id);
     }
   }
+  if (hasColumn(db, "invoices", "id")) {
+    if (!hasColumn(db, "invoices", "complimentary_account_id")) {
+      db.exec("ALTER TABLE invoices ADD COLUMN complimentary_account_id TEXT");
+    }
+    if (!hasColumn(db, "invoices", "complimentary_name")) {
+      db.exec("ALTER TABLE invoices ADD COLUMN complimentary_name TEXT NOT NULL DEFAULT ''");
+    }
+  }
+  if (hasColumn(db, "staff", "id")) {
+    const staffCols: Array<[string, string]> = [
+      ["user_role", "TEXT"],
+      ["discount_pct", "REAL"],
+      ["old_date_record", "INTEGER"],
+      ["mis_report", "TEXT"],
+      ["hide_collection", "INTEGER"],
+      ["hide_estimate", "INTEGER"],
+      ["allow_complementary", "INTEGER"],
+      ["advance_card_update", "INTEGER"],
+      ["show_checkin_rooms", "INTEGER"],
+      ["bill_flags", "TEXT"],
+      ["rights_json", "TEXT"],
+      ["outlet_rights", "TEXT"],
+    ];
+    for (const [name, def] of staffCols) {
+      if (!hasColumn(db, "staff", name)) db.exec(`ALTER TABLE staff ADD COLUMN ${name} ${def}`);
+    }
+  }
 }
 
 export function resetDatabase(db: Database.Database): void {
@@ -154,6 +181,7 @@ export function resetDatabase(db: Database.Database): void {
     DROP TABLE IF EXISTS card_ledger;
     DROP TABLE IF EXISTS member_cards;
     DROP TABLE IF EXISTS card_types;
+    DROP TABLE IF EXISTS complimentary_accounts;
     DROP TABLE IF EXISTS customers;
     DROP TABLE IF EXISTS sessions;
     DROP TABLE IF EXISTS staff;
