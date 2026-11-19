@@ -889,7 +889,7 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
             <table>
               <colgroup>
                 <col className="c-arr" />
-                <col />
+                <col className="c-name" />
                 <col className="c-code" />
                 <col className="c-cost" />
                 <col className="c-act" />

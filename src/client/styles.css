@@ -1431,15 +1431,15 @@ button.st-drop-btn.card-drop-open {
 .st-vno { margin-right: auto; white-space: nowrap; }
 .st-foot .fn { width: 96px; min-width: 96px; flex: none; height: 24px; }
 
-.im-mask { position: absolute; inset: 0; z-index: 60; }
+.im-mask { position: absolute; inset: 0; z-index: 280; }
 .im-dlg {
   width: 960px;
   max-width: calc(100vw - 16px);
-  max-height: calc(100vh - 16px);
   background: var(--face);
   border: 1px solid #404040;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 .im-upper { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px 0; }
 .im-main { flex: 1; min-width: 0; }
@@ -1517,10 +1517,11 @@ button.st-drop-btn.card-drop-open {
   color: #000;
 }
 .im-combo-list div.on { background: #0078d7; color: #fff; }
-.im-dlg .win { height: 22px; }
+.im-dlg .win { height: 22px; color: #000; background: #fff; }
+.im-form input.win { width: 100%; min-width: 0; color: #000; background: #fff; }
 .im-depts-wrap {
   margin-top: 6px;
-  min-height: 176px;
+  min-height: 132px;
   background: #fff;
   border: 1px solid #7a7a7a;
   outline: none;
@@ -1581,16 +1582,23 @@ button.st-drop-btn.card-drop-open {
   text-align: center;
 }
 .im-hsn-lbl { margin-top: 2px; }
-.im-details { margin: 4px 8px 8px; min-height: 0; }
-.im-details-cap { font-weight: 700; margin: 2px 0; }
+.im-details {
+  margin: 4px 8px 8px;
+  min-height: 140px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.im-details-cap { font-weight: 700; margin: 2px 0; color: #000; }
 .im-grid {
   background: #fff;
   border: 1px solid #7a7a7a;
-  height: 248px;
+  flex: 1;
+  min-height: 120px;
   overflow: auto;
 }
 .im-grid:focus { outline: 1px dotted #000; outline-offset: -1px; }
-.im-grid table { width: 100%; border-collapse: collapse; }
+.im-grid table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .im-grid col.c-arr { width: 18px; }
 .im-grid col.c-code { width: 84px; }
 .im-grid col.c-cost { width: 88px; }
@@ -1607,9 +1615,10 @@ button.st-drop-btn.card-drop-open {
 .im-grid th { background: #fff; text-align: left; position: sticky; top: 0; z-index: 1; }
 .im-grid td.num, .im-grid th:nth-child(4) { text-align: right; }
 .im-grid td.arr, .im-grid th:first-child { text-align: center; font-size: 12px; }
-.im-grid td.name { text-align: left; }
+.im-grid td.name { text-align: left; color: #000; }
 .im-grid th.act, .im-grid td.act { text-align: center; padding: 0 3px; }
 .im-grid tr.on td { background: #0078d7; color: #fff; }
+.im-grid tr.on td.name { color: #fff; }
 .im-grid td.act .fn {
   height: 18px;
   width: 100%;
@@ -1640,6 +1649,14 @@ button.st-drop-btn.card-drop-open {
   right: auto;
   margin: 0;
   transform: translate(-50%, -50%);
+}
+/* Keep Item Name on screen. A centered dialog taller than the window clips the top field. */
+.im-dlg {
+  top: 12px;
+  bottom: 12px;
+  height: auto;
+  max-height: none;
+  transform: translateX(-50%);
 }
 
 .kot-add-dlg {
@@ -1763,12 +1780,22 @@ button.st-drop-btn.card-drop-open {
   max-width: calc(100vw - 24px);
   background: #fff;
   border: 2px solid #1aa3e8;
-  padding: 18px 22px 12px;
+  padding: 0 22px 12px;
   color: #000;
 }
-.login-head { display: flex; align-items: center; gap: 22px; }
-.rd-mark { width: 88px; flex: none; text-align: center; color: #8d1218; font-size: 11px; font-weight: 700; letter-spacing: 0.4px; }
-.rd-mark svg { display: block; margin: 0 auto 2px; }
+.login-brand {
+  background: #000;
+  display: flex;
+  justify-content: center;
+  margin: 0 -22px 16px;
+  padding: 12px 16px 10px;
+}
+.login-brand img {
+  display: block;
+  height: 108px;
+  width: auto;
+}
+.login-head { display: flex; align-items: center; justify-content: center; }
 .login-fields {
   flex: 1;
   display: grid;
@@ -1812,13 +1839,12 @@ button.st-drop-btn.card-drop-open {
 .login-script {
   text-align: center;
   font-family: "Segoe Script", "Brush Script MT", "Palatino Linotype", cursive;
-  font-size: 30px;
+  font-size: 26px;
   font-weight: 700;
   color: #6d3028;
   letter-spacing: 0.5px;
   line-height: 1.1;
 }
-.login-contact { text-align: center; font-size: 13px; font-weight: 700; margin-top: 2px; }
 .pass-dlg { width: 420px; z-index: 280; background: var(--face); }
 .pass-body { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
 .pass-body label { display: grid; grid-template-columns: 148px 1fr; align-items: center; gap: 8px; font-weight: 700; }

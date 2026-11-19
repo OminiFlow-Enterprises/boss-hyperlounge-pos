@@ -816,6 +816,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     focusInput(clubCardRef.current);
   }
 
+  function focusTableNo() {
+    focusInput(tableRef.current);
+  }
+
   function focusDept(next: Dept) {
     requestAnimationFrame(() => {
       const el = next === "CLUB" ? clubCardRef.current : tableRef.current;
@@ -830,15 +834,15 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     const known = tables.find((x) => x.code.toLowerCase() === raw.toLowerCase() && (x.outlet || "BAR") === out);
     const cardOnTable = (known?.card_number || "").trim();
     const running = Boolean(known && known.status !== "AVAILABLE");
+    if (!raw) {
+      onMessage("Select Table No first", focusTableNo);
+      return null;
+    }
     if (clubMode && !cardNoReady(clubCard) && !cardOnTable && !running) {
       stayOnCard(clubCardRef.current);
       return null;
     }
     if (clubMode && cardOnTable) setClubCard(cardNoDigits(cardOnTable));
-    if (!raw) {
-      onMessage("Select Table No first");
-      return null;
-    }
     const current = tables.find((x) => x.id === tableId);
     if (orderId && current && current.code.toLowerCase() === raw.toLowerCase() && (current.outlet || "BAR") === out) {
       focusInput(itemRef.current);
@@ -1116,8 +1120,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       return false;
     }
     if (!orderId) {
-      onMessage("Select Table No first");
-      tableRef.current?.focus();
+      onMessage("Select Table No first", focusTableNo);
       return false;
     }
     const n = Number.isInteger(qty) && qty !== 0 ? qty : parseQty(String(qty)) ?? 1;

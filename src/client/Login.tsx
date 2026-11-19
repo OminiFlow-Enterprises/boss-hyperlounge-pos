@@ -5,18 +5,6 @@ import type { Actor } from "../shared/types";
 
 const YEARS = ["2024-2025", "2025-2026", "2026-2027", "2027-2028"];
 
-function RdMark() {
-  return (
-    <div className="rd-mark" aria-hidden>
-      <svg viewBox="0 0 72 52" width="72" height="52">
-        <path d="M6 4h28c10 0 16 6 16 14 0 6-3 11-8 13l10 17h-12L30 33H18v15H6V4zm12 8v14h14c5 0 8-3 8-7s-3-7-8-7H18z" fill="#d01218" />
-        <path d="M34 6h26c8 0 12 5 12 11 0 7-5 12-13 12H46v6h22v9H34V6zm12 8v10h12c3 0 5-2 5-5s-2-5-5-5H46z" fill="#8d1218" />
-      </svg>
-      <div>INFOTECH</div>
-    </div>
-  );
-}
-
 export function LoginGate({
   terminalId,
   onLogin,
@@ -95,8 +83,10 @@ export function LoginGate({
           void submit();
         }}
       >
+        <div className="login-brand">
+          <img src="/boss-logo.png" alt="THE BOSS" />
+        </div>
         <div className="login-head">
-          <RdMark />
           <div className="login-fields">
             <span>Financial Year :</span>
             <select className="win" data-cycle="1" value={year} onChange={(e) => setYear(e.target.value)}>
@@ -127,8 +117,7 @@ export function LoginGate({
           <button type="button" onClick={onExit}><u>E</u>xit</button>
         </div>
         <hr className="login-rule" />
-        <div className="login-script">RD INFOTECH</div>
-        <div className="login-contact">Contect No : 9309341288,8769944447</div>
+        <div className="login-script">BOSS BILLING SOFTWARE</div>
       </form>
       {changing && (
         <ChangePassword
