@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { parseRupeesInput } from "../shared/money";
 import type { NavView } from "../shared/types";
 import { AlertBox, CapBtns, ConfirmAsk, PrepareBillDialog } from "./BillDialogs";
@@ -196,6 +196,112 @@ function gstSlipDate(isoDayStr: string) {
   return `${pad(d.getDate())}/${MONTHS[d.getMonth()]}/${d.getFullYear()}`;
 }
 
+/** Bottom of the FnB GST Summery — typed amounts, not taken from bills. */
+const GST_CASH_LINES: Array<{ id: string; label: string }> = [
+  { id: "club_card_return", label: "CLUB CARD RETURN" },
+  { id: "incentives", label: "INCENTIVES AMOUNT" },
+  { id: "expense", label: "CASH AFTER EXPENSE" },
+  { id: "entry_sale", label: "ENTRY SALE" },
+  { id: "party_payment", label: "Party Payment Cash Rec. Not Punch In Sale" },
+  { id: "system_cash", label: "System Cash Sale" },
+  { id: "cash_in_hand", label: "Cash in hand" },
+];
+
+type GstExtraLine = { id: string; label: string; amount: string };
+
+function gstManualStorageKey(from: string, to: string) {
+  return `${from}|${to}`;
+}
+
+function loadGstManual(from: string, to: string): { amounts: Record<string, string>; extras: GstExtraLine[] } {
+  try {
+    const raw = localStorage.getItem("boss-gst-manual");
+    if (!raw) return { amounts: {}, extras: [] };
+    const all = JSON.parse(raw) as Record<string, { amounts?: Record<string, string>; extras?: GstExtraLine[] }>;
+    const row = all[gstManualStorageKey(from, to)];
+    const extras = Array.isArray(row?.extras)
+      ? row.extras.filter((x) => x && typeof x.id === "string")
+      : [];
+    return {
+      amounts: row?.amounts && typeof row.amounts === "object" ? row.amounts : {},
+      extras,
+    };
+  } catch {
+    return { amounts: {}, extras: [] };
+  }
+}
+
+function saveGstManual(from: string, to: string, amounts: Record<string, string>, extras: GstExtraLine[]) {
+  try {
+    const raw = localStorage.getItem("boss-gst-manual");
+    const all = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+    all[gstManualStorageKey(from, to)] = { amounts, extras };
+    localStorage.setItem("boss-gst-manual", JSON.stringify(all));
+  } catch {
+    /* private mode or full storage — the slip still shows what was typed */
+  }
+}
+
+function formatManualAmt(raw: string) {
+  const cleaned = raw.replace(/[₹,\s]/g, "").trim();
+  if (!cleaned) return "";
+  const n = Number(cleaned);
+  if (!Number.isFinite(n)) return raw;
+  return n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function manualRupees(raw?: string) {
+  const cleaned = String(raw ?? "").replace(/[₹,\s]/g, "").trim();
+  if (!cleaned) return 0;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function formatRupees(n: number) {
+  return n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/** Amount boxes accept digits and one decimal only. */
+function amountTyping(raw: string) {
+  const cleaned = raw.replace(/[^\d.]/g, "");
+  const dot = cleaned.indexOf(".");
+  if (dot < 0) return cleaned;
+  const whole = cleaned.slice(0, dot);
+  const frac = cleaned.slice(dot + 1).replace(/\./g, "").slice(0, 2);
+  return `${whole}.${frac}`;
+}
+
+/** CASH AFTER EXPENSE = CLUB CARD RETURN + INCENTIVES AMOUNT. Blank until either is typed. */
+function cashAfterExpense(amounts: Record<string, string>) {
+  const club = String(amounts.club_card_return ?? "").trim();
+  const incentives = String(amounts.incentives ?? "").trim();
+  if (!club && !incentives) return "";
+  return formatRupees(manualRupees(club) + manualRupees(incentives));
+}
+
+/** Cash in hand = (ENTRY SALE + party payment + system cash sale + added fields) − CASH AFTER EXPENSE. */
+function cashInHandAmount(amounts: Record<string, string>, entrySale: string, extras: Array<{ amount?: string }>) {
+  const added = extras.reduce((sum, line) => sum + manualRupees(line.amount), 0);
+  const total = manualRupees(entrySale)
+    + manualRupees(amounts.party_payment)
+    + manualRupees(amounts.system_cash)
+    + added
+    - manualRupees(amounts.expense);
+  return formatRupees(total);
+}
+
+/** ENTRY SALE is the Advance :CASH total already on the slip. */
+function advanceCashPaise(particulars: Array<{ label?: string; amount?: number }>) {
+  let sum = 0;
+  for (const p of particulars) {
+    const label = String(p.label || "").toUpperCase().replace(/\s+/g, "");
+    if (!label.startsWith("ADVANCE:")) continue;
+    const mop = label.slice("ADVANCE:".length);
+    if (mop === "CASH" || mop.startsWith("CASH/") || mop.startsWith("CASH")) sum += Number(p.amount) || 0;
+  }
+  return sum;
+}
+
 export function GstReport({ onExit }: { onExit: () => void }) {
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
@@ -212,6 +318,8 @@ export function GstReport({ onExit }: { onExit: () => void }) {
   const [view, setView] = useState<"empty" | "bills" | "summary">("empty");
   const [data, setData] = useState<any>({ rows: [], totals: {}, footer: {} });
   const [summary, setSummary] = useState<any>(null);
+  const [cashAmounts, setCashAmounts] = useState<Record<string, string>>({});
+  const [extraLines, setExtraLines] = useState<GstExtraLine[]>([]);
   const [sel, setSel] = useState(-1);
   const selRef = useRef(-1);
   const gridWrapRef = useRef<HTMLDivElement>(null);
@@ -252,11 +360,67 @@ export function GstReport({ onExit }: { onExit: () => void }) {
     setSummary(next);
     setData((d: any) => ({ ...d, footer: next.footer || d.footer }));
     setView("summary");
-    // Start at top of slip; Particular/Amount is below — scroll the Crystal stage
+    // New cash table sits under Particular — bring that bottom of the slip into view
     requestAnimationFrame(() => {
-      const stage = document.querySelector(".gst-summary-view .cr-stage") as HTMLElement | null;
-      if (stage) stage.scrollTop = 0;
+      const manual = document.querySelector(".gst-sum-manual") as HTMLElement | null;
+      if (manual) manual.scrollIntoView({ block: "end" });
     });
+  }
+
+  useEffect(() => {
+    const loaded = loadGstManual(from, to);
+    const amounts = { ...loaded.amounts };
+    const calc = cashAfterExpense(amounts);
+    if (calc) amounts.expense = calc;
+    setCashAmounts(amounts);
+    setExtraLines(loaded.extras);
+  }, [from, to]);
+
+  function putCashAmount(id: string, value: string) {
+    setCashAmounts((prev) => {
+      const next = { ...prev, [id]: value };
+      if (id === "club_card_return" || id === "incentives") next.expense = cashAfterExpense(next);
+      saveGstManual(from, to, next, extraLines);
+      return next;
+    });
+  }
+
+  function putExtra(id: string, patch: Partial<GstExtraLine>) {
+    setExtraLines((prev) => {
+      const next = prev.map((line) => (line.id === id ? { ...line, ...patch } : line));
+      saveGstManual(from, to, cashAmounts, next);
+      return next;
+    });
+  }
+
+  function addExtraLine() {
+    const id = `x${Date.now().toString(36)}`;
+    setExtraLines((prev) => {
+      const next = [...prev, { id, label: "", amount: "" }];
+      saveGstManual(from, to, cashAmounts, next);
+      return next;
+    });
+    requestAnimationFrame(() => {
+      document.getElementById(`gst-xl-${id}`)?.focus();
+    });
+  }
+
+  function removeExtraLine(id: string) {
+    setExtraLines((prev) => {
+      const next = prev.filter((line) => line.id !== id);
+      saveGstManual(from, to, cashAmounts, next);
+      return next;
+    });
+  }
+
+  function onManualEnter(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    const root = e.currentTarget.closest(".gst-sum-manual");
+    if (!root) return;
+    const inputs = [...root.querySelectorAll<HTMLInputElement>("input:not([readonly])")];
+    const next = inputs[inputs.indexOf(e.currentTarget) + 1];
+    if (next) next.focus();
   }
 
   useEffect(() => {
@@ -301,7 +465,35 @@ export function GstReport({ onExit }: { onExit: () => void }) {
   const footer = (view === "summary" ? summary?.footer : data.footer) || {};
   const s = summary?.summary || {};
   const particulars = summary?.particulars || [];
+  const entrySaleAmt = gstSumAmt(advanceCashPaise(particulars));
+  const cashInHandAmt = cashInHandAmount(cashAmounts, entrySaleAmt, extraLines);
   const fromLabel = gstSlipDate(from);
+  const cashLines = GST_CASH_LINES.filter((line) => line.id !== "cash_in_hand");
+  const cashInHand = GST_CASH_LINES.find((line) => line.id === "cash_in_hand")!;
+
+  function cashRow(line: { id: string; label: string }) {
+    const locked = line.id === "entry_sale" || line.id === "cash_in_hand";
+    const shown = line.id === "entry_sale" ? entrySaleAmt
+      : line.id === "cash_in_hand" ? cashInHandAmt
+      : (cashAmounts[line.id] ?? "");
+    return (
+      <tr key={line.id}>
+        <td className="lbl">{line.label}</td>
+        <td>
+          <input
+            className="win gst-amt-in"
+            inputMode="decimal"
+            readOnly={locked}
+            tabIndex={locked ? -1 : undefined}
+            value={shown}
+            onChange={locked ? undefined : (e) => putCashAmount(line.id, amountTyping(e.target.value))}
+            onBlur={locked ? undefined : (e) => putCashAmount(line.id, formatManualAmt(e.target.value))}
+            onKeyDown={locked ? undefined : onManualEnter}
+          />
+        </td>
+      </tr>
+    );
+  }
   const toLabel = gstSlipDate(to);
 
   return (
@@ -458,7 +650,7 @@ export function GstReport({ onExit }: { onExit: () => void }) {
                       <td className="num">{gstSumAmt(s.vat20_tax)}</td>
                     </tr>
                     <tr>
-                      <td>Surcharge 20%</td>
+                      <td>Surcharge Only</td>
                       <td className="num">{gstSumAmt(s.surcharge20_base)}</td>
                       <td />
                       <td className="num">{gstSumAmt(s.surcharge20_tax)}</td>
@@ -466,7 +658,6 @@ export function GstReport({ onExit }: { onExit: () => void }) {
                     <tr><td>Round Off</td><td colSpan={2} /><td className="num">{gstSumAmt(s.round_off)}</td></tr>
                     <tr><td>Total Tax</td><td colSpan={2} /><td className="num">{gstSumAmt(s.total_tax)}</td></tr>
                     <tr><td>Net Amount</td><td colSpan={2} /><td className="num">{gstSumAmt(s.net_amount)}</td></tr>
-                    <tr><td>Bill Advance</td><td colSpan={2} /><td className="num">{gstSumAmt(s.bill_advance ?? footer.advance)}</td></tr>
                   </tbody>
                 </table>
                 <table className="gst-sum-mop">
@@ -495,6 +686,44 @@ export function GstReport({ onExit }: { onExit: () => void }) {
                     {!particulars.length && (
                       <tr><td className="mop-name">CASH</td><td className="num">0.00</td></tr>
                     )}
+                  </tbody>
+                </table>
+                <table className="gst-sum-manual">
+                  <colgroup>
+                    <col className="c-lbl" /><col className="c-amt" />
+                  </colgroup>
+                  <tbody>
+                    {cashLines.map(cashRow)}
+                    {extraLines.map((line) => (
+                      <tr key={line.id}>
+                        <td className="lbl">
+                          <input
+                            id={`gst-xl-${line.id}`}
+                            className="win gst-lbl-in"
+                            value={line.label}
+                            onChange={(e) => putExtra(line.id, { label: e.target.value })}
+                            onKeyDown={onManualEnter}
+                          />
+                        </td>
+                        <td className="amt-cell">
+                          <input
+                            className="win gst-amt-in"
+                            inputMode="decimal"
+                            value={line.amount}
+                            onChange={(e) => putExtra(line.id, { amount: amountTyping(e.target.value) })}
+                            onBlur={(e) => putExtra(line.id, { amount: formatManualAmt(e.target.value) })}
+                            onKeyDown={onManualEnter}
+                          />
+                          <button type="button" className="fn gst-manual-del" onClick={() => removeExtraLine(line.id)}>X</button>
+                        </td>
+                      </tr>
+                    ))}
+                    <tr className="gst-manual-add">
+                      <td colSpan={2}>
+                        <button type="button" className="fn" onClick={addExtraLine}>Add Field</button>
+                      </td>
+                    </tr>
+                    {cashRow(cashInHand)}
                   </tbody>
                 </table>
               </div>
@@ -787,11 +1016,26 @@ function stampDialog(iso?: string) {
   return `${pad(d.getDate())}-${MONTHS[d.getMonth()]}-${d.getFullYear()} ${pad(h)}:${pad(d.getMinutes())} ${ap}`;
 }
 
+const REPORT_PAY_MODES = ["CASH", "BANK TRANSFER", "PREPAID CARD"] as const;
+
+function amountText(value: string) {
+  const clean = value.replace(/[^\d.]/g, "");
+  const dot = clean.indexOf(".");
+  if (dot < 0) return clean;
+  return clean.slice(0, dot + 1) + clean.slice(dot + 1).replace(/\./g, "");
+}
+
+function cardBalanceMessage(e: unknown) {
+  if (e instanceof ApiError && e.details && typeof e.details === "object" && e.details !== null && "available" in e.details) {
+    const available = Number((e.details as { available: number }).available) || 0;
+    return `Insufficient amount  Card balance : ${rupees(available)}`;
+  }
+  return e instanceof Error ? e.message : "Update failed";
+}
+
 function SettlementUpdateDialog({
   paymentId,
   outlet,
-  bills,
-  onSwitch,
   onClose,
   onChanged,
 }: {
@@ -805,51 +1049,149 @@ function SettlementUpdateDialog({
   const [row, setRow] = useState<any>(null);
   const [mode, setMode] = useState("CASH");
   const [amount, setAmount] = useState("");
-  const [account, setAccount] = useState("Cash.");
+  const [bankName, setBankName] = useState(BANK_ACCOUNTS[0]);
+  const [payCard, setPayCard] = useState("");
+  const [payBal, setPayBal] = useState("");
   const [remark, setRemark] = useState("");
-  const [err, setErr] = useState("");
+  const [warn, setWarn] = useState("");
   const [askDelete, setAskDelete] = useState(false);
+  const warnBack = useRef<"amount" | "mode" | "bank" | "card" | "save" | "remark">("amount");
   const amtRef = useRef<HTMLInputElement>(null);
   const remarkRef = useRef<HTMLInputElement>(null);
-  const billRef = useRef<HTMLSelectElement>(null);
+  const modeRef = useRef<HTMLInputElement>(null);
+  const bankRef = useRef<HTMLInputElement>(null);
+  const payCardRef = useRef<HTMLInputElement>(null);
   const updateRef = useRef<HTMLButtonElement>(null);
+  const modeValueRef = useRef("CASH");
+  const bankValueRef = useRef(BANK_ACCOUNTS[0]);
   const close = useRef(onClose);
-  const saveRef = useRef<() => void>(() => {});
   close.current = onClose;
+
+  function focusField(where: "amount" | "mode" | "bank" | "card" | "save" | "remark") {
+    if (where === "amount") {
+      amtRef.current?.focus();
+      amtRef.current?.select();
+    } else if (where === "mode") modeRef.current?.focus();
+    else if (where === "bank") bankRef.current?.focus();
+    else if (where === "card") {
+      payCardRef.current?.focus();
+      payCardRef.current?.select();
+    } else if (where === "remark") {
+      remarkRef.current?.focus();
+      remarkRef.current?.select();
+    } else updateRef.current?.focus();
+  }
+
+  function showWarn(message: string, back: "amount" | "mode" | "bank" | "card" | "save" | "remark") {
+    warnBack.current = back;
+    setWarn(message);
+  }
+
+  function chooseMode(next: string) {
+    modeValueRef.current = next;
+    setMode(next);
+    if (next === "BANK TRANSFER" && !BANK_ACCOUNTS.includes(bankValueRef.current)) {
+      bankValueRef.current = BANK_ACCOUNTS[0];
+      setBankName(BANK_ACCOUNTS[0]);
+    }
+    if (next !== "PREPAID CARD") setPayBal("");
+  }
+
+  function stepMode(dir: 1 | -1) {
+    const i = REPORT_PAY_MODES.indexOf(modeValueRef.current as (typeof REPORT_PAY_MODES)[number]);
+    const next = REPORT_PAY_MODES[Math.max(0, Math.min(REPORT_PAY_MODES.length - 1, (i < 0 ? 0 : i) + dir))];
+    if (next) chooseMode(next);
+  }
+
+  function stepBank(dir: 1 | -1) {
+    const i = Math.max(0, BANK_ACCOUNTS.indexOf(bankValueRef.current));
+    const next = BANK_ACCOUNTS[Math.max(0, Math.min(BANK_ACCOUNTS.length - 1, i + dir))];
+    if (!next || next === bankValueRef.current) return;
+    bankValueRef.current = next;
+    setBankName(next);
+  }
+
+  function afterMode() {
+    const current = modeValueRef.current;
+    if (current === "BANK TRANSFER") window.setTimeout(() => bankRef.current?.focus(), 0);
+    else if (current === "PREPAID CARD") window.setTimeout(() => { payCardRef.current?.focus(); payCardRef.current?.select(); }, 0);
+    else window.setTimeout(() => updateRef.current?.focus(), 0);
+  }
+
+  function applyRow(next: any) {
+    const label = modeLabel(next.method);
+    const bank = label === "BANK TRANSFER" && BANK_ACCOUNTS.includes(next.account) ? next.account : BANK_ACCOUNTS[0];
+    modeValueRef.current = label;
+    bankValueRef.current = bank;
+    setRow(next);
+    setMode(label);
+    setAmount(rupees(next.amount));
+    setBankName(bank);
+    setPayCard(String(next.card_number || ""));
+    setPayBal("");
+    setRemark(next.remark || "");
+  }
 
   useEffect(() => {
     let gone = false;
     api.get<any>(`/api/reports/settlement/${paymentId}`).then((next) => {
       if (gone) return;
-      setRow(next);
-      const label = modeLabel(next.method);
-      setMode(label);
-      setAmount(rupees(next.amount));
-      setAccount(label === "CASH" ? (next.account || "Cash.") : label === "BANK TRANSFER" ? (next.account || "Bank payment") : "Prepaid Card");
-      setRemark(next.remark || "");
-      setErr("");
-      if (document.activeElement instanceof HTMLSelectElement) return;
+      applyRow(next);
+      setWarn("");
       setTimeout(() => { amtRef.current?.focus(); amtRef.current?.select(); }, 0);
-    }).catch((e) => { if (!gone) setErr(e.message); });
+    }).catch((e) => { if (!gone) showWarn(e.message, "amount"); });
     return () => { gone = true; };
   }, [paymentId]);
 
-  async function save() {
-    setErr("");
-    let paise = 0;
-    try { paise = parseRupeesInput(amount || "0"); } catch { setErr("Enter settle amount"); return; }
-    if (paise <= 0) { setErr("Enter settle amount"); return; }
-    if (!remark.trim()) { setErr("Enter Remark"); return; }
+  async function cardCovers(paise: number) {
+    const q = payCard.trim();
+    if (!q) { showWarn("Enter Card No", "card"); return false; }
     try {
-      const next = await api.put<any>(`/api/reports/settlement/${paymentId}`, { method: mode, amount: paise, account, remark });
-      setRow(next);
-      setAmount(rupees(next.amount));
-      onChanged();
+      const found = await api.get<Array<{ id: string }>>(`/api/cards?q=${encodeURIComponent(q)}`);
+      if (!found[0]?.id) { showWarn("Card not found", "card"); return false; }
+      const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(q)}`);
+      const usable = Number(b.balances?.usable ?? 0);
+      setPayBal(rupees(usable));
+      const originalPrepaid = row?.method === "MEMBER_CARD";
+      const need = originalPrepaid ? Math.max(0, paise - Number(row?.amount || 0)) : paise;
+      if (usable < need) {
+        showWarn(`Insufficient amount  Card balance : ${rupees(usable)}`, "amount");
+        return false;
+      }
+      return true;
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Update failed");
+      showWarn(cardBalanceMessage(e), "card");
+      return false;
     }
   }
-  saveRef.current = () => void save();
+
+  async function save() {
+    if (warn || askDelete) return;
+    let paise = 0;
+    try { paise = parseRupeesInput(amount || "0"); } catch { showWarn("Enter settle amount", "amount"); return; }
+    if (paise <= 0) { showWarn("Enter settle amount", "amount"); return; }
+    const dueCap = Number(row?.bill_amount || 0) - (Number(row?.paid || 0) - Number(row?.amount || 0));
+    if (paise > dueCap) paise = dueCap;
+    if (mode === "BANK TRANSFER" && !bankName) { showWarn("Select bank name", "bank"); return; }
+    if (mode === "PREPAID CARD" && !(await cardCovers(paise))) return;
+    if (!remark.trim()) { showWarn("Enter Remark", "remark"); return; }
+    const account = mode === "BANK TRANSFER" ? bankName : mode === "CASH" ? "Cash." : "Prepaid Card";
+    try {
+      const next = await api.put<any>(`/api/reports/settlement/${paymentId}`, { method: mode, amount: paise, account, remark });
+      applyRow(next);
+      onChanged();
+      setTimeout(() => { amtRef.current?.focus(); amtRef.current?.select(); }, 0);
+    } catch (e) {
+      showWarn(cardBalanceMessage(e), mode === "PREPAID CARD" ? "amount" : "save");
+    }
+  }
+
+  async function acceptCard() {
+    let paise = 0;
+    try { paise = parseRupeesInput(amount || "0"); } catch { showWarn("Enter settle amount", "amount"); return; }
+    if (paise <= 0) { showWarn("Enter settle amount", "amount"); return; }
+    if (await cardCovers(paise)) window.setTimeout(() => updateRef.current?.focus(), 0);
+  }
 
   async function remove() {
     setAskDelete(false);
@@ -858,120 +1200,172 @@ function SettlementUpdateDialog({
       onChanged();
       onClose();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Delete failed");
+      showWarn(e instanceof Error ? e.message : "Delete failed", "save");
     }
   }
 
   useEffect(() => {
-    function fieldOrder() {
-      const root = document.querySelector(".su-dlg .su-grid");
-      const fields = root ? [...root.querySelectorAll("input, select")] as HTMLElement[] : [];
-      return updateRef.current ? [...fields, updateRef.current] : fields;
-    }
-    function focusField(el: HTMLElement | undefined) {
-      if (!el) return;
-      el.focus();
-      if (el instanceof HTMLInputElement) el.select();
-      if (el instanceof HTMLSelectElement) {
-        try { el.showPicker(); } catch { /* already open, or this browser will not open it */ }
-      }
-    }
-    function keys(e: KeyboardEvent) {
-      if (document.querySelector(".confirm-dlg")) return;
-      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close.current(); return; }
-      if (e.key === "F2") { e.preventDefault(); e.stopPropagation(); saveRef.current(); return; }
-      if (e.key === "F4") { e.preventDefault(); e.stopPropagation(); setAskDelete(true); return; }
-      if (e.key === "ArrowUp" || e.key === "ArrowDown" || e.key === "ArrowLeft" || e.key === "ArrowRight") return;
-      if (e.key !== "Enter") return;
+    function keys(e: globalThis.KeyboardEvent) {
+      if (warn || askDelete || document.querySelector(".confirm-dlg, .alert-dlg")) return;
+      if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); close.current(); return; }
+      if (e.key === "F2") { e.preventDefault(); e.stopImmediatePropagation(); void save(); return; }
+      if (e.key === "F4") { e.preventDefault(); e.stopImmediatePropagation(); setAskDelete(true); return; }
       const active = document.activeElement;
-      const order = fieldOrder();
-      if (!order.length) return;
-      const cur = order.indexOf(active as HTMLElement);
-      if (e.key === "Enter" && updateRef.current && active === updateRef.current) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        const dir = e.key === "ArrowDown" ? 1 : -1;
+        if (active === modeRef.current) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          stepMode(dir);
+        } else if (active === bankRef.current) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          stepBank(dir);
+        }
+        return;
+      }
+      if (e.key !== "Enter") return;
+      if (active === amtRef.current) {
         e.preventDefault();
-        e.stopPropagation();
-        saveRef.current();
-        return;
+        e.stopImmediatePropagation();
+        modeRef.current?.focus();
+      } else if (active === modeRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        afterMode();
+      } else if (active === bankRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        updateRef.current?.focus();
+      } else if (active === payCardRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        void acceptCard();
+      } else if (active === updateRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        void save();
       }
-      if (e.key === "Enter" && active instanceof HTMLSelectElement) {
-        const el = order[Math.min(order.length - 1, (cur < 0 ? 0 : cur) + 1)];
-        setTimeout(() => focusField(el), 0);
-        return;
-      }
-      e.preventDefault();
-      e.stopPropagation();
-      const at = cur < 0 ? 0 : cur;
-      focusField(order[Math.min(order.length - 1, at + 1)]);
     }
     window.addEventListener("keydown", keys, true);
     return () => window.removeEventListener("keydown", keys, true);
-  }, []);
+  });
 
-  const accounts = mode === "BANK TRANSFER" ? BANK_ACCOUNTS : mode === "PREPAID CARD" ? ["Prepaid Card"] : ["Cash."];
   const entered = (() => { try { return parseRupeesInput(amount || "0"); } catch { return Number(row?.amount) || 0; } })();
   const balance = Math.max(0, Number(row?.bill_amount || 0) - (Number(row?.paid || 0) - Number(row?.amount || 0) + entered));
 
   return (
-    <div className="su-dlg">
+    <div className="dialog settle-dlg su-dlg">
       <div className="dialog-cap">
         <span className="cap-dot" />
         Restaurant Settlement - {outlet}
         <CapBtns onClose={onClose} />
       </div>
-      <div className="su-body">
-        <div className="su-grid">
-          <div className="su-row"><span>Bill No. :</span>
-            <span className="su-bill">
-              <select ref={billRef} className="win" value={paymentId} onChange={(e) => onSwitch(e.target.value)}>
-                {bills.map((b) => <option key={b.payment_id} value={b.payment_id}>{b.bill_no}</option>)}
-              </select>
-              <button type="button" className="su-more" tabIndex={-1} onClick={() => billRef.current?.focus()}>▾</button>
-            </span>
-          </div>
-          <div className="su-row"><span>Date :</span><input className="win" readOnly value={stampDialog(row?.voucher_date)} /></div>
-          <div className="su-row"><span>Guest Name :</span><input className="win" readOnly value={row?.guest || ""} /></div>
-          <div className="su-row"><span>Table No :</span><input className="win" readOnly value={row?.table_no || ""} /></div>
-          <div className="su-row"><span>Voucher/Receipt :</span><input className="win" readOnly value={row?.receipt_no ?? ""} /></div>
-          <div className="su-row"><span>Bill Amount :</span><input className="win" readOnly value={rupees(row?.bill_amount)} /></div>
-          <div className="su-row"><span>Allowance :</span><input className="win" readOnly value={rupees(row?.allowance)} /></div>
-          <div className="su-row"><span>Payment Mode :</span>
-            <select className="win" value={mode} onChange={(e) => {
-              const next = e.target.value;
-              setMode(next);
-              setAccount(next === "CASH" ? "Cash." : next === "PREPAID CARD" ? "Prepaid Card" : (BANK_ACCOUNTS.includes(account) ? account : "Bank payment"));
-            }}>
-              <option>CASH</option>
-              <option>BANK TRANSFER</option>
-              <option>PREPAID CARD</option>
-            </select>
-          </div>
-          <div className="su-row"><span>Settled Amount :</span>
-            <input ref={amtRef} className="win green" data-num="dec" value={amount} onChange={(e) => setAmount(e.target.value)} onFocus={(e) => e.target.select()} />
-          </div>
-          <div className="su-row"><span>Cash Account :</span>
-            <select className="win" value={accounts.includes(account) ? account : accounts[0]} onChange={(e) => setAccount(e.target.value)}>
-              {accounts.map((a) => <option key={a}>{a}</option>)}
-            </select>
-          </div>
-          <div className="su-row"><span>Balance Amount :</span><input className="win" readOnly value={rupees(balance)} /></div>
-          <div />
-          <div className="su-row"><span>Remark :</span><input ref={remarkRef} className="win" value={remark} onChange={(e) => setRemark(e.target.value)} /></div>
-        </div>
-        {err && <AlertBox message={err} onClose={() => { setErr(""); if (!remarkRef.current?.value.trim()) remarkRef.current?.focus(); }} />}
-        <div className="su-foot">
-          <span className="su-vno">Voucher No : {row?.voucher_no ?? ""}</span>
-          <button type="button" className="fn" onClick={() => {
+      <div className="settle-body">
+        <table className="st-form">
+          <colgroup>
+            <col className="l" /><col /><col className="l" /><col />
+          </colgroup>
+          <tbody>
+            <tr>
+              <td className="lbl">Bill No. :</td>
+              <td><input className="win" readOnly tabIndex={-1} value={row?.bill_no ?? ""} /></td>
+              <td className="lbl">Date :</td>
+              <td><input className="win" readOnly tabIndex={-1} value={stampDialog(row?.voucher_date)} /></td>
+            </tr>
+            <tr>
+              <td className="lbl">Guest Name :</td>
+              <td><input className="win" readOnly tabIndex={-1} value={row?.guest || ""} /></td>
+              <td className="lbl">Table No :</td>
+              <td><input className="win" readOnly tabIndex={-1} value={row?.table_no || ""} /></td>
+            </tr>
+            <tr>
+              <td className="lbl">Voucher/Receipt :</td>
+              <td><input className="win" readOnly tabIndex={-1} value={row?.receipt_no ?? ""} /></td>
+              <td className="lbl">Bill Amount :</td>
+              <td><input className="win num" readOnly tabIndex={-1} value={rupees(row?.bill_amount)} /></td>
+            </tr>
+            <tr>
+              <td className="lbl">Allowance :</td>
+              <td><input className="win num" readOnly tabIndex={-1} value={rupees(row?.allowance)} /></td>
+              <td className="lbl">Payment Mode :</td>
+              <td>
+                <span className="st-drop">
+                  <input ref={modeRef} className="win" readOnly tabIndex={2} data-cycle="1" value={mode} />
+                  <span className="st-drop-btn" aria-hidden="true" />
+                </span>
+              </td>
+            </tr>
+            {mode === "BANK TRANSFER" && (
+              <tr>
+                <td /><td />
+                <td className="lbl">Bank Name :</td>
+                <td>
+                  <span className="st-drop">
+                    <input ref={bankRef} className="win" readOnly tabIndex={3} data-cycle="1" value={bankName} />
+                    <span className="st-drop-btn" aria-hidden="true" />
+                  </span>
+                </td>
+              </tr>
+            )}
+            {mode === "PREPAID CARD" && (
+              <tr>
+                <td /><td />
+                <td className="lbl">Card No. :</td>
+                <td>
+                  <span className="st-card">
+                    <input ref={payCardRef} className="win green" tabIndex={3} value={payCard} onChange={(e) => setPayCard(e.target.value)} />
+                    {payBal ? <span className="st-bal">{payBal}</span> : null}
+                  </span>
+                </td>
+              </tr>
+            )}
+            <tr>
+              <td className="lbl">Settled Amount :</td>
+              <td>
+                <input
+                  ref={amtRef}
+                  className="win green num"
+                  data-num="dec"
+                  tabIndex={1}
+                  value={amount}
+                  onChange={(e) => setAmount(amountText(e.target.value))}
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+              </td>
+              <td className="lbl">Balance Amount :</td>
+              <td><input className="win num" readOnly tabIndex={-1} value={rupees(balance)} /></td>
+            </tr>
+            <tr>
+              <td className="lbl">Remark :</td>
+              <td colSpan={3}><input ref={remarkRef} className="win" tabIndex={-1} value={remark} onChange={(e) => setRemark(e.target.value)} /></td>
+            </tr>
+          </tbody>
+        </table>
+        <div className="st-foot">
+          <span className="st-vno">Voucher No : {row?.voucher_no ?? ""}</span>
+          <button type="button" className="fn" tabIndex={-1} onClick={() => {
             if (!row?.invoice_id) return;
             void api.post(`/api/invoices/${row.invoice_id}/print`).then(async (res) => {
               const { handleBillPrintResponse } = await import("./printBillHtml");
               await handleBillPrintResponse(res as any);
             }).catch(() => null);
           }}>Print</button>
-          <button ref={updateRef} type="button" className="fn su-update" onClick={() => void save()}>Update (F2)</button>
-          <button type="button" className="fn" onClick={() => setAskDelete(true)}>Delete (F4)</button>
-          <button type="button" className="fn" onClick={onClose}>Exit</button>
+          <button ref={updateRef} type="button" className="fn" tabIndex={4} onClick={() => void save()}>Update (F2)</button>
+          <button type="button" className="fn" tabIndex={-1} onClick={() => setAskDelete(true)}>Delete (F4)</button>
+          <button type="button" className="fn" tabIndex={-1} onClick={onClose}>Exit</button>
         </div>
       </div>
+      {warn && (
+        <AlertBox
+          message={warn}
+          onClose={() => {
+            const back = warnBack.current;
+            setWarn("");
+            window.setTimeout(() => focusField(back), 0);
+          }}
+        />
+      )}
       {askDelete && (
         <ConfirmAsk message="Delete this settlement?" onYes={() => void remove()} onNo={() => setAskDelete(false)} />
       )}

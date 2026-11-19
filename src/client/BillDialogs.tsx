@@ -1142,8 +1142,8 @@ export function SettleDialog({
   const warnBack = useRef<"amount" | "mode" | "bank" | "card" | "save">("amount");
   const amtRef = useRef<HTMLInputElement>(null);
   const payCardRef = useRef<HTMLInputElement>(null);
-  const bankRef = useRef<HTMLSelectElement>(null);
-  const modeRef = useRef<HTMLSelectElement>(null);
+  const bankRef = useRef<HTMLInputElement>(null);
+  const modeRef = useRef<HTMLInputElement>(null);
   const saveBtnRef = useRef<HTMLButtonElement>(null);
   const methodRef = useRef<PaymentMode>("CASH");
   const bankValueRef = useRef(BANK_NAMES[0]);
@@ -1214,9 +1214,45 @@ export function SettleDialog({
   useEffect(() => {
     function keys(e: KeyboardEvent) {
       if (warn) return;
-      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); }
-      if (e.key === "F2") { e.preventDefault(); e.stopPropagation(); void save(); }
-      if (e.key === "F4") { e.preventDefault(); e.stopPropagation(); onClose(); }
+      if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); onClose(); return; }
+      if (e.key === "F2") { e.preventDefault(); e.stopImmediatePropagation(); void save(); return; }
+      if (e.key === "F4") { e.preventDefault(); e.stopImmediatePropagation(); onClose(); return; }
+      const active = document.activeElement;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        const dir = e.key === "ArrowDown" ? 1 : -1;
+        if (active === modeRef.current) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          stepMode(dir);
+        } else if (active === bankRef.current) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          stepBank(dir);
+        }
+        return;
+      }
+      if (e.key !== "Enter") return;
+      if (active === amtRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        modeRef.current?.focus();
+      } else if (active === modeRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        afterMode();
+      } else if (active === bankRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        saveBtnRef.current?.focus();
+      } else if (active === payCardRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        void acceptCard();
+      } else if (active === saveBtnRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        void save();
+      }
     }
     window.addEventListener("keydown", keys, true);
     return () => window.removeEventListener("keydown", keys, true);
@@ -1354,28 +1390,17 @@ export function SettleDialog({
               <td><input className="win num" readOnly tabIndex={-1} value={rupee(inv?.discount ?? 0)} /></td>
               <td className="lbl">Payment Mode :</td>
               <td>
-                <select
-                  ref={modeRef}
-                  className="win"
-                  tabIndex={2}
-                  data-cycle="1"
-                  value={method}
-                  onChange={(e) => chooseMode(e.target.value as PaymentMode)}
-                  onKeyDown={(e) => {
-                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      stepMode(e.key === "ArrowDown" ? 1 : -1);
-                      return;
-                    }
-                    if (e.key !== "Enter") return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    afterMode();
-                  }}
-                >
-                  {PAY_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-                </select>
+                <span className="st-drop">
+                  <input
+                    ref={modeRef}
+                    className="win"
+                    readOnly
+                    tabIndex={2}
+                    data-cycle="1"
+                    value={PAY_MODES.find((m) => m.id === method)?.label ?? "CASH"}
+                  />
+                  <span className="st-drop-btn" aria-hidden="true" />
+                </span>
               </td>
             </tr>
             {method === "CARD" && (
@@ -1383,28 +1408,17 @@ export function SettleDialog({
                 <td /><td />
                 <td className="lbl">Bank Name :</td>
                 <td>
-                  <select
-                    ref={bankRef}
-                    className="win"
-                    tabIndex={3}
-                    data-cycle="1"
-                    value={bankName}
-                    onChange={(e) => { bankValueRef.current = e.target.value; setBankName(e.target.value); }}
-                    onKeyDown={(e) => {
-                      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        stepBank(e.key === "ArrowDown" ? 1 : -1);
-                        return;
-                      }
-                      if (e.key !== "Enter") return;
-                      e.preventDefault();
-                      e.stopPropagation();
-                      saveBtnRef.current?.focus();
-                    }}
-                  >
-                    {BANK_NAMES.map((b) => <option key={b} value={b}>{b}</option>)}
-                  </select>
+                  <span className="st-drop">
+                    <input
+                      ref={bankRef}
+                      className="win"
+                      readOnly
+                      tabIndex={3}
+                      data-cycle="1"
+                      value={bankName}
+                    />
+                    <span className="st-drop-btn" aria-hidden="true" />
+                  </span>
                 </td>
               </tr>
             )}
@@ -1420,12 +1434,6 @@ export function SettleDialog({
                       tabIndex={3}
                       value={payCard}
                       onChange={(e) => setPayCard(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key !== "Enter") return;
-                        e.preventDefault();
-                        e.stopPropagation();
-                        void acceptCard();
-                      }}
                     />
                     {payBal ? <span className="st-bal">{payBal}</span> : null}
                   </span>
@@ -1443,12 +1451,6 @@ export function SettleDialog({
                   value={amount}
                   onChange={(e) => setAmount(numText(e.target.value))}
                   onFocus={(e) => e.currentTarget.select()}
-                  onKeyDown={(e) => {
-                    if (e.key !== "Enter") return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    modeRef.current?.focus();
-                  }}
                 />
               </td>
               <td className="lbl">Balance Amount :</td>

@@ -619,7 +619,7 @@ function settlementRow(ctx: AppContext, paymentId: string) {
     .prepare(
       `SELECT p.id AS payment_id, p.receipt_no, p.voucher_no, COALESCE(p.remark, '') AS remark,
               p.method, p.amount, COALESCE(p.reference, '') AS account, p.created_at AS voucher_date,
-              p.member_card_id, p.ledger_id,
+              p.member_card_id, p.ledger_id, mc.card_number AS card_number,
               i.id AS invoice_id, i.invoice_number AS bill_no, i.grand_total AS bill_amount,
               i.discount AS allowance, i.status, i.order_id,
               COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
@@ -630,6 +630,7 @@ function settlementRow(ctx: AppContext, paymentId: string) {
        JOIN invoices i ON i.id = p.invoice_id
        JOIN dining_tables t ON t.id = i.table_id
        LEFT JOIN customers cu ON cu.id = i.customer_id
+       LEFT JOIN member_cards mc ON mc.id = p.member_card_id
        WHERE p.id = ?`,
     )
     .get(paymentId) as Record<string, unknown> | undefined;

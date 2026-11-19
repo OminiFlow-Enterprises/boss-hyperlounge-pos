@@ -1574,7 +1574,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   const tableEstimate = (table?.net_total ?? table?.running_total ?? 0)
     || servedItems.reduce((s, i) => s + i.qty * i.unit_price, 0)
     || grand;
-  const showTableItems = Boolean(tableId) && table?.status !== "PAYMENT_PENDING";
+  const showTableItems = Boolean(tableId);
 
   return (
     <div className="billing">
@@ -1886,7 +1886,14 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                         else void openBillForTable(t);
                       }}
                     >
-                      <td>{t.code}</td>
+                      <td
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void ensureOpenByCode(t.code);
+                        }}
+                      >
+                        {t.code}
+                      </td>
                       <td>
                         <button
                           type="button"
