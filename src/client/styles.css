@@ -875,15 +875,30 @@ table.data tbody tr:hover td.cell-on { background: #0078d7; color: #fff; }
 .gst-foot-bar .win { width: 90px; height: 22px; text-align: right; background: #fff; }
 .gst-paper { width: 520px; margin: 16px auto; align-self: flex-start; }
 .gst-summery-slip {
-  width: 460px;
+  width: 1120px;
   flex: none;
   align-self: center;
   min-height: 0;
   height: auto;
-  padding: 20px 28px 36px;
+  padding: 20px 36px 36px 28px;
   margin-bottom: 24px;
   font-family: "Times New Roman", Times, serif;
   overflow: visible;
+}
+.gst-sum-pair {
+  display: flex;
+  align-items: flex-start;
+  gap: 2in;
+  margin-top: 8px;
+}
+.gst-sum-left { flex: 1 1 440px; min-width: 400px; }
+.gst-sum-right {
+  flex: 1 1 360px;
+  min-width: 340px;
+  margin-right: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 2in;
 }
 .gst-summery-slip h1 { font-size: 26px; letter-spacing: 3px; }
 .gst-summery-slip h2 { font-size: 16px; margin: 8px 0 4px; }
@@ -903,7 +918,7 @@ table.data tbody tr:hover td.cell-on { background: #0078d7; color: #fff; }
 .gst-sum { width: 100%; border-collapse: collapse; font-size: 15px; border: 1px solid #000; }
 .gst-sum td, .gst-sum th { padding: 1px 6px; font-weight: 700; border: 1px solid #000; }
 .gst-sum .num { text-align: right; }
-.gst-sum-tax { margin-top: 8px; }
+.gst-sum-tax { margin-top: 0; }
 .gst-sum-tax .gst-sum-head td { border-bottom: 1px solid #000; }
 /* Native Particular / Amount block — dotted rules, not grid cells */
 .gst-sum-mop {
@@ -940,7 +955,7 @@ table.data tbody tr:hover td.cell-on { background: #0078d7; color: #fff; }
 }
 .gst-sum-manual {
   width: 100%;
-  margin-top: 18px;
+  margin: 0;
   border-collapse: collapse;
   border: 1px solid #000;
   font-size: 15px;
@@ -972,26 +987,58 @@ table.data tbody tr:hover td.cell-on { background: #0078d7; color: #fff; }
   pointer-events: none;
 }
 .gst-sum-manual .gst-lbl-in { text-align: left; }
-.gst-sum-manual tr.gst-manual-add td {
-  border-left: 0;
-  border-right: 0;
-  padding: 6px 0 4px;
-  background: #fff;
-}
-.gst-manual-add .fn { min-width: 88px; height: 24px; }
+.gst-manual-plus,
 .gst-manual-del {
-  position: absolute;
-  right: -26px;
-  top: 2px;
   width: 22px;
   height: 20px;
   min-width: 0;
   padding: 0;
+  font-weight: 700;
+}
+.gst-manual-plus { margin-left: 6px; font-size: 14px; }
+.gst-manual-del {
+  position: absolute;
+  right: -26px;
+  top: 2px;
   font-size: 11px;
 }
+.gst-sum-manual tr.gst-manual-reset td {
+  border-left: 0;
+  border-right: 0;
+  padding: 6px 0 2px;
+  background: #fff;
+}
+.gst-manual-reset .fn { min-width: 72px; height: 24px; margin-right: 6px; }
+.gst-tools-off .gst-manual-plus,
+.gst-tools-off .gst-manual-del,
+.gst-tools-off tr.gst-manual-reset { display: none; }
+.gst-tools-off .gst-sum-right { margin-right: 0; }
 @media print {
-  .gst-manual-add,
-  .gst-manual-del { display: none; }
+  .gst-manual-plus,
+  .gst-manual-del,
+  .gst-manual-reset { display: none !important; }
+  body:has(.gst-summery-slip) .caption,
+  body:has(.gst-summery-slip) .menubar,
+  body:has(.gst-summery-slip) .gst-filter,
+  body:has(.gst-summery-slip) .cr-toolbar,
+  body:has(.gst-summery-slip) .cr-status,
+  body:has(.gst-summery-slip) .gst-foot-bar { display: none !important; }
+  body:has(.gst-summery-slip),
+  body:has(.gst-summery-slip) .gst-page,
+  body:has(.gst-summery-slip) .gst-main,
+  body:has(.gst-summery-slip) .gst-summary-view,
+  body:has(.gst-summery-slip) .cr-shell,
+  body:has(.gst-summery-slip) .cr-stage {
+    background: #fff !important;
+    overflow: visible !important;
+    height: auto !important;
+    display: block !important;
+  }
+  body:has(.gst-summery-slip) .gst-summery-slip {
+    box-shadow: none;
+    width: 100%;
+    margin: 0;
+  }
 }
 .gst-summary-view {
   flex: 1;
@@ -1106,7 +1153,8 @@ table.data tr.grp td { background: #ffc0cb; font-weight: 700; }
 .adv-page { flex: 1; display: grid; grid-template-columns: 160px 1fr; grid-template-rows: 1fr auto; background: var(--face); }
 .adv-side { background: #fff; border-right: 1px solid #c0c0c0; }
 .adv-form { padding: 18px 24px; max-width: 520px; display: flex; flex-direction: column; gap: 8px; font-weight: 700; }
-.adv-form label { display: grid; grid-template-columns: 100px 1fr; align-items: center; gap: 8px; }
+.adv-form label { display: grid; grid-template-columns: 110px 1fr; align-items: center; gap: 8px; }
+.adv-form .st-drop { min-width: 0; }
 .adv-top { display: flex; justify-content: space-between; margin-bottom: 8px; }
 .adv-save { height: 40px; margin-top: 18px; }
 .mop-row { display: flex; }
@@ -1290,6 +1338,39 @@ table.data tr.grp td { background: #ffc0cb; font-weight: 700; }
 }
 .st-card { display: flex; align-items: center; gap: 6px; }
 .st-card .win { flex: 1; min-width: 0; width: auto; }
+.st-card .st-drop { flex: 1; min-width: 0; }
+.st-card .st-drop input.win { cursor: text; }
+button.st-drop-btn.card-drop-open {
+  pointer-events: auto;
+  padding: 0;
+  border: none;
+  border-left: 1px solid #adadad;
+  font-size: 0;
+  color: transparent;
+}
+.card-drop {
+  position: fixed;
+  z-index: 90;
+  max-height: 176px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #808080;
+  color: #000;
+  font-weight: 700;
+}
+.card-drop > div {
+  display: flex;
+  height: 22px;
+  line-height: 22px;
+  padding: 0 6px;
+  background: #fff;
+  color: #000;
+  gap: 8px;
+}
+.card-drop > div.on { background: #0078d7; color: #fff; }
+.card-drop .no { width: 72px; flex: none; }
+.card-drop .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-drop .bal { width: 72px; flex: none; text-align: right; }
 .st-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 0 4px 2px; }
 .st-vno { margin-right: auto; white-space: nowrap; }
 .st-foot .fn { width: 96px; min-width: 96px; flex: none; height: 24px; }

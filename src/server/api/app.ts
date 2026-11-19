@@ -122,6 +122,9 @@ export function createApp(options: CreateAppOptions) {
   app.get("/api/cards/balance/check", wrap((req, res) => {
     res.json(cards.checkBalance(req.ctx, String(req.query.q ?? "")));
   }));
+  app.get("/api/cards/recharged-today", wrap((req, res) => {
+    res.json(cards.cardsRechargedToday(req.ctx));
+  }));
   app.get("/api/cards", wrap((req, res) => {
     if (req.query.q) {
       res.json(cards.searchCards(req.ctx, String(req.query.q)));

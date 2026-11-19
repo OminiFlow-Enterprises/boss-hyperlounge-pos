@@ -22,13 +22,21 @@ function inr(paise?: number) {
   return ((paise || 0) / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function CrystalChrome({ children, onExit }: { children: ReactNode; onExit: () => void }) {
+function CrystalChrome({ children, onExit, onExport, toolsVisible, onToggleTools }: {
+  children: ReactNode;
+  onExit: () => void;
+  onExport?: () => void;
+  toolsVisible?: boolean;
+  onToggleTools?: () => void;
+}) {
   return (
     <div className="cr-shell">
       <div className="cr-toolbar">
         <button className="fn" onClick={() => window.print()}>Print</button>
-        <button className="fn">Export</button>
-        <button className="fn">Show</button>
+        {onExport ? <button className="fn" onClick={onExport}>Export</button> : <button className="fn">Export</button>}
+        {onToggleTools
+          ? <button className="fn" onClick={onToggleTools}>{toolsVisible ? "Hide" : "Show"}</button>
+          : <button className="fn">Show</button>}
         <button className="fn" onClick={onExit}>Exit</button>
         <span className="cr-brand">SAP CRYSTAL REPORTS®</span>
       </div>
@@ -208,34 +216,53 @@ const GST_CASH_LINES: Array<{ id: string; label: string }> = [
 ];
 
 type GstExtraLine = { id: string; label: string; amount: string };
+type GstManualSheet = {
+  amounts: Record<string, string>;
+  extras: GstExtraLine[];
+  hidden: string[];
+  saleLines: GstExtraLine[];
+};
+
+/** Hand-typed lines. A day with nothing saved starts at 0.00. */
+const GST_HAND_IDS = ["club_card_return", "incentives", "party_payment"];
+
+function blankHandAmounts(): Record<string, string> {
+  return Object.fromEntries(GST_HAND_IDS.map((id) => [id, "0.00"]));
+}
 
 function gstManualStorageKey(from: string, to: string) {
   return `${from}|${to}`;
 }
 
-function loadGstManual(from: string, to: string): { amounts: Record<string, string>; extras: GstExtraLine[] } {
+function keptLines(rows: GstExtraLine[] | undefined) {
+  return Array.isArray(rows) ? rows.filter((x) => x && typeof x.id === "string") : [];
+}
+
+function loadGstManual(from: string, to: string): GstManualSheet {
+  const empty: GstManualSheet = { amounts: blankHandAmounts(), extras: [], hidden: [], saleLines: [] };
   try {
     const raw = localStorage.getItem("boss-gst-manual");
-    if (!raw) return { amounts: {}, extras: [] };
-    const all = JSON.parse(raw) as Record<string, { amounts?: Record<string, string>; extras?: GstExtraLine[] }>;
+    if (!raw) return empty;
+    const all = JSON.parse(raw) as Record<string, { amounts?: Record<string, string>; extras?: GstExtraLine[]; hidden?: string[]; saleLines?: GstExtraLine[] }>;
     const row = all[gstManualStorageKey(from, to)];
-    const extras = Array.isArray(row?.extras)
-      ? row.extras.filter((x) => x && typeof x.id === "string")
-      : [];
+    if (!row) return empty;
+    const hidden = Array.isArray(row.hidden) ? row.hidden.filter((id) => typeof id === "string") : [];
     return {
-      amounts: row?.amounts && typeof row.amounts === "object" ? row.amounts : {},
-      extras,
+      amounts: { ...blankHandAmounts(), ...(row.amounts && typeof row.amounts === "object" ? row.amounts : {}) },
+      extras: keptLines(row.extras),
+      hidden,
+      saleLines: keptLines(row.saleLines),
     };
   } catch {
-    return { amounts: {}, extras: [] };
+    return empty;
   }
 }
 
-function saveGstManual(from: string, to: string, amounts: Record<string, string>, extras: GstExtraLine[]) {
+function saveGstManual(from: string, to: string, sheet: GstManualSheet) {
   try {
     const raw = localStorage.getItem("boss-gst-manual");
     const all = raw ? JSON.parse(raw) as Record<string, unknown> : {};
-    all[gstManualStorageKey(from, to)] = { amounts, extras };
+    all[gstManualStorageKey(from, to)] = sheet;
     localStorage.setItem("boss-gst-manual", JSON.stringify(all));
   } catch {
     /* private mode or full storage — the slip still shows what was typed */
@@ -271,23 +298,46 @@ function amountTyping(raw: string) {
   return `${whole}.${frac}`;
 }
 
-/** CASH AFTER EXPENSE = CLUB CARD RETURN + INCENTIVES AMOUNT. Blank until either is typed. */
-function cashAfterExpense(amounts: Record<string, string>) {
-  const club = String(amounts.club_card_return ?? "").trim();
-  const incentives = String(amounts.incentives ?? "").trim();
-  if (!club && !incentives) return "";
-  return formatRupees(manualRupees(club) + manualRupees(incentives));
+/** Particular row labelled CASH, in rupees. */
+function cashParticularRupees(particulars: Array<{ label?: string; amount?: number }>) {
+  let paise = 0;
+  for (const p of particulars) {
+    const label = String(p.label || "").toUpperCase().replace(/\s+/g, "");
+    if (label === "CASH") paise += Number(p.amount) || 0;
+  }
+  return paise / 100;
 }
 
-/** Cash in hand = (ENTRY SALE + party payment + system cash sale + added fields) − CASH AFTER EXPENSE. */
-function cashInHandAmount(amounts: Record<string, string>, entrySale: string, extras: Array<{ amount?: string }>) {
+/** CASH AFTER EXPENSE = CASH − (CLUB CARD RETURN + INCENTIVES AMOUNT). Hidden sources count as 0. */
+function cashAfterExpense(cashRupees: number, amounts: Record<string, string>, hidden: string[]) {
+  const club = hidden.includes("club_card_return") ? 0 : manualRupees(amounts.club_card_return);
+  const incentives = hidden.includes("incentives") ? 0 : manualRupees(amounts.incentives);
+  return formatRupees(cashRupees - club - incentives);
+}
+
+/** Cash in hand = (ENTRY SALE + party payment + system cash sale + added fields) − CASH AFTER EXPENSE. Hidden lines count as 0. */
+function cashInHandAmount(
+  entrySale: string,
+  partyPayment: string,
+  systemCash: string,
+  expense: string,
+  extras: Array<{ amount?: string }>,
+  hidden: string[],
+) {
+  const off = (id: string) => hidden.includes(id);
   const added = extras.reduce((sum, line) => sum + manualRupees(line.amount), 0);
   const total = manualRupees(entrySale)
-    + manualRupees(amounts.party_payment)
-    + manualRupees(amounts.system_cash)
+    + (off("party_payment") ? 0 : manualRupees(partyPayment))
+    + (off("system_cash") ? 0 : manualRupees(systemCash))
     + added
-    - manualRupees(amounts.expense);
+    - (off("expense") ? 0 : manualRupees(expense));
   return formatRupees(total);
+}
+
+/** Total Sale = System Sale + every added row. */
+function totalSaleAmount(systemSale: string, lines: GstExtraLine[]) {
+  const added = lines.reduce((sum, line) => sum + manualRupees(line.amount), 0);
+  return formatRupees(manualRupees(systemSale) + added);
 }
 
 /** ENTRY SALE is the Advance :CASH total already on the slip. */
@@ -318,8 +368,11 @@ export function GstReport({ onExit }: { onExit: () => void }) {
   const [view, setView] = useState<"empty" | "bills" | "summary">("empty");
   const [data, setData] = useState<any>({ rows: [], totals: {}, footer: {} });
   const [summary, setSummary] = useState<any>(null);
-  const [cashAmounts, setCashAmounts] = useState<Record<string, string>>({});
+  const [cashAmounts, setCashAmounts] = useState<Record<string, string>>(blankHandAmounts);
   const [extraLines, setExtraLines] = useState<GstExtraLine[]>([]);
+  const [saleLines, setSaleLines] = useState<GstExtraLine[]>([]);
+  const [hiddenLines, setHiddenLines] = useState<string[]>([]);
+  const [editTools, setEditTools] = useState(true);
   const [sel, setSel] = useState(-1);
   const selRef = useRef(-1);
   const gridWrapRef = useRef<HTMLDivElement>(null);
@@ -362,25 +415,32 @@ export function GstReport({ onExit }: { onExit: () => void }) {
     setView("summary");
     // New cash table sits under Particular — bring that bottom of the slip into view
     requestAnimationFrame(() => {
-      const manual = document.querySelector(".gst-sum-manual") as HTMLElement | null;
-      if (manual) manual.scrollIntoView({ block: "end" });
+      const slip = document.querySelector(".gst-summery-slip") as HTMLElement | null;
+      if (slip) slip.scrollIntoView({ block: "start" });
     });
   }
 
   useEffect(() => {
     const loaded = loadGstManual(from, to);
-    const amounts = { ...loaded.amounts };
-    const calc = cashAfterExpense(amounts);
-    if (calc) amounts.expense = calc;
-    setCashAmounts(amounts);
+    setCashAmounts(loaded.amounts);
     setExtraLines(loaded.extras);
+    setSaleLines(loaded.saleLines);
+    setHiddenLines(loaded.hidden);
   }, [from, to]);
+
+  function sheetNow(partial: Partial<GstManualSheet>): GstManualSheet {
+    return {
+      amounts: partial.amounts ?? cashAmounts,
+      extras: partial.extras ?? extraLines,
+      hidden: partial.hidden ?? hiddenLines,
+      saleLines: partial.saleLines ?? saleLines,
+    };
+  }
 
   function putCashAmount(id: string, value: string) {
     setCashAmounts((prev) => {
       const next = { ...prev, [id]: value };
-      if (id === "club_card_return" || id === "incentives") next.expense = cashAfterExpense(next);
-      saveGstManual(from, to, next, extraLines);
+      saveGstManual(from, to, sheetNow({ amounts: next }));
       return next;
     });
   }
@@ -388,7 +448,7 @@ export function GstReport({ onExit }: { onExit: () => void }) {
   function putExtra(id: string, patch: Partial<GstExtraLine>) {
     setExtraLines((prev) => {
       const next = prev.map((line) => (line.id === id ? { ...line, ...patch } : line));
-      saveGstManual(from, to, cashAmounts, next);
+      saveGstManual(from, to, sheetNow({ extras: next }));
       return next;
     });
   }
@@ -397,7 +457,7 @@ export function GstReport({ onExit }: { onExit: () => void }) {
     const id = `x${Date.now().toString(36)}`;
     setExtraLines((prev) => {
       const next = [...prev, { id, label: "", amount: "" }];
-      saveGstManual(from, to, cashAmounts, next);
+      saveGstManual(from, to, sheetNow({ extras: next }));
       return next;
     });
     requestAnimationFrame(() => {
@@ -408,15 +468,80 @@ export function GstReport({ onExit }: { onExit: () => void }) {
   function removeExtraLine(id: string) {
     setExtraLines((prev) => {
       const next = prev.filter((line) => line.id !== id);
-      saveGstManual(from, to, cashAmounts, next);
+      saveGstManual(from, to, sheetNow({ extras: next }));
       return next;
     });
+  }
+
+  function putSaleLine(id: string, patch: Partial<GstExtraLine>) {
+    setSaleLines((prev) => {
+      const next = prev.map((line) => (line.id === id ? { ...line, ...patch } : line));
+      saveGstManual(from, to, sheetNow({ saleLines: next }));
+      return next;
+    });
+  }
+
+  function addSaleLine() {
+    const id = `s${Date.now().toString(36)}`;
+    setSaleLines((prev) => {
+      const next = [...prev, { id, label: "", amount: "" }];
+      saveGstManual(from, to, sheetNow({ saleLines: next }));
+      return next;
+    });
+    requestAnimationFrame(() => {
+      document.getElementById(`gst-sl-${id}`)?.focus();
+    });
+  }
+
+  function removeSaleLine(id: string) {
+    setSaleLines((prev) => {
+      const next = prev.filter((line) => line.id !== id);
+      saveGstManual(from, to, sheetNow({ saleLines: next }));
+      return next;
+    });
+  }
+
+  function hideLine(id: string) {
+    setHiddenLines((prev) => {
+      if (prev.includes(id)) return prev;
+      const hidden = [...prev, id];
+      saveGstManual(from, to, sheetNow({ hidden }));
+      return hidden;
+    });
+  }
+
+  function resetFields() {
+    setHiddenLines([]);
+    saveGstManual(from, to, sheetNow({ hidden: [] }));
+  }
+
+  async function exportPdf() {
+    const name = `GST-Summery-${from}.pdf`;
+    const bridge = window.bossPrint?.exportPdf;
+    if (!bridge) {
+      window.print();
+      return;
+    }
+    const raw = await bridge({ landscape: true });
+    const bytes = raw instanceof Uint8Array
+      ? raw
+      : new Uint8Array(Array.isArray(raw?.data) ? raw.data : []);
+    if (!bytes.byteLength) return;
+    const blob = new Blob([bytes], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   function onManualEnter(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key !== "Enter") return;
     e.preventDefault();
-    const root = e.currentTarget.closest(".gst-sum-manual");
+    const root = e.currentTarget.closest("table");
     if (!root) return;
     const inputs = [...root.querySelectorAll<HTMLInputElement>("input:not([readonly])")];
     const next = inputs[inputs.indexOf(e.currentTarget) + 1];
@@ -466,20 +591,35 @@ export function GstReport({ onExit }: { onExit: () => void }) {
   const s = summary?.summary || {};
   const particulars = summary?.particulars || [];
   const entrySaleAmt = gstSumAmt(advanceCashPaise(particulars));
-  const cashInHandAmt = cashInHandAmount(cashAmounts, entrySaleAmt, extraLines);
+  const expenseShown = cashAfterExpense(cashParticularRupees(particulars), cashAmounts, hiddenLines);
+  const systemSaleAmt = gstSumAmt(s.net_amount);
+  const totalSaleAmt = totalSaleAmount(systemSaleAmt, saleLines);
+  const cashInHandAmt = cashInHandAmount(
+    entrySaleAmt,
+    cashAmounts.party_payment ?? "0.00",
+    expenseShown,
+    expenseShown,
+    extraLines,
+    hiddenLines,
+  );
   const fromLabel = gstSlipDate(from);
-  const cashLines = GST_CASH_LINES.filter((line) => line.id !== "cash_in_hand");
+  const cashLines = GST_CASH_LINES.filter((line) => line.id !== "cash_in_hand" && line.id !== "system_cash" && !hiddenLines.includes(line.id));
+  const systemCash = GST_CASH_LINES.find((line) => line.id === "system_cash")!;
   const cashInHand = GST_CASH_LINES.find((line) => line.id === "cash_in_hand")!;
 
-  function cashRow(line: { id: string; label: string }) {
-    const locked = line.id === "entry_sale" || line.id === "cash_in_hand";
+  function cashRow(line: { id: string; label: string }, withAdd = false) {
+    const locked = line.id === "entry_sale" || line.id === "cash_in_hand" || line.id === "expense" || line.id === "system_cash";
     const shown = line.id === "entry_sale" ? entrySaleAmt
       : line.id === "cash_in_hand" ? cashInHandAmt
-      : (cashAmounts[line.id] ?? "");
+      : line.id === "expense" || line.id === "system_cash" ? expenseShown
+      : (cashAmounts[line.id] ?? "0.00");
     return (
       <tr key={line.id}>
-        <td className="lbl">{line.label}</td>
-        <td>
+        <td className="lbl">
+          {line.label}
+          {withAdd && <button type="button" className="fn gst-manual-plus" onClick={addExtraLine}>+</button>}
+        </td>
+        <td className={locked ? undefined : "amt-cell"}>
           <input
             className="win gst-amt-in"
             inputMode="decimal"
@@ -490,6 +630,7 @@ export function GstReport({ onExit }: { onExit: () => void }) {
             onBlur={locked ? undefined : (e) => putCashAmount(line.id, formatManualAmt(e.target.value))}
             onKeyDown={locked ? undefined : onManualEnter}
           />
+          {!locked && <button type="button" className="fn gst-manual-del" onClick={() => hideLine(line.id)}>X</button>}
         </td>
       </tr>
     );
@@ -548,7 +689,7 @@ export function GstReport({ onExit }: { onExit: () => void }) {
           <button type="button" className="fn" onClick={() => void loadBills()}>Small Printer</button>
           <button type="button" className="fn" onClick={() => void loadBills()}>Refresh</button>
           <button type="button" className="fn" onClick={() => void loadTaxSummary()}>Tax Summery Small Print</button>
-          <button type="button" className="fn" disabled tabIndex={-1}>Export</button>
+          <button type="button" className="fn" onClick={() => void exportPdf()}>Export</button>
           <button type="button" className="fn" disabled tabIndex={-1}>Mail</button>
           <button type="button" className="fn" onClick={onExit}>Close</button>
         </div>
@@ -613,11 +754,18 @@ export function GstReport({ onExit }: { onExit: () => void }) {
         )}
         {view === "summary" && (
           <div className="gst-summary-view">
-            <CrystalChrome onExit={onExit}>
-              <div className="cr-paper gst-paper gst-summery-slip">
+            <CrystalChrome
+              onExit={onExit}
+              onExport={() => void exportPdf()}
+              toolsVisible={editTools}
+              onToggleTools={() => setEditTools((v) => !v)}
+            >
+              <div className={`cr-paper gst-paper gst-summery-slip${editTools ? "" : " gst-tools-off"}`}>
                 <h1>THE BOSS</h1>
                 <h2>GST Summery</h2>
                 <div className="cr-meta">From : {fromLabel} &nbsp;&nbsp; To : {toLabel}</div>
+                <div className="gst-sum-pair">
+                <div className="gst-sum-left">
                 <table className="gst-sum gst-sum-tax">
                   <colgroup>
                     <col className="c-lbl" /><col className="c-base" /><col className="c-gap" /><col className="c-amt" />
@@ -688,12 +836,15 @@ export function GstReport({ onExit }: { onExit: () => void }) {
                     )}
                   </tbody>
                 </table>
+                </div>
+                <div className="gst-sum-right">
                 <table className="gst-sum-manual">
                   <colgroup>
                     <col className="c-lbl" /><col className="c-amt" />
                   </colgroup>
                   <tbody>
-                    {cashLines.map(cashRow)}
+                    {cashLines.map((line) => cashRow(line))}
+                    {!hiddenLines.includes("system_cash") && cashRow(systemCash, true)}
                     {extraLines.map((line) => (
                       <tr key={line.id}>
                         <td className="lbl">
@@ -718,14 +869,63 @@ export function GstReport({ onExit }: { onExit: () => void }) {
                         </td>
                       </tr>
                     ))}
-                    <tr className="gst-manual-add">
+                    {cashRow(cashInHand)}
+                    <tr className="gst-manual-reset">
                       <td colSpan={2}>
-                        <button type="button" className="fn" onClick={addExtraLine}>Add Field</button>
+                        {hiddenLines.includes("system_cash") && <button type="button" className="fn gst-manual-plus" onClick={addExtraLine}>+</button>}
+                        <button type="button" className="fn" onClick={resetFields}>Reset</button>
                       </td>
                     </tr>
-                    {cashRow(cashInHand)}
                   </tbody>
                 </table>
+                <table className="gst-sum-manual gst-sum-sale">
+                  <colgroup>
+                    <col className="c-lbl" /><col className="c-amt" />
+                  </colgroup>
+                  <tbody>
+                    <tr>
+                      <td className="lbl">
+                        System Sale
+                        <button type="button" className="fn gst-manual-plus" onClick={addSaleLine}>+</button>
+                      </td>
+                      <td>
+                        <input className="win gst-amt-in" readOnly tabIndex={-1} value={systemSaleAmt} />
+                      </td>
+                    </tr>
+                    {saleLines.map((line) => (
+                      <tr key={line.id}>
+                        <td className="lbl">
+                          <input
+                            id={`gst-sl-${line.id}`}
+                            className="win gst-lbl-in"
+                            value={line.label}
+                            onChange={(e) => putSaleLine(line.id, { label: e.target.value })}
+                            onKeyDown={onManualEnter}
+                          />
+                        </td>
+                        <td className="amt-cell">
+                          <input
+                            className="win gst-amt-in"
+                            inputMode="decimal"
+                            value={line.amount}
+                            onChange={(e) => putSaleLine(line.id, { amount: amountTyping(e.target.value) })}
+                            onBlur={(e) => putSaleLine(line.id, { amount: formatManualAmt(e.target.value) })}
+                            onKeyDown={onManualEnter}
+                          />
+                          <button type="button" className="fn gst-manual-del" onClick={() => removeSaleLine(line.id)}>X</button>
+                        </td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <td className="lbl">Total Sale</td>
+                      <td>
+                        <input className="win gst-amt-in" readOnly tabIndex={-1} value={totalSaleAmt} />
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                </div>
+                </div>
               </div>
             </CrystalChrome>
             <div className="gst-foot-bar">
@@ -973,6 +1173,7 @@ const SETTLE_ACCOUNTS = [
 ];
 
 const BANK_ACCOUNTS = SETTLE_ACCOUNTS.filter((a) => a !== "Select");
+const ADVANCE_MOPS = ["CASH", "BANK TRANSFER"] as const;
 
 function mopName(method?: string) {
   if (method === "CASH") return "CASH";
@@ -1636,20 +1837,24 @@ export function CardBlock({ onExit }: { onExit: () => void }) {
 }
 
 export function AdvanceBooking({ onExit }: { onExit: () => void }) {
-  const blank = { cardNo: "", advance: "0.00", outlet: "THE BOSS CLUB", mop: "Select" };
+  const blank = { guestName: "", cardNo: "", advance: "0.00", mop: "CASH" };
   const [form, setForm] = useState(blank);
+  const [bankName, setBankName] = useState(BANK_ACCOUNTS[0]);
   const [no, setNo] = useState(430);
   const [msg, setMsg] = useState("");
   const [ok, setOk] = useState(false);
   const [askExit, setAskExit] = useState(false);
+  const guestRef = useRef<HTMLInputElement>(null);
   const cardRef = useRef<HTMLInputElement>(null);
   const advanceRef = useRef<HTMLInputElement>(null);
-  const outletRef = useRef<HTMLSelectElement>(null);
-  const mopRef = useRef<HTMLSelectElement>(null);
+  const mopRef = useRef<HTMLInputElement>(null);
+  const bankRef = useRef<HTMLInputElement>(null);
   const saveRef = useRef<HTMLButtonElement>(null);
+  const mopValueRef = useRef("CASH");
+  const bankValueRef = useRef(BANK_ACCOUNTS[0]);
 
   useEffect(() => {
-    cardRef.current?.focus();
+    guestRef.current?.focus();
     api.get<any[]>("/api/bookings").then((rows) => {
       const max = rows.reduce((m, r) => Math.max(m, r.reservation_no || 0), 429);
       setNo(max + 1);
@@ -1673,6 +1878,10 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
     return Number.isFinite(n) ? n.toFixed(2) : "0.00";
   }
 
+  function checkGuest() {
+    if (!form.guestName.trim()) return fail("Enter Guest Name", guestRef.current, true);
+    return true;
+  }
   function checkCard() {
     if (!/^\d{4}$/.test(form.cardNo)) return fail("Card No must be 4 digits", cardRef.current);
     return true;
@@ -1694,6 +1903,40 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
     };
   }
 
+  function chooseMop(next: string) {
+    mopValueRef.current = next;
+    setForm((f) => ({ ...f, mop: next }));
+    if (next === "BANK TRANSFER" && !BANK_ACCOUNTS.includes(bankValueRef.current)) {
+      bankValueRef.current = BANK_ACCOUNTS[0];
+      setBankName(BANK_ACCOUNTS[0]);
+    }
+  }
+
+  function stepMop(dir: 1 | -1) {
+    const i = ADVANCE_MOPS.indexOf(mopValueRef.current as (typeof ADVANCE_MOPS)[number]);
+    const next = ADVANCE_MOPS[Math.max(0, Math.min(ADVANCE_MOPS.length - 1, (i < 0 ? 0 : i) + dir))];
+    if (next && next !== mopValueRef.current) chooseMop(next);
+  }
+
+  function stepBank(dir: 1 | -1) {
+    const i = Math.max(0, BANK_ACCOUNTS.indexOf(bankValueRef.current));
+    const next = BANK_ACCOUNTS[Math.max(0, Math.min(BANK_ACCOUNTS.length - 1, i + dir))];
+    if (!next || next === bankValueRef.current) return;
+    bankValueRef.current = next;
+    setBankName(next);
+  }
+
+  function afterMop() {
+    if (mopValueRef.current === "BANK TRANSFER") window.setTimeout(() => bankRef.current?.focus(), 0);
+    else window.setTimeout(() => saveRef.current?.focus(), 0);
+  }
+
+  function resetPay() {
+    mopValueRef.current = "CASH";
+    bankValueRef.current = BANK_ACCOUNTS[0];
+    setBankName(BANK_ACCOUNTS[0]);
+  }
+
   function setAdvance(raw: string) {
     let s = raw.replace(/[^\d.]/g, "");
     const first = s.indexOf(".");
@@ -1704,19 +1947,24 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
   }
 
   async function save() {
-    if (!checkCard() || !checkAdvance()) return;
+    if (!checkGuest() || !checkCard() || !checkAdvance()) return;
+    if (mopValueRef.current === "BANK TRANSFER" && !bankValueRef.current) {
+      return fail("Select bank name", bankRef.current);
+    }
+    const mop = mopValueRef.current === "BANK TRANSFER" ? `BANK TRANSFER / ${bankValueRef.current}` : "CASH";
     try {
       const amt = formatAdvance();
       const row = await api.post<any>("/api/bookings", {
+        guestName: form.guestName.trim(),
         cardNo: form.cardNo,
         advance: Math.round(Number(amt) * 100),
-        outlet: form.outlet,
-        mop: form.mop === "Select" ? "" : form.mop,
+        mop,
       });
       setMsg(`Saved reservation ${row.reservation_no}`);
       setNo((row.reservation_no || no) + 1);
+      resetPay();
       setForm(blank);
-      setTimeout(() => cardRef.current?.focus(), 0);
+      setTimeout(() => guestRef.current?.focus(), 0);
     } catch (e) {
       fail(e instanceof Error ? e.message : "Save failed");
     }
@@ -1725,12 +1973,16 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
   function clear() {
     setMsg("");
     setOk(false);
+    resetPay();
     setForm(blank);
-    setTimeout(() => cardRef.current?.focus(), 0);
+    setTimeout(() => guestRef.current?.focus(), 0);
   }
 
   function isDraft() {
-    return form.cardNo.trim() !== "" || (Number(form.advance) > 0 && form.advance !== "0.00");
+    return form.guestName.trim() !== ""
+      || form.cardNo.trim() !== ""
+      || (Number(form.advance) > 0 && form.advance !== "0.00")
+      || form.mop !== "CASH";
   }
 
   function requestExit() {
@@ -1740,8 +1992,30 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
 
   useEffect(() => {
     function keys(e: globalThis.KeyboardEvent) {
-      if (e.key !== "Escape") return;
       if (askExit || document.querySelector(".alert-dlg")) return;
+      const active = document.activeElement;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        const dir = e.key === "ArrowDown" ? 1 : -1;
+        if (active === mopRef.current) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          stepMop(dir);
+        } else if (active === bankRef.current) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          stepBank(dir);
+        }
+        return;
+      }
+      if (e.key === "Enter" && (active === mopRef.current || active === bankRef.current)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setMsg("");
+        if (active === mopRef.current) afterMop();
+        else saveRef.current?.focus();
+        return;
+      }
+      if (e.key !== "Escape") return;
       e.preventDefault();
       e.stopPropagation();
       requestExit();
@@ -1757,15 +2031,14 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
           <span>Reservation No : &nbsp; {no}</span>
           <span>Date : {dmy()} {new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}</span>
         </div>
-        <label>Card No <input ref={cardRef} className="win green" tabIndex={1} autoFocus inputMode="numeric" maxLength={4} value={form.cardNo} onChange={(e) => setForm({ ...form, cardNo: e.target.value.replace(/\D/g, "").slice(0, 4) })} onKeyDown={onEnter(checkCard, () => advanceRef.current?.focus())} /></label>
-        <label>Advance <input ref={advanceRef} className="win" data-num="dec" tabIndex={2} inputMode="decimal" value={form.advance} onChange={(e) => setAdvance(e.target.value)} onFocus={(e) => e.target.select()} onBlur={() => setForm((f) => ({ ...f, advance: formatAdvance(f.advance) }))} onKeyDown={onEnter(() => { const okAmt = checkAdvance(); if (okAmt) setForm((f) => ({ ...f, advance: formatAdvance(f.advance) })); return okAmt; }, () => outletRef.current?.focus())} /></label>
-        <label>Outlet <select ref={outletRef} className="win" tabIndex={3} value={form.outlet} onChange={(e) => setForm({ ...form, outlet: e.target.value })} onKeyDown={onEnter(() => true, () => mopRef.current?.focus())}>
-          <option>THE BOSS CLUB</option><option>BAR</option><option>RESTAURANT</option><option>NC</option>
-        </select></label>
-        <label>MOP <span className="mop-row"><select ref={mopRef} className="win" tabIndex={4} value={form.mop} onChange={(e) => setForm({ ...form, mop: e.target.value })} onKeyDown={onEnter(() => true, () => saveRef.current?.focus())}>
-          <option>Select</option><option>CASH</option><option>UPI</option><option>CARD</option>
-        </select></span></label>
-        <button ref={saveRef} className="fn adv-save" tabIndex={5} onClick={() => void save()} onKeyDown={onEnter(() => true, () => void save())}>Save</button>
+        <label>Guest Name <input ref={guestRef} className="win green" tabIndex={1} autoFocus value={form.guestName} onChange={(e) => setForm({ ...form, guestName: e.target.value })} onKeyDown={onEnter(checkGuest, () => cardRef.current?.focus())} /></label>
+        <label>Card No <input ref={cardRef} className="win green" tabIndex={2} inputMode="numeric" maxLength={4} value={form.cardNo} onChange={(e) => setForm({ ...form, cardNo: e.target.value.replace(/\D/g, "").slice(0, 4) })} onKeyDown={onEnter(checkCard, () => advanceRef.current?.focus())} /></label>
+        <label>Advance <input ref={advanceRef} className="win" data-num="dec" tabIndex={3} inputMode="decimal" value={form.advance} onChange={(e) => setAdvance(e.target.value)} onFocus={(e) => e.target.select()} onBlur={() => setForm((f) => ({ ...f, advance: formatAdvance(f.advance) }))} onKeyDown={onEnter(() => { const okAmt = checkAdvance(); if (okAmt) setForm((f) => ({ ...f, advance: formatAdvance(f.advance) })); return okAmt; }, () => mopRef.current?.focus())} /></label>
+        <label>MOP <span className="st-drop"><input ref={mopRef} className="win" readOnly tabIndex={4} data-cycle="1" value={form.mop} /><span className="st-drop-btn" aria-hidden="true" /></span></label>
+        {form.mop === "BANK TRANSFER" && (
+          <label>Bank Name <span className="st-drop"><input ref={bankRef} className="win" readOnly tabIndex={5} data-cycle="1" value={bankName} /><span className="st-drop-btn" aria-hidden="true" /></span></label>
+        )}
+        <button ref={saveRef} className="fn adv-save" tabIndex={6} onClick={() => void save()} onKeyDown={onEnter(() => true, () => void save())}>Save</button>
         {msg && <p className={ok ? "ok" : "flash"}>{msg}</p>}
       </div>
       <div className="adv-foot">

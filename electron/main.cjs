@@ -378,6 +378,17 @@ ipcMain.handle("pos:window", async (_event, action) => {
   return { ok: false };
 });
 
+ipcMain.handle("pos:export-pdf", async (event, opts) => {
+  const landscape = !opts || opts.landscape !== false;
+  const pdf = await event.sender.printToPDF({
+    printBackground: true,
+    landscape,
+    pageSize: "A4",
+    margins: { marginType: "default" },
+  });
+  return pdf;
+});
+
 ipcMain.handle("pos:print-html", async (_event, { html, deviceName }) => {
   const printer = String(deviceName || "bill");
   const win = new BrowserWindow({

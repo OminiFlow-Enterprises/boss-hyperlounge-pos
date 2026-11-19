@@ -143,9 +143,17 @@ export function expireOvernightBalance(ctx: AppContext, cardId: string, now = ne
 
 function mopToMode(mop?: string): PaymentMode {
   const m = (mop || "").trim().toUpperCase();
-  if (m === "UPI") return "UPI";
-  if (m === "CARD") return "CARD";
+  if (m === "UPI" || m.startsWith("UPI/") || m.startsWith("UPI ")) return "UPI";
+  if (m === "CARD" || m.startsWith("CARD/") || m.startsWith("CARD /") || m.startsWith("BANK TRANSFER")) return "CARD";
   return "CASH";
+}
+
+function bankFromMop(mop?: string) {
+  const raw = (mop || "").trim();
+  const slash = raw.indexOf("/");
+  if (slash < 0) return undefined;
+  const name = raw.slice(slash + 1).trim();
+  return name || undefined;
 }
 
 export function ensureCardAndCreditAdvance(
@@ -178,12 +186,18 @@ export function ensureCardAndCreditAdvance(
       if (!card) throw err;
     }
   }
+  const guest = (input.guestName || "").trim();
+  if (guest && card.customer_id) {
+    ctx.db.prepare("UPDATE customers SET name = ? WHERE id = ?").run(guest, card.customer_id);
+  }
   expireOvernightBalance(ctx, card.id);
   if (input.amount > 0) {
+    const modeText = String(input.paymentMode ?? "CASH");
     rechargeCard(ctx, {
       cardId: card.id,
       amount: input.amount,
-      paymentMode: mopToMode(String(input.paymentMode ?? "CASH")),
+      paymentMode: mopToMode(modeText),
+      referenceNumber: bankFromMop(modeText),
       applyBonus: false,
       printReceipt: false,
       idempotencyKey: input.idempotencyKey ?? idempotencyKey("adv"),
@@ -736,6 +750,39 @@ export function cardLedger(
 export function listCards(ctx: AppContext, status?: string) {
   if (status) return ctx.db.prepare(`${CARD_SELECT} WHERE c.status = ? ORDER BY c.created_at DESC`).all(status);
   return ctx.db.prepare(`${CARD_SELECT} ORDER BY c.created_at DESC`).all();
+}
+
+/** Cards that received a recharge during the current business day (6 AM close). */
+export function cardsRechargedToday(ctx: AppContext) {
+  const start = businessDayStart(new Date(), dayCloseHour(ctx)).toISOString();
+  const rows = ctx.db
+    .prepare(
+      `SELECT c.id, c.card_number, cu.name AS customer_name,
+              SUM(l.paid_amount) AS recharged, MAX(l.created_at) AS recharged_at
+       FROM card_ledger l
+       JOIN member_cards c ON c.id = l.card_id
+       JOIN customers cu ON cu.id = c.customer_id
+       WHERE l.type = 'RECHARGE' AND l.direction = 'CREDIT' AND l.created_at >= ?
+       GROUP BY c.id
+       ORDER BY recharged_at DESC, c.card_number`,
+    )
+    .all(start) as Array<{
+      id: string;
+      card_number: string;
+      customer_name: string;
+      recharged: number;
+      recharged_at: string;
+    }>;
+  return rows.map((row) => {
+    const bal = expireOvernightBalance(ctx, row.id);
+    return {
+      id: row.id,
+      card_number: row.card_number,
+      customer_name: row.customer_name,
+      recharged: row.recharged,
+      usable: bal.usable,
+    };
+  });
 }
 
 export function requireManagerApproval(_actor: Actor, _approverId?: string) {

@@ -18,9 +18,18 @@ function run(command, args, options = {}) {
   });
 }
 
+function electronBin() {
+  if (process.platform === "win32") {
+    return path.join(root, "node_modules/electron/dist/electron.exe");
+  }
+  if (process.platform === "darwin") {
+    return path.join(root, "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron");
+  }
+  return path.join(root, "node_modules/electron/dist/electron");
+}
+
 async function electronAbi() {
-  const bin = path.join(root, "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron");
-  const { stdout } = await exec(bin, ["-p", "process.versions.modules"], {
+  const { stdout } = await exec(electronBin(), ["-p", "process.versions.modules"], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
   });
   return stdout.trim();
@@ -59,7 +68,12 @@ async function zipApp() {
   const unpacked = path.join(root, "release", "win-unpacked");
   const zipPath = path.join(root, "release", `${pkg.build.productName}-${pkg.version}-win.zip`);
   await rm(zipPath, { force: true });
-  await exec("zip", ["-r", "-X", "-q", zipPath, "."], { cwd: unpacked });
+  try {
+    await exec("zip", ["-r", "-X", "-q", zipPath, "."], { cwd: unpacked });
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+    await exec("tar", ["-a", "-c", "-f", zipPath, "."], { cwd: unpacked });
+  }
   console.log(`Wrote ${zipPath}`);
 }
 

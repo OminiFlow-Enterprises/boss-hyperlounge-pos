@@ -3,7 +3,7 @@ import { rupeesToPaise } from "../src/shared/money.js";
 import { openTable, transferTable, mergeTables, getTableByCode, splitTable, createTable, transferItems, listTables } from "../src/server/services/tableService.js";
 import { addItem, createOrder, sendKot, getOrderDetail, reprintKot, setBillLineQty, setBillLineProduct, setBillLinePrice } from "../src/server/services/orderService.js";
 import { generateInvoice, settleInvoice, previewBill } from "../src/server/services/billingService.js";
-import { issueCard, rechargeCard } from "../src/server/services/cardService.js";
+import { issueCard, rechargeCard, checkBalance } from "../src/server/services/cardService.js";
 import { InsufficientBalanceError } from "../src/server/lib/errors.js";
 import { setSetting } from "../src/server/services/settingsService.js";
 import { resolvePrice } from "../src/server/services/pricingService.js";
@@ -101,6 +101,39 @@ describe("tables, KOT and billing", () => {
     expect(() =>
       settleInvoice(cashier, invoice.id, [{ method: "MEMBER_CARD", amount: invoice.grand_total, memberCardId: card.id }]),
     ).toThrow(InsufficientBalanceError);
+  });
+
+  it("takes the card balance when it is less than the bill and the bill amount when the card is larger", () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const cashier = ctx("cashier");
+    setSetting(cashier, "service_charge_pct", "0");
+    const short = issueCard(cashier, {
+      customer: { name: "Short Card", mobile: "9000000711" },
+      cardNumber: "SHORT-1",
+      cardTypeCode: "REGULAR",
+    });
+    rechargeCard(cashier, { cardId: short.id, amount: rupeesToPaise(1000), paymentMode: "CASH", applyBonus: false });
+    const table = getTableByCode(waiter, "07");
+    openTable(waiter, { tableId: table.id });
+    const order = createOrder(waiter, table.id) as { id: string };
+    addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 4 });
+    const invoice = generateInvoice(cashier, order.id) as { id: string; grand_total: number };
+    expect(invoice.grand_total).toBeGreaterThan(rupeesToPaise(1000));
+    const part = settleInvoice(cashier, invoice.id, [{ method: "MEMBER_CARD", amount: rupeesToPaise(1000), memberCardId: short.id }]);
+    expect(part.complete).toBe(false);
+    expect(part.due).toBe(invoice.grand_total - rupeesToPaise(1000));
+    expect(checkBalance(cashier, "SHORT-1").balances.usable).toBe(0);
+
+    const rich = issueCard(cashier, {
+      customer: { name: "Rich Card", mobile: "9000000712" },
+      cardNumber: "RICH-1",
+      cardTypeCode: "REGULAR",
+    });
+    rechargeCard(cashier, { cardId: rich.id, amount: rupeesToPaise(4000), paymentMode: "CASH", applyBonus: false });
+    const rest = settleInvoice(cashier, invoice.id, [{ method: "MEMBER_CARD", amount: rupeesToPaise(1000), memberCardId: rich.id }]);
+    expect(rest.due).toBe(invoice.grand_total - rupeesToPaise(2000));
+    expect(checkBalance(cashier, "RICH-1").balances.usable).toBe(rupeesToPaise(3000));
   });
 
   it("shows the bill net amount on the table estimate", () => {

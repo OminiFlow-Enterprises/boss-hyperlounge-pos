@@ -7,7 +7,7 @@ import type { PaymentMode } from "../shared/types";
 
 type Table = { id: string; code: string; status: string; customer_name?: string; running_total?: number; outlet?: string };
 type BillProduct = { id: string; name: string; sku: string; base_price?: number };
-type Card = { id: string; card_number: string };
+type TodayCard = { id: string; card_number: string; customer_name: string; usable: number; recharged: number };
 
 const PAY_MODES: Array<{ id: PaymentMode; label: string }> = [
   { id: "CASH", label: "CASH" },
@@ -1137,6 +1137,10 @@ export function SettleDialog({
   const [remark, setRemark] = useState("");
   const [payCard, setPayCard] = useState(cardNo);
   const [payBal, setPayBal] = useState("");
+  const [todayCards, setTodayCards] = useState<TodayCard[]>([]);
+  const [cardListOpen, setCardListOpen] = useState(false);
+  const [cardPick, setCardPick] = useState(0);
+  const [cardDrop, setCardDrop] = useState({ top: 0, left: 0, width: 280 });
   const [bankName, setBankName] = useState(BANK_NAMES[0]);
   const [warn, setWarn] = useState("");
   const warnBack = useRef<"amount" | "mode" | "bank" | "card" | "save">("amount");
@@ -1145,9 +1149,26 @@ export function SettleDialog({
   const bankRef = useRef<HTMLInputElement>(null);
   const modeRef = useRef<HTMLInputElement>(null);
   const saveBtnRef = useRef<HTMLButtonElement>(null);
+  const cardDropRef = useRef<HTMLDivElement>(null);
   const methodRef = useRef<PaymentMode>("CASH");
   const bankValueRef = useRef(BANK_NAMES[0]);
   const busy = useRef(false);
+  const cardListOpenRef = useRef(false);
+  const cardPickRef = useRef(0);
+  const cardPickedRef = useRef(false);
+  const skipCardOpenRef = useRef(false);
+  const payCardRefValue = useRef(cardNo);
+  payCardRefValue.current = payCard;
+  cardListOpenRef.current = cardListOpen;
+  cardPickRef.current = cardPick;
+
+  const cardMatches = useMemo(() => {
+    const q = payCard.trim().toLowerCase();
+    if (!q) return todayCards;
+    return todayCards.filter((c) => c.card_number.toLowerCase().startsWith(q));
+  }, [payCard, todayCards]);
+  const cardMatchesRef = useRef(cardMatches);
+  cardMatchesRef.current = cardMatches;
 
   function focusField(where: "amount" | "mode" | "bank" | "card" | "save") {
     if (where === "amount") {
@@ -1193,7 +1214,11 @@ export function SettleDialog({
   function afterMode() {
     const mode = methodRef.current;
     if (mode === "CARD") window.setTimeout(() => bankRef.current?.focus(), 0);
-    else if (mode === "MEMBER_CARD") window.setTimeout(() => { payCardRef.current?.focus(); payCardRef.current?.select(); }, 0);
+    else if (mode === "MEMBER_CARD") window.setTimeout(() => {
+      payCardRef.current?.focus();
+      payCardRef.current?.select();
+      setCardListOpen(true);
+    }, 0);
     else window.setTimeout(() => saveBtnRef.current?.focus(), 0);
   }
 
@@ -1212,15 +1237,93 @@ export function SettleDialog({
   useEffect(() => { load().catch((e) => onMessage(e.message)); }, [invoiceId]);
 
   useEffect(() => {
+    if (method !== "MEMBER_CARD") {
+      setCardListOpen(false);
+      return;
+    }
+    let gone = false;
+    api.get<TodayCard[]>("/api/cards/recharged-today").then((rows) => {
+      if (gone) return;
+      setTodayCards(rows);
+      if (document.activeElement === payCardRef.current) setCardListOpen(true);
+    }).catch(() => { if (!gone) setTodayCards([]); });
+    return () => { gone = true; };
+  }, [method]);
+
+  useLayoutEffect(() => {
+    if (!cardListOpen) return;
+    const el = payCardRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const next = { top: r.bottom, left: r.left, width: Math.max(280, r.width) };
+    setCardDrop((prev) => (prev.top === next.top && prev.left === next.left && prev.width === next.width ? prev : next));
+  }, [cardListOpen, payCard, cardMatches.length]);
+
+  useLayoutEffect(() => {
+    const box = cardDropRef.current;
+    const row = box?.children[cardPick] as HTMLElement | undefined;
+    if (!box || !row) return;
+    if (row.offsetTop < box.scrollTop) box.scrollTop = row.offsetTop;
+    else if (row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight) {
+      box.scrollTop = row.offsetTop + row.offsetHeight - box.clientHeight;
+    }
+  }, [cardPick, cardListOpen, cardMatches.length]);
+
+  function chosenCardNumber() {
+    const typed = payCardRefValue.current.trim();
+    const list = cardMatchesRef.current;
+    const exact = list.find((c) => c.card_number.toLowerCase() === typed.toLowerCase());
+    if (exact) return exact.card_number;
+    if (!typed) {
+      if (cardPickedRef.current && list.length) {
+        return list[Math.min(cardPickRef.current, list.length - 1)]?.card_number ?? "";
+      }
+      return "";
+    }
+    if (cardListOpenRef.current && list.length) {
+      return list[Math.min(Math.max(0, cardPickRef.current), list.length - 1)]?.card_number ?? typed;
+    }
+    return typed;
+  }
+
+  function moveCardPick(dir: 1 | -1) {
+    const list = cardMatchesRef.current;
+    if (!list.length) return;
+    if (!cardListOpenRef.current) {
+      setCardListOpen(true);
+      setCardPick(0);
+      cardPickedRef.current = true;
+      return;
+    }
+    setCardPick((cur) => Math.min(list.length - 1, Math.max(0, cur + dir)));
+    cardPickedRef.current = true;
+  }
+
+  useEffect(() => {
     function keys(e: KeyboardEvent) {
       if (warn) return;
-      if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); onClose(); return; }
+      if (e.key === "Escape") {
+        if (cardListOpenRef.current && document.activeElement === payCardRef.current) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          setCardListOpen(false);
+          return;
+        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        onClose();
+        return;
+      }
       if (e.key === "F2") { e.preventDefault(); e.stopImmediatePropagation(); void save(); return; }
       if (e.key === "F4") { e.preventDefault(); e.stopImmediatePropagation(); onClose(); return; }
       const active = document.activeElement;
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         const dir = e.key === "ArrowDown" ? 1 : -1;
-        if (active === modeRef.current) {
+        if (active === payCardRef.current && cardMatchesRef.current.length) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          moveCardPick(dir);
+        } else if (active === modeRef.current) {
           e.preventDefault();
           e.stopImmediatePropagation();
           stepMode(dir);
@@ -1258,7 +1361,7 @@ export function SettleDialog({
     return () => window.removeEventListener("keydown", keys, true);
   });
 
-  async function save() {
+  async function save(cardOverride?: string) {
     if (busy.current || !snap) return;
     const due = dueOf(snap);
     let paise = 0;
@@ -1269,7 +1372,7 @@ export function SettleDialog({
       showWarn("Select bank name", "bank");
       return;
     }
-    const cardRaw = payCard.trim();
+    const cardRaw = (cardOverride ?? (method === "MEMBER_CARD" ? chosenCardNumber() : payCard)).trim();
     if (method === "MEMBER_CARD" && !cardRaw) {
       showWarn("Enter Card No", "card");
       return;
@@ -1277,33 +1380,38 @@ export function SettleDialog({
     busy.current = true;
     try {
       let memberCardId: string | undefined;
+      let payPaise = paise;
       if (method === "MEMBER_CARD") {
-        const found = await api.get<Card[]>(`/api/cards?q=${encodeURIComponent(cardRaw)}`);
-        memberCardId = found[0]?.id;
-        if (!memberCardId) {
-          showWarn("Card not found", "card");
-          busy.current = false;
-          return;
-        }
         try {
           const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(cardRaw)}`);
+          memberCardId = b.card?.id as string | undefined;
           const usable = Number(b.balances?.usable ?? 0);
+          const number = String(b.card?.card_number || cardRaw);
+          setPayCard(number);
           setPayBal(rupee(usable));
-          if (usable < paise) {
+          if (!memberCardId) {
+            showWarn("Card not found", "card");
+            busy.current = false;
+            return;
+          }
+          if (usable <= 0) {
             showWarn(`Insufficient amount  Card balance : ${rupee(usable)}`, "amount");
             busy.current = false;
             return;
           }
+          payPaise = Math.min(usable, paise);
+          if (payPaise !== paise) setAmount(rupee(payPaise));
         } catch {
           showWarn("Card not found", "card");
           busy.current = false;
           return;
         }
       }
+      setCardListOpen(false);
       const result = await api.post<any>(`/api/invoices/${invoiceId}/pay`, {
         lines: [{
           method,
-          amount: paise,
+          amount: payPaise,
           memberCardId,
           reference: method === "CARD" ? bankName : (remark || undefined),
         }],
@@ -1327,26 +1435,11 @@ export function SettleDialog({
   }
 
   async function acceptCard() {
-    const q = payCard.trim();
-    if (!q) { showWarn("Enter Card No", "card"); return; }
-    let paise = 0;
-    try { paise = parseRupeesInput(amount || "0"); } catch { showWarn("Enter settle amount", "amount"); return; }
-    if (paise <= 0) { showWarn("Enter settle amount", "amount"); return; }
-    const due = dueOf(snap);
-    if (paise > due) paise = due;
-    try {
-      const b = await api.get<any>(`/api/cards/balance/check?q=${encodeURIComponent(q)}`);
-      const usable = Number(b.balances?.usable ?? 0);
-      setPayBal(rupee(usable));
-      if (usable < paise) {
-        showWarn(`Insufficient amount  Card balance : ${rupee(usable)}`, "amount");
-        return;
-      }
-      window.setTimeout(() => saveBtnRef.current?.focus(), 0);
-    } catch {
-      setPayBal("");
-      showWarn("Card not found", "card");
-    }
+    const number = chosenCardNumber();
+    if (!number) { showWarn("Enter Card No", "card"); return; }
+    setCardListOpen(false);
+    if (number !== payCardRefValue.current) setPayCard(number);
+    await save(number);
   }
 
   const inv = snap?.invoice;
@@ -1428,13 +1521,47 @@ export function SettleDialog({
                 <td className="lbl">Card No. :</td>
                 <td>
                   <span className="st-card">
-                    <input
-                      ref={payCardRef}
-                      className="win green"
-                      tabIndex={3}
-                      value={payCard}
-                      onChange={(e) => setPayCard(e.target.value)}
-                    />
+                    <span className="st-drop">
+                      <input
+                        ref={payCardRef}
+                        className="win green"
+                        tabIndex={3}
+                        autoComplete="off"
+                        value={payCard}
+                        onChange={(e) => {
+                          setPayCard(e.target.value);
+                          setCardPick(0);
+                          cardPickedRef.current = false;
+                          setCardListOpen(true);
+                          setPayBal("");
+                        }}
+                        onFocus={() => {
+                          if (skipCardOpenRef.current) {
+                            skipCardOpenRef.current = false;
+                            return;
+                          }
+                          setCardListOpen(true);
+                        }}
+                        onBlur={() => window.setTimeout(() => {
+                          if (document.activeElement === payCardRef.current) return;
+                          setCardListOpen(false);
+                        }, 160)}
+                      />
+                      <button
+                        type="button"
+                        className="st-drop-btn card-drop-open"
+                        tabIndex={-1}
+                        aria-label="Cards recharged today"
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          setCardListOpen((open) => {
+                            if (open) skipCardOpenRef.current = true;
+                            return !open;
+                          });
+                          payCardRef.current?.focus();
+                        }}
+                      />
+                    </span>
                     {payBal ? <span className="st-bal">{payBal}</span> : null}
                   </span>
                 </td>
@@ -1475,6 +1602,34 @@ export function SettleDialog({
           <button type="button" className="fn" tabIndex={-1} onClick={onClose}>Exit</button>
         </div>
       </div>
+      {cardListOpen && method === "MEMBER_CARD" && cardMatches.length > 0 && createPortal(
+        <div
+          ref={cardDropRef}
+          className="card-drop"
+          style={{ top: cardDrop.top, left: cardDrop.left, width: cardDrop.width }}
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          {cardMatches.map((c, i) => (
+            <div
+              key={c.id}
+              className={i === cardPick ? "on" : ""}
+              onMouseEnter={() => setCardPick(i)}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                cardPickedRef.current = true;
+                setPayCard(c.card_number);
+                setCardListOpen(false);
+                void save(c.card_number);
+              }}
+            >
+              <span className="no">{c.card_number}</span>
+              <span className="nm">{c.customer_name}</span>
+              <span className="bal">{rupee(c.usable)}</span>
+            </div>
+          ))}
+        </div>,
+        document.body,
+      )}
       {warn && (
         <AlertBox
           message={warn}

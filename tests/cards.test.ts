@@ -10,6 +10,7 @@ import {
   refundToCard,
   balancesFromLedger,
   checkBalance,
+  cardsRechargedToday,
   expireOvernightBalance,
 } from "../src/server/services/cardService.js";
 import { saveBooking } from "../src/server/services/reportService.js";
@@ -174,6 +175,26 @@ describe("member cards", () => {
     expect(check.balances.usable).toBe(rupeesToPaise(1001));
   });
 
+  it("credits a bank-transfer advance under the guest name and bank", () => {
+    const { ctx, db } = createTestApp();
+    const cashier = ctx("cashier");
+    const saved = saveBooking(cashier, {
+      guestName: "Ravi",
+      cardNo: "4401",
+      advance: rupeesToPaise(500),
+      mop: "BANK TRANSFER / HDFC",
+    }) as { guest_name: string; mop: string; balances: { usable: number } };
+    expect(saved.guest_name).toBe("Ravi");
+    expect(saved.mop).toBe("BANK TRANSFER / HDFC");
+    expect(saved.balances.usable).toBe(rupeesToPaise(500));
+    const ledger = db.prepare(
+      "SELECT payment_mode, reference_number FROM card_ledger WHERE type = 'RECHARGE' ORDER BY created_at DESC LIMIT 1",
+    ).get() as { payment_mode: string; reference_number: string };
+    expect(ledger.payment_mode).toBe("CARD");
+    expect(ledger.reference_number).toBe("HDFC");
+    expect(checkBalance(cashier, "4401").card.customer_name).toBe("Ravi");
+  });
+
   it("lapses unused balance at 6 AM until the card is recharged again", () => {
     const { ctx, db } = createTestApp();
     const cashier = ctx("cashier");
@@ -195,5 +216,29 @@ describe("member cards", () => {
     rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(500), paymentMode: "CASH", applyBonus: false });
     expect(checkBalance(cashier, "NIGHT-1").balances.usable).toBe(rupeesToPaise(500));
     expect(expireOvernightBalance(cashier, card.id).usable).toBe(rupeesToPaise(500));
+  });
+
+  it("lists only cards recharged on the current business day", () => {
+    const { ctx, db } = createTestApp();
+    const cashier = ctx("cashier");
+    const today = issueCard(cashier, {
+      customer: { name: "Today Guest", mobile: "9000000771" },
+      cardNumber: "TODAY-1",
+      cardTypeCode: "REGULAR",
+    });
+    const older = issueCard(cashier, {
+      customer: { name: "Older Guest", mobile: "9000000772" },
+      cardNumber: "OLD-1",
+      cardTypeCode: "REGULAR",
+    });
+    rechargeCard(cashier, { cardId: today.id, amount: rupeesToPaise(1000), paymentMode: "CASH", applyBonus: false });
+    rechargeCard(cashier, { cardId: older.id, amount: rupeesToPaise(400), paymentMode: "CASH", applyBonus: false });
+    const yesterday = new Date(businessDayStart().getTime() - 60 * 60 * 1000);
+    db.prepare("UPDATE card_ledger SET created_at = ? WHERE card_id = ? AND type = 'RECHARGE'").run(yesterday.toISOString(), older.id);
+
+    const rows = cardsRechargedToday(cashier);
+    expect(rows.map((r) => r.card_number)).toContain("TODAY-1");
+    expect(rows.map((r) => r.card_number)).not.toContain("OLD-1");
+    expect(rows.find((r) => r.card_number === "TODAY-1")?.usable).toBe(rupeesToPaise(1000));
   });
 });

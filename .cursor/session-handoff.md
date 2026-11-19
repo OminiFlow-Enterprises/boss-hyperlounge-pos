@@ -33,7 +33,7 @@ Do not import sync logs, print copies, audit, hotel, spa, laundry, or purchase o
 - Item lookup is a Windows combobox filtered by the department tab. Empty item group still shows. A disabled department rate rejects the item.
 - Sales-group tax is added on the KOT price and on settlement. A sales group whose name contains FREE is 0% even if the linked tax master says 24%.
 - F10 Prepare Bill, then Discount, then Print Bill. Printed tables show Settlement (green).
-- F11 Settlement: CASH, BANK TRANSFER, PREPAID CARD. Split until balance is 0. CASH has no account field. BANK TRANSFER asks for the bank name. PREPAID CARD asks for Card No and shows Insufficient amount when the card is short.
+- F11 Settlement: CASH, BANK TRANSFER, PREPAID CARD. Split until balance is 0. CASH has no account field. BANK TRANSFER asks for the bank name. PREPAID CARD is a combobox of cards recharged today, and a typed card number still works. A positive balance settles the smaller of that balance and the settled amount. A zero balance shows Insufficient amount.
 - F12 is the Restaurant Settlement Report for the current outlet, not the GST report. GST stays on the Report menu. One row per payment. Enter or double-click opens Restaurant Settlement for that row (Print, Update F2, Delete F4, Exit). Escape closes that dialog and does not close the report.
 - Prepaid card settlements cannot be edited or deleted from that update window.
 - Table list no longer sums every historical order. Running total runs only for an open session. Bootstrap should return in well under a second.

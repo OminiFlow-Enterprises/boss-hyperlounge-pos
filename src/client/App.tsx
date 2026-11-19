@@ -1290,27 +1290,22 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
 
   async function openSettlement() {
     setListOpen(false);
-    const byStatus = tables.filter((t) => t.status === "PAYMENT_PENDING" && (t.outlet || "BAR") === deptOutlet(dept));
-    if (byStatus.length) {
-      setSettleTables(byStatus);
-      setPickOpen("settle");
-      return;
-    }
+    const outlet = deptOutlet(dept);
+    const dayStart = businessStartMs();
     try {
-      const invoices = await api.get<any[]>("/api/invoices");
-      const open = invoices.filter((i) => i.status === "UNPAID" || i.status === "PARTIAL");
-      const mapped: Table[] = [];
-      for (const inv of open) {
-        const t = tables.find((x) => x.id === inv.table_id);
-        if (t && (t.outlet || "BAR") !== deptOutlet(dept)) continue;
-        const row = t ?? { id: inv.table_id, code: inv.table_code, status: "PAYMENT_PENDING", name: inv.table_code, floor_name: "", floor_id: "", current_session_id: null, outlet: deptOutlet(dept) };
-        if (!mapped.some((x) => x.id === row.id)) mapped.push(row);
-      }
-      if (!mapped.length) {
+      const rows = await api.get<Table[]>("/api/tables");
+      const printedToday = rows.filter((t) => {
+        if (t.status !== "PAYMENT_PENDING") return false;
+        if ((t.outlet || "BAR") !== outlet) return false;
+        if (!t.session_opened_at) return false;
+        const opened = Date.parse(t.session_opened_at);
+        return !Number.isNaN(opened) && opened >= dayStart;
+      });
+      if (!printedToday.length) {
         onMessage("No printed bill to settle");
         return;
       }
-      setSettleTables(mapped);
+      setSettleTables(printedToday);
       setPickOpen("settle");
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "No printed bill to settle");

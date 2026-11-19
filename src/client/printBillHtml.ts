@@ -2,6 +2,7 @@ declare global {
   interface Window {
     bossPrint?: {
       printHtml: (html: string, deviceName?: string) => Promise<{ ok: boolean; error?: string }>;
+      exportPdf?: (opts?: { landscape?: boolean }) => Promise<Uint8Array | { data?: number[] }>;
     };
     bossWindow?: {
       minimize: () => Promise<{ ok: boolean }>;
