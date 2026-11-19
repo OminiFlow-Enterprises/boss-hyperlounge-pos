@@ -2690,12 +2690,300 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
   );
 }
 
+type CardSettleRow = {
+  booking_id: string;
+  card_no: string;
+  guest_name: string;
+  booking_date: string;
+  card_balance: number;
+  remaining_balance: number;
+};
+type CardBillRow = {
+  invoice_id: string;
+  invoice_number: string;
+  table_no: string;
+  outlet: string;
+  amount: number;
+};
+
+function CardBillDialog({
+  bookingId,
+  cardNo,
+  guest,
+  onClose,
+}: {
+  bookingId: string;
+  cardNo: string;
+  guest: string;
+  onClose: () => void;
+}) {
+  const [rows, setRows] = useState<CardBillRow[]>([]);
+  const [sel, setSel] = useState(0);
+  const [warn, setWarn] = useState("");
+  const [busy, setBusy] = useState("");
+  const [ready, setReady] = useState(false);
+  const rowsRef = useRef<CardBillRow[]>([]);
+  const selRef = useRef(0);
+  const busyRef = useRef("");
+  rowsRef.current = rows;
+  selRef.current = sel;
+
+  useEffect(() => {
+    let live = true;
+    api.get<{ rows: CardBillRow[] }>(`/api/reports/card-settlement/${encodeURIComponent(bookingId)}/bills`)
+      .then((data) => {
+        if (!live) return;
+        setRows(data.rows || []);
+        setReady(true);
+      })
+      .catch((e) => {
+        if (!live) return;
+        setWarn(e instanceof Error ? e.message : "Could not load bills");
+        setReady(true);
+      });
+    return () => { live = false; };
+  }, [bookingId]);
+
+  async function printInvoice(invoiceId: string) {
+    if (!invoiceId || busyRef.current) return;
+    busyRef.current = invoiceId;
+    setBusy(invoiceId);
+    try {
+      const res = await api.post(`/api/invoices/${invoiceId}/print`);
+      const { handleBillPrintResponse } = await import("./printBillHtml");
+      const out = await handleBillPrintResponse(res as { ok?: boolean; mode?: string; html?: string; printed?: boolean; error?: string });
+      if (!out.ok) setWarn(out.error || "Print failed");
+    } catch (e) {
+      setWarn(e instanceof Error ? e.message : "Print failed");
+    } finally {
+      busyRef.current = "";
+      setBusy("");
+    }
+  }
+
+  useEffect(() => {
+    function keys(e: KeyboardEvent) {
+      if (warn || document.querySelector(".alert-dlg")) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+      const list = rowsRef.current;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (!list.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setSel((i) => e.key === "ArrowDown" ? Math.min(list.length - 1, i + 1) : Math.max(0, i - 1));
+        return;
+      }
+      if (e.key === "Enter") {
+        if ((e.target as HTMLElement).closest("[data-cs-exit]")) return;
+        const row = list[selRef.current];
+        if (!row) return;
+        e.preventDefault();
+        e.stopPropagation();
+        void printInvoice(row.invoice_id);
+      }
+    }
+    window.addEventListener("keydown", keys, true);
+    return () => window.removeEventListener("keydown", keys, true);
+  });
+
+  return (
+    <div className="cs-dlg" role="dialog" aria-label="Card bills">
+      <div className="dialog-cap">
+        <span className="cap-dot" />
+        <span>Card {cardNo}{guest ? ` — ${guest}` : ""}</span>
+        <button type="button" className="cap-x" aria-label="Close" onClick={onClose}>✕</button>
+      </div>
+      <div className="cs-body">
+        <div className="cs-grid-wrap">
+          <table className="cs-grid">
+            <thead>
+              <tr>
+                <th>Invoice No</th>
+                <th>Table No</th>
+                <th>Outlet</th>
+                <th>Amount</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {!ready && (
+                <tr><td colSpan={5}>Loading…</td></tr>
+              )}
+              {ready && rows.length === 0 && (
+                <tr><td colSpan={5}>No bill for this card</td></tr>
+              )}
+              {rows.map((r, i) => (
+                <tr key={r.invoice_id} className={i === sel ? "on" : ""} onClick={() => setSel(i)}>
+                  <td>{r.invoice_number}</td>
+                  <td>{r.table_no}</td>
+                  <td>{r.outlet}</td>
+                  <td className="num">{inr(r.amount)}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="fn"
+                      disabled={busy === r.invoice_id}
+                      onClick={() => void printInvoice(r.invoice_id)}
+                    >
+                      Print
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="cs-foot">
+          <button type="button" className="fn" data-cs-exit="1" onClick={onClose}>Exit</button>
+        </div>
+      </div>
+      {warn && <AlertBox message={warn} onClose={() => setWarn("")} />}
+    </div>
+  );
+}
+
+export function CardSettlementReport({ onExit }: { onExit: () => void }) {
+  const [from, setFrom] = useState(isoDay());
+  const [to, setTo] = useState(isoDay());
+  const [card, setCard] = useState("");
+  const [rows, setRows] = useState<CardSettleRow[]>([]);
+  const [sel, setSel] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [warn, setWarn] = useState("");
+  const fromRef = useRef<HTMLInputElement>(null);
+  const selRef = useRef<string | null>(null);
+  const rowsRef = useRef<CardSettleRow[]>([]);
+  const loadGen = useRef(0);
+  selRef.current = sel;
+  rowsRef.current = rows;
+
+  async function load() {
+    const gen = ++loadGen.current;
+    const q = new URLSearchParams({ from, to, card: card.trim() });
+    try {
+      const data = await api.get<{ rows: CardSettleRow[] }>(`/api/reports/card-settlement?${q}`);
+      if (gen !== loadGen.current) return;
+      const next = data.rows || [];
+      setRows(next);
+      setSel(next.length ? next[next.length - 1].booking_id : null);
+    } catch (e) {
+      if (gen !== loadGen.current) return;
+      setWarn(e instanceof Error ? e.message : "Could not load report");
+    }
+  }
+
+  useEffect(() => { fromRef.current?.focus(); void load(); }, []);
+  useEffect(() => {
+    function keys(e: KeyboardEvent) {
+      if (openId || warn || document.querySelector(".cs-dlg, .alert-dlg")) return;
+      const target = e.target as HTMLElement;
+      const typing = target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA";
+      if (typing) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          void load();
+        }
+        return;
+      }
+      const list = rowsRef.current;
+      if (!list.length) return;
+      const idx = Math.max(0, list.findIndex((r) => r.booking_id === selRef.current));
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        const next = list[e.key === "ArrowDown" ? Math.min(list.length - 1, idx + 1) : Math.max(0, idx - 1)];
+        setSel(next.booking_id);
+        return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        const id = selRef.current;
+        if (id) setOpenId(id);
+      }
+    }
+    window.addEventListener("keydown", keys, true);
+    return () => window.removeEventListener("keydown", keys, true);
+  });
+
+  const open = rows.find((r) => r.booking_id === openId) || null;
+
+  return (
+    <div className="set-page">
+      <div className="set-filter">
+        <div className="set-fields">
+          <div className="set-title">Card Settlement Report</div>
+          <div className="set-row">
+            <label>Date From : <input ref={fromRef} className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+            <label>To Date : <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+            <label>Card No : <input className="win" value={card} onChange={(e) => setCard(e.target.value)} /></label>
+          </div>
+        </div>
+        <div className="set-btns">
+          <button className="fn" onClick={() => void load()}>Show</button>
+          <button className="fn" onClick={onExit}>Exit</button>
+        </div>
+      </div>
+      <div className="set-grid-wrap">
+        <table className="data set-table">
+          <thead>
+            <tr>
+              <th>Card No</th>
+              <th>Guest Name</th>
+              <th>Booking Date</th>
+              <th>Card Balance</th>
+              <th>Remaining Balance</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr
+                key={r.booking_id}
+                className={r.booking_id === sel ? "on" : ""}
+                tabIndex={r.booking_id === sel ? 0 : -1}
+                onClick={() => setSel(r.booking_id)}
+                onDoubleClick={() => setOpenId(r.booking_id)}
+              >
+                <td>{r.card_no}</td>
+                <td>{r.guest_name}</td>
+                <td>{stampGrid(r.booking_date)}</td>
+                <td className="num">{inr(r.card_balance)}</td>
+                <td className="num">{inr(r.remaining_balance)}</td>
+                <td>
+                  <button type="button" className="fn" onClick={() => setOpenId(r.booking_id)}>Show</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {open && (
+        <CardBillDialog
+          bookingId={open.booking_id}
+          cardNo={open.card_no}
+          guest={open.guest_name}
+          onClose={() => setOpenId(null)}
+        />
+      )}
+      {warn && <AlertBox message={warn} onClose={() => setWarn("")} />}
+    </div>
+  );
+}
+
 export function ReportHost({ view, outlet, onExit }: { view: NavView; outlet?: string; onExit: () => void }) {
   if (view === "item-wise-detail") return <ItemWiseDetail onExit={onExit} />;
   if (view === "point-of-sales") return <PointOfSales onExit={onExit} />;
   if (view === "gst-report") return <GstReport onExit={onExit} />;
   if (view === "item-wise-sale") return <ItemWiseSale onExit={onExit} />;
   if (view === "settlement-report") return <SettlementReport outlet={outlet} onExit={onExit} />;
+  if (view === "card-settlement-report") return <CardSettlementReport onExit={onExit} />;
   if (view === "booking-report") return <BookingReport onExit={onExit} />;
   if (view === "card-block") return <CardBlock onExit={onExit} />;
   if (view === "advance-booking") return <AdvanceBooking onExit={onExit} />;

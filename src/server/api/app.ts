@@ -346,6 +346,17 @@ export function createApp(options: CreateAppOptions) {
   app.delete("/api/reports/settlement/:paymentId", wrap((req, res) => {
     res.json(reports.deleteSettlement(req.ctx, req.params.paymentId));
   }));
+  app.get("/api/reports/card-settlement", wrap((req, res) => {
+    res.json(reports.cardSettlementReport(
+      req.ctx,
+      req.query.from ? String(req.query.from) : undefined,
+      req.query.to ? String(req.query.to) : undefined,
+      req.query.card ? String(req.query.card) : undefined,
+    ));
+  }));
+  app.get("/api/reports/card-settlement/:bookingId/bills", wrap((req, res) => {
+    res.json(reports.cardSettlementBills(req.ctx, req.params.bookingId));
+  }));
   app.get("/api/reports/kots", wrap((req, res) => {
     res.json(reports.kotReport(
       req.ctx,

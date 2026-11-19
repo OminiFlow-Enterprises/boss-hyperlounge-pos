@@ -1142,6 +1142,32 @@ table.data tbody tr:hover td.cell-on { background: #0078d7; color: #fff; }
 .set-totals label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .set-totals .win { width: 78px; height: 26px; text-align: right; }
 
+.cs-dlg {
+  position: fixed;
+  top: 110px;
+  left: 50%;
+  margin-left: -340px;
+  width: 680px;
+  z-index: 70;
+  background: var(--face);
+  border: 1px solid #404040;
+  display: flex;
+  flex-direction: column;
+}
+.cs-body { padding: 8px 10px 10px; }
+.cs-grid-wrap {
+  height: 220px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #808080;
+}
+.cs-grid { width: 100%; border-collapse: collapse; font-weight: 700; }
+.cs-grid th, .cs-grid td { border: 1px solid #c0c0c0; padding: 2px 6px; background: #fff; }
+.cs-grid tr.on td, .cs-grid tr.on:hover td { background: #0078d7; color: #fff; }
+.cs-grid .num { text-align: right; }
+.cs-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.cs-grid .fn { min-width: 64px; }
+
 .bkr-title { padding: 4px 8px; font-weight: 700; background: var(--face); }
 table.data tr.grp td { background: #ffc0cb; font-weight: 700; }
 

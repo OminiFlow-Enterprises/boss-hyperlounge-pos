@@ -975,6 +975,92 @@ export function billReport(
   };
 }
 
+/** One row per card recharge. Remaining balance is the card balance at the end of that recharge, before the next recharge of the same card. */
+export function cardSettlementReport(ctx: AppContext, from?: string, to?: string, cardNo?: string) {
+  assertPermission(ctx.actor.role, "VIEW_REPORTS");
+  let start = from || todayDate();
+  let end = to || start;
+  if (start > end) [start, end] = [end, start];
+  const range = dateRange(start, end);
+  const card = (cardNo || "").trim();
+  const rows = ctx.db
+    .prepare(
+      `WITH seq AS (
+         SELECT id, card_no, guest_name, advance, created_at,
+                LEAD(created_at) OVER (PARTITION BY card_no ORDER BY created_at, id) AS next_at
+         FROM bookings
+         WHERE card_no != '' AND (? = '' OR card_no = ?)
+       )
+       SELECT b.id AS booking_id, b.card_no,
+              CASE
+                WHEN TRIM(COALESCE(b.guest_name, '')) != '' THEN TRIM(b.guest_name)
+                ELSE COALESCE(cu.name, '')
+              END AS guest_name,
+              b.created_at AS booking_date,
+              b.advance AS card_balance,
+              MAX(0, COALESCE((
+                SELECT l.new_paid + l.new_bonus
+                FROM card_ledger l
+                WHERE l.card_id = mc.id
+                  AND l.created_at >= b.created_at
+                  AND l.created_at < COALESCE(b.next_at, '9999-12-31T23:59:59.999Z')
+                ORDER BY l.created_at DESC
+                LIMIT 1
+              ), CASE WHEN b.next_at IS NULL
+                   THEN COALESCE(mc.paid_balance, 0) + COALESCE(mc.bonus_balance, 0)
+                   ELSE 0 END)) AS remaining_balance
+       FROM seq b
+       LEFT JOIN member_cards mc ON mc.card_number = b.card_no
+       LEFT JOIN customers cu ON cu.id = mc.customer_id
+       WHERE b.created_at BETWEEN ? AND ?
+       ORDER BY b.created_at, b.card_no, b.id`,
+    )
+    .all(card, card, range.from, range.to) as Array<Record<string, unknown>>;
+  return { from: range.start, to: range.end, card_no: card, rows };
+}
+
+export function cardSettlementBills(ctx: AppContext, bookingId: string) {
+  assertPermission(ctx.actor.role, "VIEW_REPORTS");
+  const booking = ctx.db
+    .prepare(
+      `SELECT b.id, b.card_no, b.created_at,
+              (SELECT b2.created_at FROM bookings b2
+               WHERE b2.card_no = b.card_no AND b2.created_at > b.created_at
+               ORDER BY b2.created_at
+               LIMIT 1) AS next_at
+       FROM bookings b
+       WHERE b.id = ?`,
+    )
+    .get(bookingId) as { id: string; card_no: string; created_at: string; next_at: string | null } | undefined;
+  if (!booking) throw new AppError("Booking not found", 404);
+  const card = ctx.db
+    .prepare("SELECT id FROM member_cards WHERE card_number = ?")
+    .get(booking.card_no) as { id: string } | undefined;
+  if (!card) {
+    return { booking_id: booking.id, card_no: booking.card_no, rows: [] };
+  }
+  const next = booking.next_at || "9999-12-31T23:59:59.999Z";
+  const rows = ctx.db
+    .prepare(
+      `SELECT i.id AS invoice_id,
+              MIN(i.invoice_number) AS invoice_number,
+              MIN(COALESCE(NULLIF(t.name, ''), t.code)) AS table_no,
+              MIN(COALESCE(NULLIF(t.outlet, ''), 'BAR')) AS outlet,
+              SUM(p.amount) AS amount
+       FROM payments p
+       JOIN invoices i ON i.id = p.invoice_id
+       JOIN dining_tables t ON t.id = i.table_id
+       WHERE p.method = 'MEMBER_CARD'
+         AND p.member_card_id = ?
+         AND p.created_at >= ?
+         AND p.created_at < ?
+       GROUP BY i.id
+       ORDER BY MIN(p.created_at), invoice_number`,
+    )
+    .all(card.id, booking.created_at, next) as Array<Record<string, unknown>>;
+  return { booking_id: booking.id, card_no: booking.card_no, rows };
+}
+
 export function listBookings(ctx: AppContext) {
   return ctx.db.prepare("SELECT * FROM bookings ORDER BY created_at DESC").all();
 }

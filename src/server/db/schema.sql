@@ -453,6 +453,7 @@ CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_created ON invoices(created_at);
 CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at);
+CREATE INDEX IF NOT EXISTS idx_payments_member_card ON payments(member_card_id, created_at);
 
 CREATE TABLE IF NOT EXISTS sync_queue (
   id TEXT PRIMARY KEY,
@@ -499,3 +500,6 @@ CREATE TABLE IF NOT EXISTS bookings (
   mop TEXT,
   created_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_bookings_created ON bookings(created_at);
+CREATE INDEX IF NOT EXISTS idx_bookings_card_created ON bookings(card_no, created_at);

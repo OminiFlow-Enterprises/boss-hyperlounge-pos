@@ -139,7 +139,9 @@ const MENUS: Array<{ id: string; label: string; items: MenuNode[] }> = [
         { label: "Time Sale Report", view: "time-sale" },
         { label: "Tax Wise Report", view: "tax-wise" },
         { label: "Settlement Report", view: "settlement-report" },
+        { label: "Card Settlement Report", view: "card-settlement-report" },
       ] },
+      { label: "Card Settlement Report", view: "card-settlement-report" },
     ],
   },
 ];
@@ -157,6 +159,7 @@ const VIEW_TITLE: Partial<Record<AppView, string>> = {
   "kot-report": "KOT Report",
   "bill-report": "Bill Report",
   "settlement-report": "Restaurant Settlement Report",
+  "card-settlement-report": "Card Settlement Report",
   "booking-report": "Restaurant Booking Register",
   "advance-booking": "Restaurant Advance Booking",
   "card-block": "Card Block",
@@ -284,7 +287,7 @@ export function App() {
     function keys(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
       // Restaurant Bill / settlement dialogs own Escape (back to report first)
-      if (document.querySelector(".bill-dlg, .settle-dlg, .su-dlg, .confirm-dlg, .confirm-overlay, .alert-dlg, .kot-view")) return;
+      if (document.querySelector(".bill-dlg, .settle-dlg, .su-dlg, .cs-dlg, .confirm-dlg, .confirm-overlay, .alert-dlg, .kot-view")) return;
       if (view === "billing" || view === "advance-booking" || view === "card-block") {
         if (view === "billing" && menu) {
           e.preventDefault();
@@ -436,7 +439,7 @@ export function App() {
       )}
 
       {view !== "billing" && view !== "login" && (
-        <div className={`workarea ${["card-block","advance-booking","booking-report","item-wise-sale","settlement-report","kot-report","bill-report","history","item-combine-stock","outlet-stock","time-sale","tax-wise"].includes(view) ? "plain" : ""}`}>
+        <div className={`workarea ${["card-block","advance-booking","booking-report","item-wise-sale","settlement-report","card-settlement-report","kot-report","bill-report","history","item-combine-stock","outlet-stock","time-sale","tax-wise"].includes(view) ? "plain" : ""}`}>
           {view === "kot" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard /></div>}
           {view === "kitchen" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="KITCHEN" /></div>}
           {view === "bar" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="BAR" /></div>}

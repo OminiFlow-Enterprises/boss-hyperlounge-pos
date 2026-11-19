@@ -105,6 +105,7 @@ export type NavView =
   | "kot-report"
   | "bill-report"
   | "settlement-report"
+  | "card-settlement-report"
   | "booking-report"
   | "advance-booking"
   | "card-block";

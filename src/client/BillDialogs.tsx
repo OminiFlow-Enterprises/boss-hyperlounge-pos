@@ -1275,7 +1275,7 @@ export function SettleDialog({
     const exact = list.find((c) => c.card_number.toLowerCase() === typed.toLowerCase());
     if (exact) return exact.card_number;
     if (!typed) {
-      if (cardPickedRef.current && list.length) {
+      if (cardListOpenRef.current && list.length) {
         return list[Math.min(cardPickRef.current, list.length - 1)]?.card_number ?? "";
       }
       return "";
