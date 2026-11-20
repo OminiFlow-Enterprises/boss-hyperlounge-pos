@@ -239,6 +239,11 @@ function keptLines(rows: GstExtraLine[] | undefined) {
   return Array.isArray(rows) ? rows.filter((x) => x && typeof x.id === "string") : [];
 }
 
+function resizeGstLabel(target: HTMLTextAreaElement) {
+  target.style.height = "auto";
+  target.style.height = `${target.scrollHeight}px`;
+}
+
 function loadGstManual(from: string, to: string): GstManualSheet {
   const empty: GstManualSheet = { amounts: blankHandAmounts(), extras: [], hidden: [], saleLines: [] };
   try {
@@ -849,11 +854,14 @@ export function GstReport({ onExit }: { onExit: () => void }) {
                     {extraLines.map((line) => (
                       <tr key={line.id}>
                         <td className="lbl">
-                          <input
+                          <textarea
                             id={`gst-xl-${line.id}`}
                             className="win gst-lbl-in"
+                            rows={1}
+                            wrap="soft"
                             value={line.label}
-                            onChange={(e) => putExtra(line.id, { label: e.target.value })}
+                            onChange={(e) => { resizeGstLabel(e.currentTarget); putExtra(line.id, { label: e.target.value }); }}
+                            ref={resizeGstLabel}
                             onKeyDown={onManualEnter}
                           />
                         </td>
@@ -896,11 +904,14 @@ export function GstReport({ onExit }: { onExit: () => void }) {
                     {saleLines.map((line) => (
                       <tr key={line.id}>
                         <td className="lbl">
-                          <input
+                          <textarea
                             id={`gst-sl-${line.id}`}
                             className="win gst-lbl-in"
+                            rows={1}
+                            wrap="soft"
                             value={line.label}
-                            onChange={(e) => putSaleLine(line.id, { label: e.target.value })}
+                            onChange={(e) => { resizeGstLabel(e.currentTarget); putSaleLine(line.id, { label: e.target.value }); }}
+                            ref={resizeGstLabel}
                             onKeyDown={onManualEnter}
                           />
                         </td>
@@ -1033,7 +1044,7 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
               </tr>
             </thead>
             <tbody>
-              {error ? <tr><td colSpan={8} className="empty">{error}</td></tr> : Object.entries(groups).flatMap(([gname, items]) => {
+              {error ? <tr><td colSpan={8} className="empty">{error}</td></tr> : !items.length ? <tr><td colSpan={8} className="empty">No sales for the selected date range</td></tr> : Object.entries(groups).flatMap(([gname, items]) => {
                 const tot = items.reduce((s, i) => s + i.amount, 0);
                 const head = (
                   <tr key={gname} className="grp">

@@ -514,6 +514,7 @@ export function formatBillEscPos(payload: BillReceiptPayload): Buffer {
     ),
   );
   chunks.push(line(metaLeft("Name", payload.guestName?.trim() || "", BILL_COLS).trimEnd()));
+  if (payload.guestGstin?.trim()) chunks.push(line(metaLeft("GSTIN", payload.guestGstin.trim(), BILL_COLS).trimEnd()));
   chunks.push(dashedRule());
 
   // Column headings ~13px/700

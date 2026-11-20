@@ -336,6 +336,7 @@ export function renderBillReceiptHtml(payload: BillReceiptPayload): string {
         <div class="row"><span class="lbl">Table No.</span><span class="colon">:</span><span class="val">${esc(payload.tableNo)}</span></div>
         <div class="row"><span class="lbl">Waiter.</span><span class="colon">:</span><span class="val">${esc(payload.waiter?.trim() || "")}</span></div>
         <div class="row"><span class="lbl">Name</span><span class="colon">:</span><span class="val">${esc(payload.guestName?.trim() || "")}</span></div>
+        ${payload.guestGstin?.trim() ? `<div class="row"><span class="lbl">GSTIN</span><span class="colon">:</span><span class="val">${esc(payload.guestGstin.trim())}</span></div>` : ""}
       </div>
       <div class="meta-right">
         <div class="row"><span class="lbl">Date</span><span class="val">${esc(date)}</span></div>

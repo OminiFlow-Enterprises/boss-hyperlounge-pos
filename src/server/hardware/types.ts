@@ -55,6 +55,7 @@ export interface BillReceiptPayload {
   tableNo: string;
   waiter?: string;
   guestName?: string;
+  guestGstin?: string;
   pax?: string;
   createdAt: string;
   items: Array<{ name: string; rate: number; qty: number; amount: number }>;

@@ -412,7 +412,9 @@ export function gstBillWise(
     .prepare(
       `SELECT i.id AS invoice_id, i.invoice_number AS bill_no, i.created_at, i.discount,
               i.food_total, i.drinks_total, i.service_charge, i.service_charge_pct, i.tax,
-              i.other_charges, i.grand_total, cu.name AS client_name
+              i.other_charges, i.grand_total,
+              COALESCE(NULLIF(i.customer_display_name, ''), cu.name, '') AS client_name,
+              COALESCE(i.customer_gstin, '') AS customer_gstin
        FROM invoices i
        JOIN dining_tables t ON t.id = i.table_id
        LEFT JOIN customers cu ON cu.id = i.customer_id
@@ -479,7 +481,7 @@ export function gstBillWise(
       bill_no: String(inv.bill_no || ""),
       bill_date: gstBillDate(String(inv.created_at || "")),
       client_name: String(inv.client_name || ""),
-      gstin: "",
+      gstin: String(inv.customer_gstin || ""),
       amount,
       discount,
       gross_amount: Math.max(0, amount - discount),
@@ -575,7 +577,7 @@ export function settlementReport(
 ) {
   assertPermission(ctx.actor.role, "VIEW_REPORTS");
   const range = dateRange(from, to);
-  const where = ["p.created_at BETWEEN ? AND ?"];
+  const where = ["p.created_at BETWEEN ? AND ?", "COALESCE(i.complimentary_account_id, '') = ''"];
   const args: Array<string | number> = [range.from, range.to];
   if (outlet) {
     where.push("COALESCE(t.outlet, 'BAR') = ?");
@@ -818,10 +820,16 @@ export function kotReport(
     args.push(bill, `%/${bill}`, `%${bill}`);
   }
   const comp = String(filters?.complementary || "Select").trim();
+  const complimentaryInvoice = `EXISTS (
+    SELECT 1 FROM invoices ci
+     WHERE ci.order_id = k.order_id
+       AND ci.complimentary_account_id IS NOT NULL
+       AND ci.status NOT IN ('CANCELLED','VOID')
+  )`;
   if (comp === "Yes") {
-    where.push("(IFNULL(k.notes,'') LIKE '%COMPLIM%' OR IFNULL(k.notes,'') LIKE '%complementary%')");
+    where.push(`(IFNULL(k.notes,'') LIKE '%COMPLIM%' OR IFNULL(k.notes,'') LIKE '%complementary%' OR ${complimentaryInvoice})`);
   } else if (comp === "No") {
-    where.push("(IFNULL(k.notes,'') NOT LIKE '%COMPLIM%' AND IFNULL(k.notes,'') NOT LIKE '%complementary%')");
+    where.push(`(IFNULL(k.notes,'') NOT LIKE '%COMPLIM%' AND IFNULL(k.notes,'') NOT LIKE '%complementary%' AND NOT ${complimentaryInvoice})`);
   }
 
   const sql = `SELECT k.id, k.kot_number, '' AS manual_kot,

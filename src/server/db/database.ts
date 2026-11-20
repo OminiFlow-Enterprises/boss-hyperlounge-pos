@@ -20,6 +20,7 @@ export function openDatabase(options: OpenDbOptions = {}): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   migrate(db);
+  importBundledComplimentaryAccounts(db);
   return db;
 }
 
@@ -29,6 +30,40 @@ export function defaultDbPath(): string {
     : path.resolve(process.cwd(), "data");
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, "hyperlounge.sqlite");
+}
+
+function importBundledComplimentaryAccounts(db: Database.Database): void {
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  if (!resourcesPath) return;
+
+  const seedPath = path.join(resourcesPath, "data", "hyperlounge.sqlite");
+  if (!fs.existsSync(seedPath)) return;
+
+  let seed: Database.Database | undefined;
+  try {
+    seed = new Database(seedPath, { readonly: true, fileMustExist: true });
+    const seedAccounts = seed
+      .prepare("SELECT id, code, name, created_at FROM complimentary_accounts ORDER BY code")
+      .all() as Array<{ id: string; code: number; name: string; created_at: string }>;
+    if (seedAccounts.length === 0) return;
+
+    const count = (db.prepare("SELECT COUNT(*) AS count FROM complimentary_accounts").get() as { count: number }).count;
+    if (count !== 0) return;
+
+    const insert = db.prepare(
+      "INSERT OR IGNORE INTO complimentary_accounts (id, code, name, created_at) VALUES (?, ?, ?, ?)",
+    );
+    const importAccounts = db.transaction(() => {
+      for (const account of seedAccounts) {
+        insert.run(account.id, account.code, account.name, account.created_at);
+      }
+    });
+    importAccounts();
+  } catch {
+    // The bundled seed may be absent or from an older version without this table.
+  } finally {
+    seed?.close();
+  }
 }
 
 function separateTableCodesByOutlet(db: Database.Database) {
@@ -118,6 +153,8 @@ export function migrate(db: Database.Database): void {
     if (!hasColumn(db, "invoices", "complimentary_name")) {
       db.exec("ALTER TABLE invoices ADD COLUMN complimentary_name TEXT NOT NULL DEFAULT ''");
     }
+    if (!hasColumn(db, "invoices", "customer_display_name")) db.exec("ALTER TABLE invoices ADD COLUMN customer_display_name TEXT NOT NULL DEFAULT ''");
+    if (!hasColumn(db, "invoices", "customer_gstin")) db.exec("ALTER TABLE invoices ADD COLUMN customer_gstin TEXT NOT NULL DEFAULT ''");
   }
   if (hasColumn(db, "staff", "id")) {
     const staffCols: Array<[string, string]> = [

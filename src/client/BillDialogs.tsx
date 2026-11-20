@@ -157,7 +157,6 @@ export function PrepareBillDialog({
   onPrinted,
   onSettle,
   onChanged,
-  onReopen,
   onMessage,
 }: {
   orderId: string;
@@ -172,8 +171,7 @@ export function PrepareBillDialog({
   /** Save (F5) + Yes opens settlement. Does not ask to print. */
   onSettle: (invoice: any) => void;
   onChanged?: () => void;
-  onReopen?: () => void;
-  onMessage: (m: string) => void;
+  onMessage: (m: string, after?: () => void) => void;
 }) {
   const [bill, setBill] = useState<any>(null);
   const [discPct, setDiscPct] = useState("0.00");
@@ -197,6 +195,7 @@ export function PrepareBillDialog({
   const [remark, setRemark] = useState("");
   const nc = outlet === "NC";
   const [comp, setComp] = useState(nc);
+  const isComplimentary = nc || comp;
   const [accounts, setAccounts] = useState<CompAccount[]>([]);
   const [compId, setCompId] = useState("");
   const [masterOpen, setMasterOpen] = useState(false);
@@ -275,12 +274,18 @@ export function PrepareBillDialog({
 
   useEffect(() => {
     let cancel = false;
+    setComp(outlet === "NC");
+    setCompId("");
     (async () => {
       let next: { discountAmt?: number; mode?: "amt"; serviceChargePct?: number; otherCharges?: number } | undefined;
+      let existingComplimentary = outlet === "NC";
       try {
         const snap = await api.get<any>(`/api/tables/${table.id}/invoice`);
         const inv = snap?.invoice;
         if (inv && !cancel) {
+          existingComplimentary = existingComplimentary || Boolean(inv.complimentary_account_id);
+          if (outlet !== "NC") setComp(Boolean(inv.complimentary_account_id));
+          setCompId(String(inv.complimentary_account_id || ""));
           const discountAmt = Number(inv.discount ?? 0) / 100;
           // Old bills saved with 0% must still pick up the default 10% service charge
           const savedPct = Number(inv.service_charge_pct ?? 0);
@@ -298,7 +303,7 @@ export function PrepareBillDialog({
       try {
         await load(next);
         setTimeout(() => {
-          if (outlet === "NC") compRef.current?.focus();
+          if (existingComplimentary) compRef.current?.focus();
           else { discRef.current?.focus(); discRef.current?.select(); }
         }, 0);
       } catch (e) {
@@ -306,12 +311,12 @@ export function PrepareBillDialog({
       }
     })();
     return () => { cancel = true; };
-  }, [orderId]);
+  }, [orderId, outlet]);
 
   useEffect(() => {
-    if (!nc) return;
+    if (!isComplimentary) return;
     api.get<CompAccount[]>("/api/complimentary").then(setAccounts).catch(() => setAccounts([]));
-  }, [nc]);
+  }, [isComplimentary]);
 
   function scrollBillRow(index: number) {
     const grid = gridRef.current;
@@ -356,18 +361,33 @@ export function PrepareBillDialog({
   const shown = useMemo(() => {
     const source = (bill?.items ?? []) as any[];
     const items = source.map((it, i) => {
-      if (nc && i !== rowSel) return { ...it, amount: 0, tax: 0 };
+      if (isComplimentary && i !== rowSel) return { ...it, amount: 0, tax: 0 };
       if (i !== rowSel) return it;
       const raw = editQty.trim();
       const qty = raw === "" ? 0 : Number(raw);
       const priceRaw = editPrice.trim();
       const unit = priceRaw === "" ? 0 : Math.round(Number(priceRaw) * 100);
       if (!Number.isFinite(qty) || !Number.isFinite(unit)) return it;
-      const amount = nc ? 0 : Math.round(qty * unit);
-      const tax = nc ? 0 : Math.round(amount * (Number(it.tax_rate) / 100));
+      const amount = isComplimentary ? 0 : Math.round(qty * unit);
+      const tax = isComplimentary ? 0 : Math.round(amount * (Number(it.tax_rate) / 100));
       return { ...it, qty, amount, tax };
     });
-    const extra = nc || !pending ? 0 : Math.round((Number(addQty) || 0) * Number(pending.base_price || 0));
+    const extra = isComplimentary || !pending ? 0 : Math.round((Number(addQty) || 0) * Number(pending.base_price || 0));
+    const totalQty = items.reduce((s, it) => s + Number(it.qty), 0) + (pending ? Number(addQty) || 0 : 0);
+    if (isComplimentary) {
+      return {
+        items,
+        totalQty,
+        subtotal: 0,
+        tax: 0,
+        discountable: 0,
+        discount: 0,
+        service: 0,
+        roundOff: 0,
+        grand: 0,
+        extra: 0,
+      };
+    }
     const foodTotal = items.filter((it) => it.station === "KITCHEN").reduce((s, it) => s + Number(it.amount), 0);
     const drinksTotal = items.filter((it) => it.station !== "KITCHEN").reduce((s, it) => s + Number(it.amount), 0) + extra;
     const subtotal = foodTotal + drinksTotal;
@@ -390,7 +410,7 @@ export function PrepareBillDialog({
     const grand = Math.round(unrounded / 100) * 100;
     return {
       items,
-      totalQty: items.reduce((s, it) => s + Number(it.qty), 0) + (pending ? Number(addQty) || 0 : 0),
+      totalQty,
       subtotal,
       tax,
       discountable,
@@ -400,7 +420,7 @@ export function PrepareBillDialog({
       grand,
       extra,
     };
-  }, [bill, rowSel, editQty, editPrice, addQty, pending, noDisc, svcPct, discPct, discAmt, delivery, nc]);
+  }, [bill, rowSel, editQty, editPrice, addQty, pending, noDisc, svcPct, discPct, discAmt, delivery, isComplimentary]);
 
   useEffect(() => {
     const it = bill?.items?.[rowSel];
@@ -614,7 +634,7 @@ export function PrepareBillDialog({
       if (e.key === "F5") {
         e.preventDefault();
         e.stopPropagation();
-        if (nc) void saveNc();
+        if (isComplimentary) void saveNc();
         else setAsk("save");
       }
       if (e.key === "F4") {
@@ -646,18 +666,20 @@ export function PrepareBillDialog({
     if (busy.current) return null;
     busy.current = true;
     try {
-      if (nc && !compId) {
-        onMessage("Select Complimentary A/C");
-        compRef.current?.focus();
+      if (isComplimentary && !compId) {
+        onMessage("Select Complimentary A/C", () => compRef.current?.focus());
         return null;
       }
       const invoice = await api.post<any>("/api/invoices/generate", {
         orderId,
         ...discountBody(),
-        serviceChargePct: nc ? 0 : svcPctValue(svcPct),
-        otherCharges: nc ? 0 : Math.round((Number(delivery) || 0) * 100),
+        serviceChargePct: isComplimentary ? 0 : svcPctValue(svcPct),
+        otherCharges: isComplimentary ? 0 : Math.round((Number(delivery) || 0) * 100),
         reason: remark || undefined,
-        complimentaryAccountId: nc ? compId : undefined,
+        complimentary: isComplimentary,
+        complimentaryAccountId: isComplimentary ? compId : undefined,
+        customerDisplayName: name.trim(),
+        customerGstin: gstin.trim(),
       });
       return invoice;
     } catch (e) {
@@ -697,8 +719,7 @@ export function PrepareBillDialog({
   async function saveNc() {
     if (busy.current || saving) return;
     if (!compId) {
-      onMessage("Select Complimentary A/C");
-      compRef.current?.focus();
+      onMessage("Select Complimentary A/C", () => compRef.current?.focus());
       return;
     }
     setSaving(true);
@@ -739,7 +760,7 @@ export function PrepareBillDialog({
                   <option>{shownTableNo(table, outlet)}</option>
                 </select>
               </td>
-              {nc ? (
+              {isComplimentary ? (
                 <>
                   <td className="lbl">Compl. A/C :</td>
                   <td colSpan={3}>
@@ -747,6 +768,7 @@ export function PrepareBillDialog({
                       <select
                         ref={compRef}
                         className="win green"
+                        data-cycle="ud"
                         value={compId}
                         onChange={(e) => setCompId(e.target.value)}
                         onKeyDown={(e) => {
@@ -781,7 +803,7 @@ export function PrepareBillDialog({
               <td className="lbl">Bill No. :</td>
               <td><input className="win" value={bill?.invoiceNumber ?? ""} readOnly /></td>
               <td className="lbl">Mobile No. :</td>
-              {nc ? (
+              {isComplimentary ? (
                 <>
                   <td><input className="win" data-num="int" value={mob} onChange={(e) => setMob(e.target.value.replace(/\D/g, ""))} /></td>
                   <td className="lbl">Pax :</td>
@@ -804,7 +826,12 @@ export function PrepareBillDialog({
             </tr>
             <tr>
               <td colSpan={2}>
-                <label className="chk"><input type="checkbox" checked={nc || comp} onChange={(e) => { if (!nc) setComp(e.target.checked); }} /> I want make this complimentary</label>
+                <label className="chk"><input type="checkbox" checked={isComplimentary} onChange={(e) => {
+                  if (nc) return;
+                  const enabled = e.target.checked;
+                  setComp(enabled);
+                  if (enabled) requestAnimationFrame(() => compRef.current?.focus());
+                }} /> I want make this complimentary</label>
               </td>
               <td className="lbl">Address :</td>
               <td colSpan={3}><input className="win" value={address} onChange={(e) => setAddress(e.target.value)} /></td>
@@ -1095,8 +1122,8 @@ export function PrepareBillDialog({
                             ref={discRef}
                             className="win pct green"
                             data-num="dec"
-                            value={nc ? "0.00" : (discMode.current === "amt" ? (shown.discountable ? ((shown.discount / shown.discountable) * 100).toFixed(2) : "0.00") : discPct)}
-                            readOnly={nc}
+                            value={isComplimentary ? "0.00" : (discMode.current === "amt" ? (shown.discountable ? ((shown.discount / shown.discountable) * 100).toFixed(2) : "0.00") : discPct)}
+                            readOnly={isComplimentary}
                             onChange={(e) => { const v = numText(e.target.value); discMode.current = "pct"; wantPct.current = Number(v) || 0; setDiscPct(v); }}
                             onBlur={(e) => { discMode.current = "pct"; wantPct.current = Number(e.target.value) || 0; void load({ mode: "pct", discountPct: wantPct.current }); }}
                             onKeyDown={(e) => {
@@ -1112,8 +1139,8 @@ export function PrepareBillDialog({
                           <input
                             className="win amt"
                             data-num="dec"
-                            value={nc ? "0.00" : (discMode.current === "amt" ? discAmt : rupee(shown.discount))}
-                            readOnly={nc}
+                            value={isComplimentary ? "0.00" : (discMode.current === "amt" ? discAmt : rupee(shown.discount))}
+                            readOnly={isComplimentary}
                             onChange={(e) => { const v = numText(e.target.value); discMode.current = "amt"; wantAmt.current = Number(v) || 0; setDiscAmt(v); }}
                             onBlur={(e) => { discMode.current = "amt"; wantAmt.current = Number(e.target.value) || 0; void load({ mode: "amt", discountAmt: wantAmt.current }); }}
                             onKeyDown={(e) => {
@@ -1135,8 +1162,8 @@ export function PrepareBillDialog({
                           <input
                             className="win pct"
                             data-num="dec"
-                            value={nc ? "0" : svcPct}
-                            readOnly={nc}
+                            value={isComplimentary ? "0" : svcPct}
+                            readOnly={isComplimentary}
                             onChange={(e) => setSvcPct(numText(e.target.value))}
                             onBlur={(e) => {
                               const serviceChargePct = svcPctValue(e.target.value);
@@ -1157,9 +1184,9 @@ export function PrepareBillDialog({
                       </td>
                     </tr>
                     <tr><td className="lbl">Tax Amount :</td><td><input className="win" readOnly value={rupee(shown.tax)} /></td></tr>
-                    <tr><td className="lbl">Delivery Charge :</td><td><input className="win" data-num="dec" readOnly={nc} value={nc ? "0" : delivery} onChange={(e) => { if (!nc) setDelivery(numText(e.target.value)); }} onBlur={() => { if (!nc) void load(); }} /></td></tr>
+                    <tr><td className="lbl">Delivery Charge :</td><td><input className="win" data-num="dec" readOnly={isComplimentary} value={isComplimentary ? "0" : delivery} onChange={(e) => { if (!isComplimentary) setDelivery(numText(e.target.value)); }} onBlur={() => { if (!isComplimentary) void load(); }} /></td></tr>
                     <tr><td className="lbl">Round Off :</td><td><input className="win" readOnly value={rupee(shown.roundOff)} /></td></tr>
-                    <tr><td className="lbl">Net Amount :</td><td><input className="win" readOnly value={nc ? 0 : Math.round(shown.grand / 100)} /></td></tr>
+                    <tr><td className="lbl">Net Amount :</td><td><input className="win" readOnly value={isComplimentary ? 0 : Math.round(shown.grand / 100)} /></td></tr>
                   </tbody>
                 </table>
               </td>
@@ -1171,8 +1198,7 @@ export function PrepareBillDialog({
           <button ref={printRef} type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => { if (!ask && !saving) void printBill(true); }} onKeyDown={(e) => {
             if (e.key === "Enter") { e.preventDefault(); if (!ask && !saving) void printBill(true); }
           }}>Print Bill (F10)</button>
-          <button type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => onReopen?.()}>Reopen Bill</button>
-          <button type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => { if (nc) void saveNc(); else setAsk("save"); }}>Save (F5)</button>
+          <button type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => { if (isComplimentary) void saveNc(); else setAsk("save"); }}>Save (F5)</button>
           <button type="button" className="fn" onClick={() => void load()}>Print Estimate</button>
           <button type="button" className="fn">Share Bill</button>
           <button type="button" className="fn" onClick={onClose}>Exit</button>

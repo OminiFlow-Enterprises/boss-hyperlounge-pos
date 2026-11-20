@@ -265,14 +265,18 @@ export function generateInvoice(
     serviceChargePct?: number;
     serviceChargeMode?: ServiceChargeMode;
     reason?: string;
+    complimentary?: boolean;
     complimentaryAccountId?: string;
+    customerDisplayName?: string;
+    customerGstin?: string;
   } = {},
 ) {
   assertPermission(ctx.actor.role, "SETTLE_BILL");
   const preview = previewBill(ctx, orderId, options);
   const nc = orderOutlet(ctx, orderId) === "NC";
-  const comp = nc ? requireComplimentary(ctx, options.complimentaryAccountId) : null;
-  if (nc) zeroComplimentaryBill(preview);
+  const isComplimentary = nc || Boolean(options.complimentary);
+  const comp = isComplimentary ? requireComplimentary(ctx, options.complimentaryAccountId) : null;
+  if (isComplimentary) zeroComplimentaryBill(preview);
   if ((preview.discount ?? 0) > 0) {
     if (preview.discount > preview.foodTotal + preview.drinksTotal * 0.2) {
       assertPermission(ctx.actor.role, "LARGE_DISCOUNT");
@@ -319,7 +323,8 @@ export function generateInvoice(
           `UPDATE invoices SET
              food_total = ?, drinks_total = ?, service_charge = ?, service_charge_mode = ?, service_charge_pct = ?,
              discount = ?, tax = ?, other_charges = ?, grand_total = ?,
-             complimentary_account_id = ?, complimentary_name = ?
+             complimentary_account_id = ?, complimentary_name = ?,
+             customer_display_name = COALESCE(?, customer_display_name), customer_gstin = COALESCE(?, customer_gstin)
            WHERE id = ?`,
         )
         .run(
@@ -334,12 +339,16 @@ export function generateInvoice(
           bill.grandTotal,
           comp?.id ?? null,
           comp?.name ?? "",
+          options.customerDisplayName == null ? null : String(options.customerDisplayName).trim(),
+          options.customerGstin == null ? null : String(options.customerGstin).trim(),
           existing.id,
         );
       ctx.db.prepare("DELETE FROM invoice_items WHERE invoice_id = ?").run(existing.id);
       writeItems(existing.id);
-      if (nc) finishComplimentary(ctx, orderId, existing.id, bill.tableId);
-      else syncClubCardCharge(ctx, orderId, true);
+      if (isComplimentary) {
+        syncClubCardCharge(ctx, orderId, true);
+        finishComplimentary(ctx, orderId, existing.id, bill.tableId);
+      } else syncClubCardCharge(ctx, orderId, true);
       return ctx.db.prepare("SELECT * FROM invoices WHERE id = ?").get(existing.id);
     })();
   }
@@ -353,8 +362,8 @@ export function generateInvoice(
            id, invoice_number, session_id, order_id, table_id, customer_id, card_id,
            food_total, drinks_total, service_charge, service_charge_mode, service_charge_pct,
            discount, tax, other_charges, grand_total, status, cashier_id, created_at, paid_at,
-           complimentary_account_id, complimentary_name
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           complimentary_account_id, complimentary_name, customer_display_name, customer_gstin
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -373,16 +382,20 @@ export function generateInvoice(
         bill.tax,
         bill.otherCharges,
         bill.grandTotal,
-        nc ? "PAID" : "UNPAID",
+        "UNPAID",
         ctx.actor.staffId,
         nowIso(),
-        nc ? nowIso() : null,
+        null,
         comp?.id ?? null,
         comp?.name ?? "",
+        String(options.customerDisplayName ?? "").trim(),
+        String(options.customerGstin ?? "").trim(),
       );
     writeItems(id);
-    if (nc) finishComplimentary(ctx, orderId, id, bill.tableId);
-    else {
+    if (isComplimentary) {
+      syncClubCardCharge(ctx, orderId, true);
+      finishComplimentary(ctx, orderId, id, bill.tableId);
+    } else {
       ctx.db.prepare("UPDATE orders SET status = 'SETTLING' WHERE id = ?").run(orderId);
       setTableStatus(ctx, bill.tableId, "PAYMENT_PENDING");
       syncClubCardCharge(ctx, orderId, true);
@@ -412,14 +425,15 @@ function clubChargeRef(orderId: string) {
 function clubBillNet(ctx: AppContext, orderId: string) {
   const inv = ctx.db
     .prepare(
-      `SELECT discount, service_charge_pct, service_charge_mode, other_charges
+      `SELECT discount, service_charge_pct, service_charge_mode, other_charges, complimentary_account_id
          FROM invoices
         WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')
         ORDER BY created_at DESC LIMIT 1`,
     )
     .get(orderId) as
-    | { discount: number; service_charge_pct: number; service_charge_mode: string; other_charges: number }
+    | { discount: number; service_charge_pct: number; service_charge_mode: string; other_charges: number; complimentary_account_id: string | null }
     | undefined;
+  if (inv?.complimentary_account_id) return 0;
   try {
     const bill = previewBill(
       ctx,
@@ -696,6 +710,8 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
     invoice_number: string;
     order_id: string;
     customer_id: string | null;
+    customer_display_name: string;
+    customer_gstin: string;
     food_total: number;
     drinks_total: number;
     service_charge: number;
@@ -725,6 +741,7 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
       | undefined;
     guestName = cust?.name ?? "";
   }
+  guestName = invoice.customer_display_name?.trim() || guestName;
   const subtotal = invoice.food_total + invoice.drinks_total;
   const discountPct = subtotal > 0 ? Math.round((invoice.discount / subtotal) * 10000) / 100 : 0;
   const unrounded =
@@ -804,6 +821,7 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
     tableNo: printedTableNo(ctx, { tableId: invoice.table_id, orderId: invoice.order_id }),
     waiter,
     guestName,
+    guestGstin: invoice.customer_gstin ?? "",
     createdAt: invoice.created_at,
     items,
     subtotal,

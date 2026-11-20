@@ -994,6 +994,16 @@ table.data tbody tr:hover td.cell-on { background: #0078d7; color: #fff; }
   pointer-events: none;
 }
 .gst-sum-manual .gst-lbl-in { text-align: left; }
+.gst-sum-manual textarea.gst-lbl-in {
+  display: block;
+  min-height: 22px;
+  height: 22px;
+  padding: 2px 3px;
+  line-height: 17px;
+  white-space: pre-wrap;
+  overflow: hidden;
+  resize: none;
+}
 .gst-manual-plus,
 .gst-manual-del {
   width: 22px;

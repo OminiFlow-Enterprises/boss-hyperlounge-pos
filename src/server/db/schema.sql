@@ -400,7 +400,9 @@ CREATE TABLE IF NOT EXISTS invoices (
   created_at TEXT NOT NULL,
   paid_at TEXT,
   complimentary_account_id TEXT,
-  complimentary_name TEXT NOT NULL DEFAULT ''
+  complimentary_name TEXT NOT NULL DEFAULT '',
+  customer_display_name TEXT NOT NULL DEFAULT '',
+  customer_gstin TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS complimentary_accounts (

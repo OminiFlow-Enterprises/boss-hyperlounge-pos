@@ -302,7 +302,7 @@ export function App() {
     setAlertText("");
     const after = alertAfterRef.current;
     alertAfterRef.current = null;
-    after?.();
+    if (after) window.requestAnimationFrame(() => window.requestAnimationFrame(after));
   }
 
   function go(next: AppView, nextOutlet?: string) {
@@ -835,7 +835,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     const cardOnTable = (known?.card_number || "").trim();
     const running = Boolean(known && known.status !== "AVAILABLE");
     if (!raw) {
-      onMessage("Select Table No first", focusTableNo);
+      // Keep the operator in the table field without interrupting table selection.
+      focusTableNo();
       return null;
     }
     if (clubMode && !cardNoReady(clubCard) && !cardOnTable && !running) {
@@ -1120,7 +1121,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       return false;
     }
     if (!orderId) {
-      onMessage("Select Table No first", focusTableNo);
+      // Keep the operator in the table field without interrupting table selection.
+      focusTableNo();
       return false;
     }
     const n = Number.isInteger(qty) && qty !== 0 ? qty : parseQty(String(qty)) ?? 1;
@@ -1471,7 +1473,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
 
   useLayoutEffect(() => {
     if (listOpen) placeDrop();
-  }, [listOpen, itemQuery, items.length, pick]);
+  }, [listOpen, items.length]);
 
   // visiblePicks already windows the drop list — never scrollIntoView the
   // highlight (that scrolls the whole billing pane while typing / Enter).
@@ -2200,10 +2202,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           mobile={mobile}
           catalog={catalog}
           onChanged={() => onRefresh()}
-          onReopen={() => {
-            setBillOrder(null);
-            void openReopenList();
-          }}
           onClose={() => setBillOrder(null)}
           onPrinted={(inv) => {
             onInvoice(inv);
@@ -2627,17 +2625,11 @@ function HistoryScreen({ invoice }: { invoice: Invoice | null }) {
     <div>
       {invoice && <p className="ok">{invoice.invoice_number} · {formatINR(invoice.grand_total)}</p>}
       <table className="data">
-        <thead><tr><th>Invoice</th><th>Table</th><th>Total</th><th>Status</th><th /></tr></thead>
+        <thead><tr><th>Invoice</th><th>Table</th><th>Total</th><th>Status</th></tr></thead>
         <tbody>
           {rows.map((r) => (
             <tr key={r.id}>
               <td>{r.invoice_number}</td><td>{r.table_label || r.table_code}</td><td>{formatINR(r.grand_total)}</td><td>{r.status}</td>
-              <td><button className="fn" onClick={() => {
-                void api.post(`/api/invoices/${r.id}/print`).then(async (res) => {
-                  const { handleBillPrintResponse } = await import("./printBillHtml");
-                  await handleBillPrintResponse(res as any);
-                }).catch(() => null);
-              }}>Reprint</button></td>
             </tr>
           ))}
         </tbody>
