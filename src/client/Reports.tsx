@@ -2224,6 +2224,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
   const [data, setData] = useState<any>({ rows: [], total: 0 });
   const [sel, setSel] = useState<string | null>(null);
   const [billEdit, setBillEdit] = useState<{
+    invoiceId: string;
     orderId: string;
     table: { id: string; code: string; name: string; status: string; floor_name: string; floor_id: string; current_session_id: string | null; card_number?: string; outlet?: string };
     outlet: string;
@@ -2284,6 +2285,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
     }
     const code = String(row.table_code || "");
     setBillEdit({
+      invoiceId: String(row.invoice_id || ""),
       orderId,
       table: {
         id: tableId,
@@ -2379,7 +2381,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
         <table className="data set-table bill-rpt-table">
           <thead>
             <tr>
-              {["Bill Date", "BillNo", "TableNo", "Net Amount", "Remark", "UserName", "CASH", "card", "B.T.C.", "WALLET", "ROOM TRANSFER", "Other MOD", "ALLOWAN"].map((h) => (
+              {["Bill Date", "BillNo", "TableNo", "Net Amount", "Service Charge", "Remark", "UserName", "CASH", "card", "B.T.C.", "WALLET", "ROOM TRANSFER", "Other MOD", "ALLOWAN"].map((h) => (
                 <th key={h}>{h}</th>
               ))}
             </tr>
@@ -2401,6 +2403,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
                   <td>{shortBillNo(r.invoice_number)}</td>
                   <td>{tableLabel}</td>
                   <td className="num">{inr(r.net_amount)}</td>
+                  <td className="num">{Number(r.service_charge) ? inr(r.service_charge) : ""}</td>
                   <td>{r.remark || ""}</td>
                   <td>{r.username || ""}</td>
                   <td className="num">{Number(r.cash) ? inr(r.cash) : ""}</td>
@@ -2425,6 +2428,8 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
       {billEdit && (
         <PrepareBillDialog
           orderId={billEdit.orderId}
+          existingInvoiceId={billEdit.invoiceId}
+          updateOnly
           table={billEdit.table}
           outlet={billEdit.outlet}
           waiter=""

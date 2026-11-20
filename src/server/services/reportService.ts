@@ -491,7 +491,10 @@ export function gstBillWise(
       discount: Number(inv.discount) || 0,
       discountPct: 0,
       serviceCharge: Number(inv.service_charge) || 0,
-      serviceChargePct: Number(inv.service_charge_pct) || 10,
+      serviceChargePct:
+        Number(inv.service_charge_pct ?? 0) !== 0 || Number(inv.service_charge) === 0
+          ? Number(inv.service_charge_pct ?? 0)
+          : 10,
       otherCharges: Number(inv.other_charges) || 0,
       roundOff: 0,
       taxTotal: Number(inv.tax) || 0,
@@ -1011,7 +1014,7 @@ export function billReport(
               COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
               t.code AS table_code,
               ${INVOICE_ORDER_CARD} AS order_card,
-              i.grand_total, i.status, i.created_at, i.discount,
+              i.grand_total, i.status, i.created_at, i.discount, i.service_charge,
               i.food_total, i.drinks_total, cu.name AS guest, cu.mobile AS mobile,
               COALESCE(NULLIF(t.outlet, ''), 'BAR') AS outlet_name,
               s.name AS username,
@@ -1049,6 +1052,7 @@ export function billReport(
     return stampClubTable({
       ...row,
       net_amount: Number(row.grand_total) || 0,
+      service_charge: Number(row.service_charge) || 0,
       cash,
       card,
       btc: 0,

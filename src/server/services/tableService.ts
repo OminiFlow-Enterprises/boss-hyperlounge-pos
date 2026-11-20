@@ -57,7 +57,7 @@ function withNetTotals(ctx: AppContext, rows: Array<Record<string, unknown>>) {
       ORDER BY created_at DESC LIMIT 1`,
   );
   const invoiceStmt = ctx.db.prepare(
-    `SELECT discount, service_charge_pct, service_charge_mode, other_charges
+    `SELECT discount, service_charge, service_charge_pct, service_charge_mode, other_charges
        FROM invoices
       WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')
       ORDER BY created_at DESC LIMIT 1`,
@@ -75,10 +75,13 @@ function withNetTotals(ctx: AppContext, rows: Array<Record<string, unknown>>) {
       continue;
     }
     const inv = invoiceStmt.get(order.id) as
-      | { discount: number; service_charge_pct: number; service_charge_mode: string; other_charges: number }
+      | { discount: number; service_charge: number; service_charge_pct: number; service_charge_mode: string; other_charges: number }
       | undefined;
     try {
       const savedPct = Number(inv?.service_charge_pct) || 0;
+      // Preserve an explicitly saved 0%. Older invoices can have a positive
+      // charge but no recorded rate, so keep the configured fallback for them.
+      const hasSavedPct = Boolean(inv) && (savedPct !== 0 || Number(inv?.service_charge) === 0);
       const bill = previewBill(
         ctx,
         order.id,
@@ -86,8 +89,7 @@ function withNetTotals(ctx: AppContext, rows: Array<Record<string, unknown>>) {
           ? {
               discount: Number(inv.discount) || 0,
               discountFrom: "amount",
-              // Prefer saved %; if old bill stored 0, fall through to settings default (10)
-              ...(savedPct > 0
+              ...(hasSavedPct
                 ? {
                     serviceChargePct: savedPct,
                     serviceChargeMode: (inv.service_charge_mode || "EXCLUSIVE") as ServiceChargeMode,
@@ -299,18 +301,35 @@ export function transferTable(ctx: AppContext, fromTableId: string, toTableId: s
   const to = getTable(ctx, toTableId);
   if (!from.current_session_id) throw new AppError("Source table has no running order");
   if (from.status === "PAYMENT_PENDING") throw new AppError("Printed bill table cannot be transferred");
-  if (to.status !== "AVAILABLE") throw new AppError(`Destination table ${to.code} is not available`);
-
   const sessionId = from.current_session_id;
   const destOutlet = to.outlet || "BAR";
-  // Keep destination table's outlet; move the open session onto that outlet/table.
-  ctx.db.prepare("UPDATE table_sessions SET table_id = ?, outlet = ? WHERE id = ?").run(to.id, destOutlet, sessionId);
-  ctx.db.prepare("UPDATE orders SET table_id = ? WHERE session_id = ?").run(to.id, sessionId);
-  ctx.db.prepare("UPDATE kots SET table_id = ? WHERE session_id = ?").run(to.id, sessionId);
-  ctx.db.prepare("UPDATE invoices SET table_id = ? WHERE session_id = ?").run(to.id, sessionId);
-  ctx.db
-    .prepare("UPDATE dining_tables SET status = ?, current_session_id = ? WHERE id = ?")
-    .run(from.status === "AVAILABLE" ? "OCCUPIED" : from.status, sessionId, to.id);
+  if (to.current_session_id) {
+    // A running destination keeps its session and order. Fold the source order
+    // into it, just as a table merge does, then close the source session.
+    const targetSessionId = to.current_session_id;
+    const sourceOrder = ctx.db
+      .prepare("SELECT id FROM orders WHERE session_id = ? AND status IN ('OPEN','BILL_REQUESTED','SETTLING') ORDER BY created_at LIMIT 1")
+      .get(sessionId) as { id: string } | undefined;
+    const targetOrder = ctx.db
+      .prepare("SELECT id FROM orders WHERE session_id = ? AND status IN ('OPEN','BILL_REQUESTED','SETTLING') ORDER BY created_at LIMIT 1")
+      .get(targetSessionId) as { id: string } | undefined;
+    if (!sourceOrder || !targetOrder) throw new AppError("Both tables must have running orders to transfer");
+    ctx.db.prepare("UPDATE order_items SET order_id = ? WHERE order_id = ?").run(targetOrder.id, sourceOrder.id);
+    ctx.db.prepare("UPDATE kots SET session_id = ?, table_id = ?, order_id = ? WHERE session_id = ?")
+      .run(targetSessionId, to.id, targetOrder.id, sessionId);
+    ctx.db.prepare("UPDATE orders SET status = 'CANCELLED' WHERE session_id = ? AND id != ?").run(sessionId, sourceOrder.id);
+    ctx.db.prepare("UPDATE orders SET status = 'CANCELLED' WHERE id = ?").run(sourceOrder.id);
+    ctx.db.prepare("UPDATE table_sessions SET status = 'MERGED', closed_at = ? WHERE id = ?").run(nowIso(), sessionId);
+  } else {
+    // Keep destination table's outlet; move the open session onto that outlet/table.
+    ctx.db.prepare("UPDATE table_sessions SET table_id = ?, outlet = ? WHERE id = ?").run(to.id, destOutlet, sessionId);
+    ctx.db.prepare("UPDATE orders SET table_id = ? WHERE session_id = ?").run(to.id, sessionId);
+    ctx.db.prepare("UPDATE kots SET table_id = ? WHERE session_id = ?").run(to.id, sessionId);
+    ctx.db.prepare("UPDATE invoices SET table_id = ? WHERE session_id = ?").run(to.id, sessionId);
+    ctx.db
+      .prepare("UPDATE dining_tables SET status = ?, current_session_id = ? WHERE id = ?")
+      .run(from.status === "AVAILABLE" ? "OCCUPIED" : from.status, sessionId, to.id);
+  }
   ctx.db
     .prepare("UPDATE dining_tables SET status = 'AVAILABLE', current_session_id = NULL WHERE id = ?")
     .run(from.id);

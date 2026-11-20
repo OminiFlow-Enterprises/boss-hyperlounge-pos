@@ -540,7 +540,7 @@ button.dept-btn:focus-visible {
 .estimate:not(.item-list) tbody tr.occ:nth-child(odd) td { background: #fff; color: #000; font-weight: 700; }
 .estimate:not(.item-list) tbody tr.occ:nth-child(even) td { background: #ffc0cb; color: #000; font-weight: 700; }
 .estimate:not(.item-list) tbody tr.occ td.bill { color: #0000ff; }
-.estimate tr.settle td { background: #90ee90; color: #008000; font-weight: 700; }
+.estimate tr.settle td { background: #90ee90; color: #000; font-weight: 700; }
 .estimate tr:focus { outline: 1px dotted #000; }
 .estimate-fill { flex: 1; background: #f7f7f7; }
 .estimate-total {

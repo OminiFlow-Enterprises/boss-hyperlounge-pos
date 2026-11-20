@@ -157,6 +157,8 @@ export function PrepareBillDialog({
   onPrinted,
   onSettle,
   onChanged,
+  updateOnly = false,
+  existingInvoiceId,
   onMessage,
 }: {
   orderId: string;
@@ -171,6 +173,9 @@ export function PrepareBillDialog({
   /** Save (F5) + Yes opens settlement. Does not ask to print. */
   onSettle: (invoice: any) => void;
   onChanged?: () => void;
+  /** Bill Report edits update the selected invoice without opening settlement. */
+  updateOnly?: boolean;
+  existingInvoiceId?: string;
   onMessage: (m: string, after?: () => void) => void;
 }) {
   const [bill, setBill] = useState<any>(null);
@@ -182,6 +187,8 @@ export function PrepareBillDialog({
   const wantAmt = useRef(0);
   const DEFAULT_SVC_PCT = 10;
   const [svcPct, setSvcPct] = useState(String(DEFAULT_SVC_PCT));
+  const svcPctDraft = useRef(String(DEFAULT_SVC_PCT));
+  const previewRequest = useRef(0);
   function svcPctValue(raw?: string | number | null) {
     const n = Number(raw);
     return Number.isFinite(n) && n >= 0 ? n : DEFAULT_SVC_PCT;
@@ -247,6 +254,7 @@ export function PrepareBillDialog({
   }
 
   async function load(next?: { discountPct?: number; discountAmt?: number; mode?: "pct" | "amt"; serviceChargePct?: number; otherCharges?: number; excludeItemIds?: string[] }) {
+    const request = ++previewRequest.current;
     const mode = next?.mode ?? discMode.current;
     let preview: any;
     try {
@@ -258,43 +266,67 @@ export function PrepareBillDialog({
       });
     } catch (e) {
       if (e instanceof Error && /no items/i.test(e.message)) {
-        setBill((prev: any) => prev ? { ...prev, items: [], totalQty: 0, foodTotal: 0, drinksTotal: 0, tax: 0, serviceCharge: 0, discount: 0, grandTotal: 0, roundOff: 0 } : prev);
+        if (request === previewRequest.current) {
+          setBill((prev: any) => prev ? { ...prev, items: [], totalQty: 0, foodTotal: 0, drinksTotal: 0, tax: 0, serviceCharge: 0, discount: 0, grandTotal: 0, roundOff: 0 } : prev);
+        }
         return null;
       }
       throw e;
     }
-    setBill(preview);
-    if (mode === "amt") setDiscPct(Number(preview.discountPct ?? 0).toFixed(2));
-    setDiscAmt(rupee(preview.discount ?? 0));
-    if (next?.serviceChargePct == null && preview.serviceChargePct != null && discPct === "0.00" && !bill) {
-      setSvcPct(String(preview.serviceChargePct));
+    if (request === previewRequest.current) {
+      setBill(preview);
+      if (mode === "amt") setDiscPct(Number(preview.discountPct ?? 0).toFixed(2));
+      setDiscAmt(rupee(preview.discount ?? 0));
+      if (next?.serviceChargePct == null && preview.serviceChargePct != null && discPct === "0.00" && !bill) {
+        svcPctDraft.current = String(preview.serviceChargePct);
+        setSvcPct(svcPctDraft.current);
+      }
     }
     return preview;
   }
 
   useEffect(() => {
     let cancel = false;
+    previewRequest.current++;
+    // This dialog can be reused for another order. Clear all bill-specific
+    // discount state before looking up an existing invoice so a previous
+    // order's amount/mode/exclusions cannot leak into a new bill.
+    discMode.current = "pct";
+    wantPct.current = 0;
+    wantAmt.current = 0;
+    setDiscPct("0.00");
+    setDiscAmt("0.00");
+    setNoDisc([]);
+    setSvcPct(String(DEFAULT_SVC_PCT));
+    svcPctDraft.current = String(DEFAULT_SVC_PCT);
+    setDelivery("0");
+    setBill(null);
     setComp(outlet === "NC");
     setCompId("");
     (async () => {
       let next: { discountAmt?: number; mode?: "amt"; serviceChargePct?: number; otherCharges?: number } | undefined;
       let existingComplimentary = outlet === "NC";
       try {
-        const snap = await api.get<any>(`/api/tables/${table.id}/invoice`);
+        const snap = await api.get<any>(existingInvoiceId
+          ? `/api/invoices/${encodeURIComponent(existingInvoiceId)}`
+          : `/api/tables/${table.id}/invoice`);
         const inv = snap?.invoice;
         if (inv && !cancel) {
           existingComplimentary = existingComplimentary || Boolean(inv.complimentary_account_id);
           if (outlet !== "NC") setComp(Boolean(inv.complimentary_account_id));
           setCompId(String(inv.complimentary_account_id || ""));
           const discountAmt = Number(inv.discount ?? 0) / 100;
-          // Old bills saved with 0% must still pick up the default 10% service charge
+          // A zero rate is a valid saved value. Only treat a zero rate as a
+          // legacy missing value when the old invoice still has a charge.
           const savedPct = Number(inv.service_charge_pct ?? 0);
-          const serviceChargePct = savedPct > 0 ? savedPct : DEFAULT_SVC_PCT;
+          const savedServiceCharge = Number(inv.service_charge ?? 0);
+          const serviceChargePct = savedPct !== 0 || savedServiceCharge === 0 ? savedPct : DEFAULT_SVC_PCT;
           const otherCharges = Number(inv.other_charges ?? 0) / 100;
           discMode.current = "amt";
           wantAmt.current = discountAmt;
           setDiscAmt(discountAmt.toFixed(2));
           setSvcPct(String(serviceChargePct));
+          svcPctDraft.current = String(serviceChargePct);
           setDelivery(String(otherCharges));
           next = { mode: "amt", discountAmt, serviceChargePct, otherCharges };
         }
@@ -311,7 +343,7 @@ export function PrepareBillDialog({
       }
     })();
     return () => { cancel = true; };
-  }, [orderId, outlet]);
+  }, [orderId, outlet, existingInvoiceId]);
 
   useEffect(() => {
     if (!isComplimentary) return;
@@ -634,7 +666,8 @@ export function PrepareBillDialog({
       if (e.key === "F5") {
         e.preventDefault();
         e.stopPropagation();
-        if (isComplimentary) void saveNc();
+        if (updateOnly) void updateBill();
+        else if (isComplimentary) void saveNc();
         else setAsk("save");
       }
       if (e.key === "F4") {
@@ -672,8 +705,9 @@ export function PrepareBillDialog({
       }
       const invoice = await api.post<any>("/api/invoices/generate", {
         orderId,
+        invoiceId: updateOnly ? existingInvoiceId : undefined,
         ...discountBody(),
-        serviceChargePct: isComplimentary ? 0 : svcPctValue(svcPct),
+        serviceChargePct: isComplimentary ? 0 : svcPctValue(svcPctDraft.current),
         otherCharges: isComplimentary ? 0 : Math.round((Number(delivery) || 0) * 100),
         reason: remark || undefined,
         complimentary: isComplimentary,
@@ -714,6 +748,14 @@ export function PrepareBillDialog({
     if (!invoice) return;
     if (print) await printInvoice(invoice);
     onPrinted(invoice);
+  }
+
+  async function updateBill() {
+    if (busy.current || saving) return;
+    setSaving(true);
+    const invoice = await saveBill();
+    setSaving(false);
+    if (invoice?.id) onPrinted(invoice);
   }
 
   async function saveNc() {
@@ -1164,9 +1206,14 @@ export function PrepareBillDialog({
                             data-num="dec"
                             value={isComplimentary ? "0" : svcPct}
                             readOnly={isComplimentary}
-                            onChange={(e) => setSvcPct(numText(e.target.value))}
+                            onChange={(e) => {
+                              const value = numText(e.target.value);
+                              svcPctDraft.current = value;
+                              setSvcPct(value);
+                            }}
                             onBlur={(e) => {
                               const serviceChargePct = svcPctValue(e.target.value);
+                              svcPctDraft.current = String(serviceChargePct);
                               setSvcPct(String(serviceChargePct));
                               void load({ serviceChargePct });
                             }}
@@ -1174,6 +1221,7 @@ export function PrepareBillDialog({
                               if (e.key !== "Enter") return;
                               e.preventDefault();
                               const serviceChargePct = svcPctValue((e.target as HTMLInputElement).value);
+                              svcPctDraft.current = String(serviceChargePct);
                               setSvcPct(String(serviceChargePct));
                               void load({ serviceChargePct }).then(() => printRef.current?.focus());
                             }}
@@ -1198,7 +1246,11 @@ export function PrepareBillDialog({
           <button ref={printRef} type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => { if (!ask && !saving) void printBill(true); }} onKeyDown={(e) => {
             if (e.key === "Enter") { e.preventDefault(); if (!ask && !saving) void printBill(true); }
           }}>Print Bill (F10)</button>
-          <button type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => { if (isComplimentary) void saveNc(); else setAsk("save"); }}>Save (F5)</button>
+          <button type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => {
+            if (updateOnly) void updateBill();
+            else if (isComplimentary) void saveNc();
+            else setAsk("save");
+          }}>{updateOnly ? "Update (F5)" : "Save (F5)"}</button>
           <button type="button" className="fn" onClick={() => void load()}>Print Estimate</button>
           <button type="button" className="fn">Share Bill</button>
           <button type="button" className="fn" onClick={onClose}>Exit</button>

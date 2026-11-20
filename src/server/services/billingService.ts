@@ -11,7 +11,6 @@ import { printedTableNo } from "./tableLabel.js";
 import { formatTableNo } from "../../shared/tableLabel.js";
 import { billPrintMode, renderBillReceiptHtml } from "../hardware/billReceiptHtml.js";
 import { buildBillTotalLines } from "../hardware/billTotals.js";
-import { printHtmlToQueue } from "../hardware/htmlPrinter.js";
 import { getServiceCharge, getVenueProfile } from "./settingsService.js";
 import { displayTaxRate } from "./itemService.js";
 
@@ -257,6 +256,7 @@ export function generateInvoice(
   ctx: AppContext,
   orderId: string,
   options: {
+    invoiceId?: string;
     discount?: number;
     discountPct?: number;
     discountFrom?: "amount" | "percent";
@@ -284,9 +284,17 @@ export function generateInvoice(
     audit(ctx, "DISCOUNT", "order", orderId, options.reason ?? "discount", 0, preview.discount);
   }
 
-  const existing = ctx.db
-    .prepare("SELECT * FROM invoices WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')")
-    .get(orderId) as { id: string; status: string } | undefined;
+  const existing = options.invoiceId
+    ? ctx.db
+        .prepare("SELECT * FROM invoices WHERE id = ? AND order_id = ? AND status IN ('UNPAID','PARTIAL','PAID')")
+        .get(options.invoiceId, orderId) as { id: string; status: string } | undefined
+    : ctx.db
+        .prepare(
+          `SELECT * FROM invoices
+            WHERE order_id = ? AND status IN ('UNPAID','PARTIAL','PAID')
+            ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(orderId) as { id: string; status: string } | undefined;
 
   const bill = preview;
   const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId) as {
@@ -316,7 +324,6 @@ export function generateInvoice(
 
   if (existing) {
     const paid = (ctx.db.prepare("SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE invoice_id = ?").get(existing.id) as { paid: number }).paid;
-    if (paid > bill.grandTotal) throw new AppError("Bill amount is below the amount already settled");
     return ctx.db.transaction(() => {
       ctx.db
         .prepare(
@@ -345,6 +352,16 @@ export function generateInvoice(
         );
       ctx.db.prepare("DELETE FROM invoice_items WHERE invoice_id = ?").run(existing.id);
       writeItems(existing.id);
+      // Keep edits to a settled bill on the invoice already referenced by its
+      // payments. Recalculate its status so the reports show the revised bill
+      // total while retaining the original payment history.
+      const isPaid = bill.grandTotal > 0 && paid >= bill.grandTotal;
+      ctx.db
+        .prepare("UPDATE invoices SET status = ?, paid_at = CASE WHEN ? = 1 THEN COALESCE(paid_at, ?) ELSE NULL END WHERE id = ?")
+        .run(isPaid ? "PAID" : paid > 0 ? "PARTIAL" : "UNPAID", isPaid ? 1 : 0, nowIso(), existing.id);
+      ctx.db
+        .prepare("UPDATE orders SET status = ? WHERE id = ?")
+        .run(isPaid ? "PAID" : "SETTLING", orderId);
       if (isComplimentary) {
         syncClubCardCharge(ctx, orderId, true);
         finishComplimentary(ctx, orderId, existing.id, bill.tableId);
@@ -837,6 +854,9 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
   };
 
   // HTML/CSS (Arial) matches native Windows slip. ESC/POS kept for POS_BILL_PRINT=escpos.
+  // For HTML, hand the markup to the renderer. The renderer owns the Electron
+  // print bridge; spawning the packaged app executable from its API child can
+  // start another app instance and report success without printing anything.
   if (billPrintMode() === "escpos") {
     const result = await ctx.hardware.receipt.printReceipt(payload);
     if (!result.ok) {
@@ -846,16 +866,11 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
   }
 
   const html = renderBillReceiptHtml(payload);
-  const printed = await printHtmlToQueue(html, "bill");
-  if (!printed.ok) {
-    audit(ctx, "PRINTER_FAILURE", "invoice", invoiceId, printed.error ?? "html print failed", null, invoice.invoice_number);
-  }
   return {
-    ok: printed.ok,
+    ok: true,
     mode: "html" as const,
     html,
-    printed: printed.ok,
-    error: printed.error,
+    printed: false,
   };
 }
 
