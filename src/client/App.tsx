@@ -155,6 +155,7 @@ const MENUS: Array<{ id: string; label: string; items: MenuNode[] }> = [
         { label: "GST Report", view: "gst-report" },
         { label: "Point Of Sales", view: "point-of-sales" },
         { label: "Item Wise Sales", view: "item-wise-sale" },
+        { label: "Item Wise Group Sales Report", view: "item-wise-group" },
         { label: "Item Wise Sales Detail", view: "item-wise-detail" },
       ] },
       { label: "Sales Report", children: [
@@ -177,6 +178,7 @@ const VIEW_TITLE: Partial<Record<AppView, string>> = {
   "gst-report": "FnB GST Report",
   "point-of-sales": "FnB Point Of Sales",
   "item-wise-sale": "Item Wise Sale",
+  "item-wise-group": "Item Wise Group Sales Report",
   "item-wise-detail": "Item Wise Sales Detail",
   "item-combine-stock": "Item Combine Stock Report",
   "outlet-stock": "Outlet Wise Stock Report",
@@ -528,7 +530,7 @@ export function App() {
       )}
 
       {signedIn && view !== "billing" && view !== "login" && view !== "user-master" && (
-        <div className={`workarea ${["card-block","advance-booking","booking-report","item-wise-sale","settlement-report","card-settlement-report","kot-report","bill-report","history","item-combine-stock","outlet-stock","time-sale","tax-wise"].includes(view) ? "plain" : ""}`}>
+        <div className={`workarea ${["card-block","advance-booking","booking-report","item-wise-sale","item-wise-group","settlement-report","card-settlement-report","kot-report","bill-report","history","item-combine-stock","outlet-stock","time-sale","tax-wise"].includes(view) ? "plain" : ""}`}>
           {view === "kot" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard /></div>}
           {view === "kitchen" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="KITCHEN" /></div>}
           {view === "bar" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="BAR" /></div>}

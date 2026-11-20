@@ -179,6 +179,7 @@ export function viewRight(view: string, outlet?: string): string | null {
   if (view === "gst-report") return "report.gst";
   if (view === "point-of-sales") return "report.pos";
   if (view === "item-wise-sale") return "report.item";
+  if (view === "item-wise-group") return "report.item";
   if (view === "item-wise-detail") return "report.itemDetail";
   if (view === "item-combine-stock") return "report.stock";
   if (view === "outlet-stock") return "report.outlet";

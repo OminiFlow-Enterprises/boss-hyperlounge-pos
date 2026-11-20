@@ -103,6 +103,7 @@ export type NavView =
   | "gst-report"
   | "point-of-sales"
   | "item-wise-sale"
+  | "item-wise-group"
   | "item-wise-detail"
   | "item-combine-stock"
   | "outlet-stock"

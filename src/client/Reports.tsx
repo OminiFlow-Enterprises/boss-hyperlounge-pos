@@ -559,7 +559,9 @@ export function GstReport({ onExit }: { onExit: () => void }) {
       if (document.querySelector(".alert-dlg, .confirm-dlg, .confirm-overlay")) return;
       if (e.key === "Escape") {
         e.preventDefault();
-        e.stopPropagation();
+        // Own Escape before the app-level handler so GST always exits through its
+        // current callback instead of allowing competing navigation handlers.
+        e.stopImmediatePropagation();
         closeRef.current();
         return;
       }
@@ -580,8 +582,10 @@ export function GstReport({ onExit }: { onExit: () => void }) {
         requestAnimationFrame(() => focusSelRow(false));
       }
     }
-    window.addEventListener("keydown", keys, true);
-    return () => window.removeEventListener("keydown", keys, true);
+    // Document capture runs before App's window capture handler. This makes GST's
+    // Escape route deterministic even when the page is nested in the global host.
+    document.addEventListener("keydown", keys, true);
+    return () => document.removeEventListener("keydown", keys, true);
   });
 
   useLayoutEffect(() => {
@@ -1080,6 +1084,85 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
       </div>
     </div>
   );
+}
+
+function liquorBaseName(value: unknown) {
+  return String(value ?? "").trim().toUpperCase()
+    .replace(/\s+(?:30\s*ML|750\s*ML|BTL|BOTTLE)\s*$/i, "")
+    .replace(/\s+/g, " ").trim();
+}
+
+export function ItemWiseGroupSales({ onExit }: { onExit: () => void }) {
+  const [from, setFrom] = useState(isoDay());
+  const [to, setTo] = useState(isoDay());
+  const [period, setPeriod] = useState<"dates" | "month">("dates");
+  const [month, setMonth] = useState(isoDay().slice(0, 7));
+  const [startHour, setStartHour] = useState("10");
+  const [startMinute, setStartMinute] = useState("00");
+  const [startPeriod, setStartPeriod] = useState("AM");
+  const [endHour, setEndHour] = useState("2");
+  const [endMinute, setEndMinute] = useState("00");
+  const [endPeriod, setEndPeriod] = useState("PM");
+  const [sort, setSort] = useState<"high" | "low">("high");
+  const [rows, setRows] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const saleTime = (hour: string, minute: string, ap: string) => ((Number(hour) % 12) + (ap === "PM" ? 12 : 0)) * 60 + Number(minute);
+  const startTime = saleTime(startHour, startMinute, startPeriod);
+  const endTime = saleTime(endHour, endMinute, endPeriod);
+  const minuteOptions = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, "0"));
+  async function load() {
+    const queryFrom = period === "month" && month ? `${month}-01` : from;
+    const queryTo = period === "month" && month ? `${month}-${String(new Date(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0).getDate()).padStart(2, "0")}` : to;
+    if (!queryFrom || !queryTo || queryFrom > queryTo) { setError("Please select a valid date range."); return; }
+    setBusy(true); setError("");
+    try {
+      const data = await api.get<any>(`/api/reports/item-wise?from=${encodeURIComponent(queryFrom)}&to=${encodeURIComponent(queryTo)}`);
+      setRows(data.rows ?? []);
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to load item wise group sales."); }
+    finally { setBusy(false); }
+  }
+  useEffect(() => { load().catch(() => null); }, []);
+  const grouped = new Map<string, { name: string; bottleEq: number; amount: number; complimentaryEq: number }>();
+  for (const row of rows) {
+    const timestamp = new Date(String(row.sale_at ?? row.kot_at ?? ""));
+    if (Number.isNaN(timestamp.getTime())) continue;
+    const clockMinutes = timestamp.getHours() * 60 + timestamp.getMinutes();
+    const inTimeWindow = startTime <= endTime
+      ? clockMinutes >= startTime && clockMinutes <= endTime
+      : clockMinutes >= startTime || clockMinutes <= endTime;
+    if (!inTimeWindow) continue;
+    const name = liquorBaseName(row.item_name);
+    const item = String(row.item_name ?? "").trim().toUpperCase();
+    const qty = Number(row.qty) || 0;
+    const isShot = /\b30\s*ML\b/.test(item);
+    const isBottle = /\b(?:BTL|BOTTLE|750\s*ML)\b/.test(item);
+    if (!name || (!isShot && !isBottle)) continue;
+    const factor = isShot ? 30 / 750 : 1;
+    const cur = grouped.get(name) ?? { name, bottleEq: 0, amount: 0, complimentaryEq: 0 };
+    if (Number(row.amount) === 0) cur.complimentaryEq += qty * factor;
+    else { cur.bottleEq += qty * factor; cur.amount += Number(row.amount) || 0; }
+    grouped.set(name, cur);
+  }
+  const items = [...grouped.values()].sort((a, b) => sort === "high" ? b.bottleEq - a.bottleEq : a.bottleEq - b.bottleEq);
+  const fmt = (n: number) => Number(n.toFixed(3)).toString();
+  return <div className="iws-page">
+    <div className="rpt-bar wrap">
+      <b>Item Wise Group Sales Report</b>
+      <label>Period <select className="win" value={period} onChange={(e) => setPeriod(e.target.value as "dates" | "month")}><option value="dates">Date Range</option><option value="month">Month</option></select></label>
+      {period === "month" ? <label>Month <input className="win" type="month" value={month} onChange={(e) => setMonth(e.target.value)} /></label> : <><label>From <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label><label>To <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label></>}
+      <label>Start <select className="win" value={startHour} onChange={(e) => setStartHour(e.target.value)}>{Array.from({ length: 12 }, (_, i) => String(i + 1)).map((v) => <option key={v}>{v}</option>)}</select> : <select className="win" value={startMinute} onChange={(e) => setStartMinute(e.target.value)}>{minuteOptions.map((v) => <option key={v}>{v}</option>)}</select> <select className="win" value={startPeriod} onChange={(e) => setStartPeriod(e.target.value)}><option>AM</option><option>PM</option></select></label>
+      <label>End <select className="win" value={endHour} onChange={(e) => setEndHour(e.target.value)}>{Array.from({ length: 12 }, (_, i) => String(i + 1)).map((v) => <option key={v}>{v}</option>)}</select> : <select className="win" value={endMinute} onChange={(e) => setEndMinute(e.target.value)}>{minuteOptions.map((v) => <option key={v}>{v}</option>)}</select> <select className="win" value={endPeriod} onChange={(e) => setEndPeriod(e.target.value)}><option>AM</option><option>PM</option></select></label>
+      <label>Sales <select className="win" value={sort} onChange={(e) => setSort(e.target.value as "high" | "low")}><option value="high">High to Low</option><option value="low">Low to High</option></select></label>
+      <button className="fn" onClick={load} disabled={busy}>{busy ? "Loading…" : "Refresh"}</button>
+    </div>
+    <div className="iws-grid-wrap">
+      <table className="iws-grid"><thead><tr><th>SN.</th><th>Item Name</th><th>Complimentary (BTL)</th><th>Sold (BTL Equivalent)</th><th>Amount</th></tr></thead>
+        <tbody>{error ? <tr><td colSpan={5} className="empty">{error}</td></tr> : items.length ? items.map((it, i) => <tr key={it.name}><td>{i + 1}</td><td>{it.name}</td><td>{fmt(it.complimentaryEq)}</td><td>{fmt(it.bottleEq)}</td><td>{inr(it.amount)}</td></tr>) : <tr><td colSpan={5} className="empty">No matching 30 ml or bottle sales in this range</td></tr>}</tbody>
+      </table>
+    </div>
+    <div className="rpt-foot"><span>30 ml = 1/25 bottle; BTL = 1 bottle (750 ml). Time filter uses local sale time.</span><span className="spacer" /><button className="fn" onClick={onExit}>Close</button></div>
+  </div>;
 }
 
 export function GridReport({ title, endpoint, columns, onExit, onEdit, cellSelect }: {
@@ -3078,10 +3161,20 @@ export function CardSettlementReport({ onExit }: { onExit: () => void }) {
 }
 
 export function ReportHost({ view, outlet, onExit }: { view: NavView; outlet?: string; onExit: () => void }) {
+  const supported = [
+    "item-wise-detail", "point-of-sales", "gst-report", "item-wise-sale", "item-wise-group",
+    "settlement-report", "card-settlement-report", "booking-report", "card-block",
+    "advance-booking", "kot-report", "bill-report", "history", "reports", "time-sale", "tax-wise",
+  ].includes(view);
+  useEffect(() => {
+    if (!supported) onExit();
+  }, [supported, onExit]);
+
   if (view === "item-wise-detail") return <ItemWiseDetail onExit={onExit} />;
   if (view === "point-of-sales") return <PointOfSales onExit={onExit} />;
   if (view === "gst-report") return <GstReport onExit={onExit} />;
   if (view === "item-wise-sale") return <ItemWiseSale onExit={onExit} />;
+  if (view === "item-wise-group") return <ItemWiseGroupSales onExit={onExit} />;
   if (view === "settlement-report") return <SettlementReport outlet={outlet} onExit={onExit} />;
   if (view === "card-settlement-report") return <CardSettlementReport onExit={onExit} />;
   if (view === "booking-report") return <BookingReport onExit={onExit} />;
@@ -3100,5 +3193,6 @@ export function ReportHost({ view, outlet, onExit }: { view: NavView; outlet?: s
       />
     );
   }
-  return null;
+  // Keep the work area useful for the render before the fallback navigation runs.
+  return <div className="rpt-page" role="status">Returning to the main screen…</div>;
 }
