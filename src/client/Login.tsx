@@ -99,6 +99,11 @@ export function LoginGate({
               value={username}
               autoComplete="off"
               onChange={(e) => setUsername(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                if (username.trim()) passRef.current?.focus();
+              }}
             />
             <span>Password :</span>
             <input

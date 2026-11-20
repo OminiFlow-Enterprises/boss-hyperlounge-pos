@@ -206,12 +206,20 @@ export function itemWiseSales(ctx: AppContext, from?: string, to?: string) {
               ${INVOICE_ORDER_CARD} AS order_card,
               k.kot_number AS kot, COALESCE(k.created_at, i.created_at) AS kot_at,
               ii.qty AS qty, ii.amount AS amount, ii.station AS station,
-              COALESCE(p.tax_rate, 0) AS tax_rate, i.status AS bill_status
+              COALESCE(p.tax_rate, oi.tax_rate, 0) AS tax_rate,
+              COALESCE(p.sales_group, '') AS sales_group,
+              COALESCE(p.item_group, '') AS item_group,
+              COALESCE(p.unit, '') AS unit,
+              COALESCE(w.name, '') AS waiter,
+              COALESCE((SELECT GROUP_CONCAT(DISTINCT UPPER(pay.method)) FROM payments pay WHERE pay.invoice_id = i.id), '') AS mop,
+              i.status AS bill_status
        FROM invoice_items ii
        JOIN invoices i ON i.id = ii.invoice_id
        JOIN dining_tables t ON t.id = i.table_id
        LEFT JOIN products p ON p.id = ii.product_id
        LEFT JOIN order_items oi ON oi.id = ii.order_item_id
+       LEFT JOIN orders o ON o.id = i.order_id
+       LEFT JOIN staff w ON w.id = o.waiter_id
        LEFT JOIN kots k ON k.id = oi.kot_id
        WHERE i.created_at BETWEEN ? AND ?
        ORDER BY ii.station, ii.name, i.created_at`,

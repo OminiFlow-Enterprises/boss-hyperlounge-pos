@@ -952,45 +952,68 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
     BAR: true, CAFE: true, NC: true, RESTAURANT: true, "THE BOSS CLUB": true,
   });
   const [rows, setRows] = useState<any[]>([]);
+  const [filters, setFilters] = useState({ salesGroup: "", item: "", itemGroup: "", orderBy: "name", btc: "", waiter: "", mop: "" });
+  const [withTax, setWithTax] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   async function load() {
-    const data = await api.get<any>(`/api/reports/item-wise?from=${from}&to=${to}`);
-    const map = new Map<string, { name: string; sold: number; amount: number; station: string; tax: number }>();
-    for (const r of data.rows ?? []) {
-      const cur = map.get(r.item_name) || { name: r.item_name, sold: 0, amount: 0, station: r.station, tax: r.tax_rate };
-      cur.sold += r.qty;
-      cur.amount += r.amount;
-      map.set(r.item_name, cur);
-    }
-    setRows([...map.values()].sort((a, b) => a.name.localeCompare(b.name)));
+    if (!from || !to || from > to) { setError("Please select a valid date range."); return; }
+    setBusy(true); setError("");
+    try {
+      const data = await api.get<any>(`/api/reports/item-wise?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+      setRows(data.rows ?? []);
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to load item wise sales."); }
+    finally { setBusy(false); }
   }
   useEffect(() => { load().catch(() => null); }, []);
+  const options = (key: string) => [...new Set(rows.map((r) => String(r[key] ?? "").trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const filtered = useMemo(() => rows.filter((r) => {
+    const outlet = String(r.outlet_name || "BAR").toUpperCase();
+    return !!checked[outlet] && (!filters.salesGroup || r.sales_group === filters.salesGroup)
+      && (!filters.item || r.item_name === filters.item) && (!filters.itemGroup || r.item_group === filters.itemGroup)
+      && (!filters.btc || String(r.order_card || "") === filters.btc) && (!filters.waiter || r.waiter === filters.waiter)
+      && (!filters.mop || String(r.mop || "").split(",").includes(filters.mop));
+  }), [rows, checked, filters]);
+  const map = new Map<string, { name: string; sold: number; complimentary: number; amount: number; outlet: string; tax: number; unit: string; salesGroup: string; itemGroup: string }>();
+  for (const r of filtered) {
+    const key = `${r.item_name}\u0000${r.outlet_name}`;
+    const cur = map.get(key) || { name: r.item_name, sold: 0, complimentary: 0, amount: 0, outlet: r.outlet_name, tax: r.tax_rate, unit: r.unit || "", salesGroup: r.sales_group || "", itemGroup: r.item_group || "" };
+    const qty = Number(r.qty) || 0;
+    if (Number(r.amount) === 0) cur.complimentary += qty; else {
+      cur.sold += qty;
+      const base = Number(r.amount) || 0;
+      cur.amount += base + (withTax ? Math.round(base * (Number(r.tax_rate) || 0) / 100) : 0);
+    }
+    map.set(key, cur);
+  }
+  const items = [...map.values()].sort((a, b) => filters.orderBy === "amount" ? b.amount - a.amount : filters.orderBy === "qty" ? b.sold - a.sold : a.name.localeCompare(b.name));
   const groups = useMemo(() => {
     const g: Record<string, typeof rows> = {};
-    for (const r of rows) {
-      const key = `${r.station === "BAR" ? "BAR" : "FOOD"} @ ${r.tax || 18}%`;
+    for (const r of items) {
+      const key = r.outlet;
       (g[key] ||= []).push(r);
     }
     return g;
-  }, [rows]);
+  }, [filtered, filters.orderBy, checked, withTax]);
   let sl = 0;
   return (
     <div className="iws-page">
       <div className="rpt-bar wrap">
-        <label>Sales Group : <select className="win"><option>Select</option></select></label>
-        <label>Item Name : <select className="win"><option>Select</option></select></label>
-        <label>Item Group : <select className="win"><option>Select</option></select></label>
-        <label>Order By : <select className="win"><option>Order By Item Name</option></select></label>
-        <label>BTC : <select className="win"><option>Select</option></select></label>
-        <label><input type="checkbox" defaultChecked /> With Tax</label>
-        <label>Waiter : <select className="win"><option>Select</option></select></label>
-        <label>MOP : <select className="win"><option>Select</option></select></label>
-        <label>Card <select className="win"><option>Select</option></select></label>
+        <label>Sales Group : <select className="win" value={filters.salesGroup} onChange={(e) => setFilters({ ...filters, salesGroup: e.target.value })}><option value="">Select</option>{options("sales_group").map((v) => <option key={v}>{v}</option>)}</select></label>
+        <label>Item Name : <select className="win" value={filters.item} onChange={(e) => setFilters({ ...filters, item: e.target.value })}><option value="">Select</option>{options("item_name").map((v) => <option key={v}>{v}</option>)}</select></label>
+        <label>Item Group : <select className="win" value={filters.itemGroup} onChange={(e) => setFilters({ ...filters, itemGroup: e.target.value })}><option value="">Select</option>{options("item_group").map((v) => <option key={v}>{v}</option>)}</select></label>
+        <label>Order By : <select className="win" value={filters.orderBy} onChange={(e) => setFilters({ ...filters, orderBy: e.target.value })}><option value="name">Order By Item Name</option><option value="amount">Order By Amount</option><option value="qty">Order By Sold Qty</option></select></label>
+        <label>BTC : <select className="win" value={filters.btc} onChange={(e) => setFilters({ ...filters, btc: e.target.value })}><option value="">Select</option>{options("order_card").map((v) => <option key={v}>{v}</option>)}</select></label>
+        <label><input type="checkbox" checked={withTax} onChange={(e) => setWithTax(e.target.checked)} /> With Tax</label>
+        <label>Waiter : <select className="win" value={filters.waiter} onChange={(e) => setFilters({ ...filters, waiter: e.target.value })}><option value="">Select</option>{options("waiter").map((v) => <option key={v}>{v}</option>)}</select></label>
+        <label>MOP : <select className="win" value={filters.mop} onChange={(e) => setFilters({ ...filters, mop: e.target.value })}><option value="">Select</option>{[...new Set(rows.flatMap((r) => String(r.mop || "").split(",").filter(Boolean)))].sort().map((v) => <option key={v}>{v}</option>)}</select></label>
+        <label>Card <select className="win" value={filters.mop === "CARD" ? "CARD" : ""} onChange={(e) => setFilters({ ...filters, mop: e.target.value })}><option value="">Select</option><option>CARD</option></select></label>
         <label><input type="checkbox" /> With Out Discount</label>
         <span className="spacer" />
         <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
         <span>To</span>
         <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-        <button className="fn" onClick={load}>Refresh</button>
+        <button className="fn" onClick={load} disabled={busy}>{busy ? "Loading…" : "Refresh"}</button>
       </div>
       <div className="iws-body">
         <aside className="pos-tree">
@@ -1005,27 +1028,29 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
           <table className="iws-grid">
             <thead>
               <tr>
-                <th>Slk.</th><th>Item Name</th><th>Complementary</th><th>Sold</th>
-                <th>Amount</th><th>Group Total</th>
+                <th>SN.</th><th>Item Name</th><th>Complementary</th><th>Sold</th>
+                <th>Amount</th><th>Group Total</th><th>Unit</th><th>Sub Unit</th>
               </tr>
             </thead>
             <tbody>
-              {Object.entries(groups).flatMap(([gname, items]) => {
+              {error ? <tr><td colSpan={8} className="empty">{error}</td></tr> : Object.entries(groups).flatMap(([gname, items]) => {
                 const tot = items.reduce((s, i) => s + i.amount, 0);
                 const head = (
                   <tr key={gname} className="grp">
-                    <td /><td colSpan={4}>{gname}</td><td className="num">{inr(tot)}</td>
+                    <td /><td colSpan={4}>{gname}</td><td className="num">{inr(tot)}</td><td /><td />
                   </tr>
                 );
                 const body = items.map((it) => {
                   sl += 1;
                   return (
-                    <tr key={it.name}>
+                    <tr key={`${it.name}-${it.outlet}`}>
                       <td>{sl}</td>
                       <td>{it.name.toUpperCase()}</td>
-                      <td>0</td>
+                      <td>{it.complimentary}</td>
                       <td>{it.sold}</td>
-                      <td>{Math.round(it.amount / 100)}</td>
+                      <td>{inr(it.amount)}</td>
+                      <td />
+                      <td>{it.unit}</td>
                       <td />
                     </tr>
                   );
@@ -1037,9 +1062,9 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
         </div>
       </div>
       <div className="rpt-foot">
-        <button className="fn">S.Print</button>
+        <button className="fn" onClick={() => window.print()}>S.Print</button>
         <button className="fn" onClick={() => window.print()}>Print</button>
-        <button className="fn">Export</button>
+        <button className="fn" onClick={() => { const csv = ["Outlet,Item Name,Complementary,Sold,Amount,Unit", ...items.map((r) => [r.outlet, r.name, r.complimentary, r.sold, (r.amount / 100).toFixed(2), r.unit].map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","))].join("\n"); const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); a.download = `item-wise-sales-${from}-${to}.csv`; a.click(); URL.revokeObjectURL(a.href); }}>Export</button>
         <button className="fn" onClick={onExit}>Close</button>
       </div>
     </div>

@@ -1662,7 +1662,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
             e.preventDefault();
             e.stopPropagation();
             setListOpen(false);
-            if (dept === "NC" && items.length > 0 && !itemQuery.trim()) {
+            if (items.length > 0 && !itemQuery.trim()) {
               focusInput(remarkRef.current);
             } else {
               itemRef.current?.focus();

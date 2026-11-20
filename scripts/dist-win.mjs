@@ -12,7 +12,17 @@ const cache = path.join(root, ".cache");
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: root, stdio: "inherit", ...options });
+    const windowsNpx = process.platform === "win32" && command === "npx";
+    const executable = windowsNpx ? process.execPath : command;
+    const executableArgs = windowsNpx
+      ? [path.join(root, "node_modules/electron-builder/cli.js"), ...args.slice(1)]
+      : args;
+    const child = spawn(executable, executableArgs, {
+      cwd: root,
+      stdio: "inherit",
+      shell: false,
+      ...options,
+    });
     child.on("error", reject);
     child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`${command} exited ${code}`))));
   });
@@ -59,22 +69,9 @@ async function windowsSqlite() {
     root,
     "release/win-unpacked/resources/app/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
   );
+  await mkdir(path.dirname(dest), { recursive: true });
   await copyFile(nodeFile, dest);
   console.log(`Installed Windows better_sqlite3.node (Electron ABI ${abi})`);
-}
-
-async function zipApp() {
-  const pkg = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
-  const unpacked = path.join(root, "release", "win-unpacked");
-  const zipPath = path.join(root, "release", `${pkg.build.productName}-${pkg.version}-win.zip`);
-  await rm(zipPath, { force: true });
-  try {
-    await exec("zip", ["-r", "-X", "-q", zipPath, "."], { cwd: unpacked });
-  } catch (err) {
-    if (err.code !== "ENOENT") throw err;
-    await exec("tar", ["-a", "-c", "-f", zipPath, "."], { cwd: unpacked });
-  }
-  console.log(`Wrote ${zipPath}`);
 }
 
 await run(
@@ -89,4 +86,14 @@ await run(
   },
 );
 await windowsSqlite();
-await zipApp();
+await run(
+  "npx",
+  ["electron-builder", "--win", "nsis", "--x64", "--prepackaged", path.join(root, "release/win-unpacked")],
+  {
+    env: {
+      ...process.env,
+      CSC_IDENTITY_AUTO_DISCOVERY: "false",
+      ELECTRON_BUILDER_CACHE: path.join(cache, "electron-builder"),
+    },
+  },
+);
