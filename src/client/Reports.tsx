@@ -239,7 +239,8 @@ function keptLines(rows: GstExtraLine[] | undefined) {
   return Array.isArray(rows) ? rows.filter((x) => x && typeof x.id === "string") : [];
 }
 
-function resizeGstLabel(target: HTMLTextAreaElement) {
+function resizeGstLabel(target: HTMLTextAreaElement | null) {
+  if (!target) return;
   target.style.height = "auto";
   target.style.height = `${target.scrollHeight}px`;
 }

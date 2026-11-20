@@ -76,7 +76,7 @@ function startServer(port, dbDir) {
 
 function waitForServer(port, child) {
   return new Promise((resolve, reject) => {
-    let log = "";
+    let serverOutput = "";
     let settled = false;
     const finish = (err) => {
       if (settled) return;
@@ -85,13 +85,13 @@ function waitForServer(port, child) {
       else resolve();
     };
     const take = (buf) => {
-      log = (log + buf.toString()).slice(-4000);
+      serverOutput = (serverOutput + buf.toString()).slice(-4000);
       log(`SERVER ${buf.toString().trimEnd()}`);
     };
     child.stdout?.on("data", take);
     child.stderr?.on("data", take);
     child.once("exit", (code) => {
-      if (!settled) finish(new Error(log || `POS server exited (${code ?? "signal"})`));
+      if (!settled) finish(new Error(serverOutput || `POS server exited (${code ?? "signal"})`));
     });
     const deadline = Date.now() + 60000;
     const tick = () => {
@@ -106,7 +106,7 @@ function waitForServer(port, child) {
     };
     const retry = () => {
       if (settled) return;
-      if (Date.now() > deadline) finish(new Error(log || "POS server did not start"));
+      if (Date.now() > deadline) finish(new Error(serverOutput || "POS server did not start"));
       else setTimeout(tick, 250);
     };
     tick();
@@ -358,7 +358,12 @@ async function openPos() {
   attachShortcuts(mainWindow);
   mainWindow.on("focus", registerDeptKeys);
   mainWindow.on("blur", unregisterDeptKeys);
-  mainWindow.webContents.on("console-message", (_event, details) => log(`RENDERER console ${details.level}: ${details.message} (${details.sourceId}:${details.lineNumber})`));
+  mainWindow.webContents.on("console-message", (...args) => {
+    const values = args.map((value) => {
+      try { return JSON.stringify(value); } catch { return String(value); }
+    });
+    log(`RENDERER console ${values.join(" | ")}`);
+  });
   mainWindow.webContents.on("did-fail-load", (_event, code, description, url, isMainFrame) => log(`RENDERER did-fail-load code=${code} description=${description} url=${url} mainFrame=${isMainFrame}`));
   mainWindow.webContents.on("render-process-gone", (_event, details) => log(`RENDERER process-gone ${JSON.stringify(details)}`));
   mainWindow.webContents.on("unresponsive", () => log("RENDERER unresponsive"));
