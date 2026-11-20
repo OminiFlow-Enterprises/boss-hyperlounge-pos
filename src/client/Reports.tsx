@@ -1516,6 +1516,7 @@ function SettlementUpdateDialog({
     try {
       const next = await api.put<any>(`/api/reports/settlement/${paymentId}`, { method: mode, amount: paise, account, remark });
       applyRow(next);
+      if (next.payment_id && next.payment_id !== paymentId) onSwitch(next.payment_id);
       onChanged();
       setTimeout(() => { amtRef.current?.focus(); amtRef.current?.select(); }, 0);
     } catch (e) {
@@ -1578,6 +1579,10 @@ function SettlementUpdateDialog({
         e.preventDefault();
         e.stopImmediatePropagation();
         void acceptCard();
+      } else if (active === remarkRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        updateRef.current?.focus();
       } else if (active === updateRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -1665,6 +1670,7 @@ function SettlementUpdateDialog({
                   className="win green num"
                   data-num="dec"
                   tabIndex={1}
+                  autoFocus
                   value={amount}
                   onChange={(e) => setAmount(amountText(e.target.value))}
                   onFocus={(e) => e.currentTarget.select()}
@@ -1821,7 +1827,7 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
         <table className="data set-table">
           <thead>
             <tr>
-              {["TType","SDid","VoucherRecei","VoucherDate","BillNo","TableNo","RoomTable","Waiter","SettledAmou","Allowance","Remark","MOP","USERNAME","VoucherValu","VoucherNo","status","Min.Diff","OutletName","OutletGroup","OUTLETID","MOP1"].map((h) => <th key={h}>{h}</th>)}
+              {["TType","SDid","VoucherRecei","VoucherDate","BillNo","BillAmount","TableNo","RoomTable","Waiter","SettledAmou","Allowance","Remark","MOP","USERNAME","VoucherValu","VoucherNo","status","Min.Diff","OutletName","OutletGroup","OUTLETID","MOP1"].map((h) => <th key={h}>{h}</th>)}
             </tr>
           </thead>
           <tbody>
@@ -1829,7 +1835,7 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
               const mode = mopCell(r.method, r.account);
               const cells = [
                 "SALE", "", r.receipt_no ?? "", stampGrid(r.voucher_date), r.bill_no ?? "",
-                r.table_no ?? "", "", r.waiter ?? "", inr(r.settled), inr(r.allowance),
+                inr(r.bill_amount), r.table_no ?? "", "", r.waiter ?? "", inr(r.settled), inr(r.allowance),
                 r.remark || "----", mode, r.username ?? "", inr(r.settled), r.voucher_no ?? "",
                 r.status ?? "", "0", r.outlet_name || outletName, "FNB", "", mode,
               ];
@@ -1846,7 +1852,7 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
                   }}
                 >
                   {cells.map((text, c) => (
-                    <td key={c} className={`${[8, 9, 13].includes(c) ? "num" : ""} ${on && c === col ? "cell-on" : ""}`.trim()}>
+                    <td key={c} className={`${[5, 9, 10, 14].includes(c) ? "num" : ""} ${on && c === col ? "cell-on" : ""}`.trim()}>
                       {text}
                     </td>
                   ))}

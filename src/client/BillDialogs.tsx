@@ -1617,8 +1617,6 @@ export function SettleDialog({
       }
       setSnap(result);
       setAmount(rupee(Number(result.due ?? 0)));
-      methodRef.current = "CASH";
-      setMethod("CASH");
       setPayBal("");
       setTimeout(() => { amtRef.current?.focus(); amtRef.current?.select(); }, 0);
     } catch (e) {

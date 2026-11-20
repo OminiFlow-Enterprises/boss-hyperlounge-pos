@@ -2,7 +2,7 @@ import { assertPermission } from "../../shared/permissions.js";
 import { formatTableNo } from "../../shared/tableLabel.js";
 import type { AppContext } from "../lib/context.js";
 import { AppError } from "../lib/errors.js";
-import { nowIso, todayDate, uuid } from "../lib/ids.js";
+import { nextSequence, nowIso, todayDate, uuid } from "../lib/ids.js";
 import { audit } from "../lib/audit.js";
 import { buildBillTotalLines, type BillTotalLine } from "../hardware/billTotals.js";
 import * as cards from "./cardService.js";
@@ -767,6 +767,38 @@ export function updateSettlement(
     const others = Number(row.paid) - Number(row.amount);
     if (others + amount > Number(row.bill_amount)) throw new AppError("Amount exceeds bill");
     const storedAccount = method === "CASH" ? (account || "Cash.") : method === "CARD" ? account : String(row.account || "");
+    // When changing the mode for only part of an existing settlement, retain
+    // the unmodified remainder under its original payment mode.
+    if (method !== current && amount < Number(row.amount)) {
+      const remainder = Number(row.amount) - amount;
+      ctx.db.prepare("UPDATE payments SET method = ?, amount = ?, reference = ?, remark = ? WHERE id = ?")
+        .run(method, amount, storedAccount, remark, paymentId);
+      const splitPaymentId = uuid();
+      ctx.db.prepare(
+        `INSERT INTO payments (id, invoice_id, method, amount, member_card_id, ledger_id, reference, remark, receipt_no, voucher_no, created_at)
+         VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)`
+      ).run(
+        splitPaymentId,
+        row.invoice_id,
+        current,
+        remainder,
+        String(row.account || ""),
+        String(row.remark || ""),
+        nextSequence(ctx.db, "settlement_receipt", 32901),
+        nextSequence(ctx.db, "settlement_voucher", 47201),
+        nowIso(),
+      );
+      applyPaidStatus(ctx, String(row.invoice_id), String(row.order_id), Number(row.bill_amount), Number(row.paid));
+      audit(ctx, "SETTLEMENT_UPDATE", "payment", paymentId, null, row.amount, {
+        splitPaymentId,
+        retainedAmount: remainder,
+        retainedMethod: current,
+        method,
+        amount,
+        account: storedAccount,
+      });
+      return settlementRow(ctx, splitPaymentId);
+    }
     ctx.db
       .prepare("UPDATE payments SET method = ?, amount = ?, reference = ?, remark = ? WHERE id = ?")
       .run(method, amount, storedAccount, remark, paymentId);
