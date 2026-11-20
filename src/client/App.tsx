@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Component, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { api, ApiError } from "./api";
 import { formatINR } from "../shared/money";
 import { formatTableNo } from "../shared/tableLabel";
@@ -12,6 +12,24 @@ import { ItemMasterDialog } from "./ItemMaster";
 import { ComplimentaryMasterDialog } from "./ComplimentaryMaster";
 import { LoginGate } from "./Login";
 import { UserMaster } from "./UserMaster";
+
+class ReportCrashBoundary extends Component<{ children: ReactNode; onRecover: () => void }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Report page crashed; returning to billing", error, info.componentStack);
+    window.setTimeout(this.props.onRecover, 0);
+  }
+
+  render() {
+    if (this.state.failed) return <div role="status" style={{ padding: 16 }}>Returning to the main screen…</div>;
+    return this.props.children;
+  }
+}
 
 function StaffMark({ name }: { name: string }) {
   const label = name.trim();
@@ -538,7 +556,9 @@ export function App() {
           {view === "kot" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard /></div>}
           {view === "kitchen" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="KITCHEN" /></div>}
           {view === "bar" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="BAR" /></div>}
-          <ReportHost view={view as NavView} outlet={outlet} onExit={() => go("billing")} />
+          <ReportCrashBoundary onRecover={() => go("billing")}>
+            <ReportHost view={view as NavView} outlet={outlet} onExit={() => go("billing")} />
+          </ReportCrashBoundary>
         </div>
       )}
 

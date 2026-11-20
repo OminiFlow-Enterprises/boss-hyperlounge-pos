@@ -582,10 +582,23 @@ export function GstReport({ onExit }: { onExit: () => void }) {
         requestAnimationFrame(() => focusSelRow(false));
       }
     }
+    function escapeUp(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      if (document.querySelector(".alert-dlg, .confirm-dlg, .confirm-overlay")) return;
+      // Some report controls (especially the printable summary) consume Escape
+      // during keydown. Repeat the exit on keyup so the main screen always opens.
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      closeRef.current();
+    }
     // Document capture runs before App's window capture handler. This makes GST's
     // Escape route deterministic even when the page is nested in the global host.
     document.addEventListener("keydown", keys, true);
-    return () => document.removeEventListener("keydown", keys, true);
+    document.addEventListener("keyup", escapeUp, true);
+    return () => {
+      document.removeEventListener("keydown", keys, true);
+      document.removeEventListener("keyup", escapeUp, true);
+    };
   });
 
   useLayoutEffect(() => {

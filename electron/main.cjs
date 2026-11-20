@@ -9,8 +9,19 @@ const POS_KEYS = new Set(["F1", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10",
 
 let server;
 let mainWindow;
+let logFile;
 
-const gotLock = app.requestSingleInstanceLock();
+function log(message) {
+  const line = `${new Date().toISOString()} ${message}\n`;
+  try { if (logFile) fs.appendFileSync(logFile, line); } catch {}
+  process.stderr.write(line);
+}
+
+process.on("uncaughtException", (err) => log(`MAIN uncaughtException: ${err?.stack || err}`));
+process.on("unhandledRejection", (err) => log(`MAIN unhandledRejection: ${err?.stack || err}`));
+
+const devInstance = process.env.POS_DEV_INSTANCE === "1";
+const gotLock = devInstance || app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 
 function projectRoot() {
@@ -75,7 +86,7 @@ function waitForServer(port, child) {
     };
     const take = (buf) => {
       log = (log + buf.toString()).slice(-4000);
-      process.stdout.write(buf);
+      log(`SERVER ${buf.toString().trimEnd()}`);
     };
     child.stdout?.on("data", take);
     child.stderr?.on("data", take);
@@ -312,6 +323,9 @@ function attachShortcuts(win) {
 }
 
 async function openPos() {
+  logFile = path.join(app.getPath("userData"), "logs", "pos-debug.log");
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  log(`START packaged=${app.isPackaged} version=${app.getVersion()} appPath=${app.getAppPath()}`);
   Menu.setApplicationMenu(null);
   const port = await freePort(8787);
   const dbDir = dataDir();
@@ -344,6 +358,20 @@ async function openPos() {
   attachShortcuts(mainWindow);
   mainWindow.on("focus", registerDeptKeys);
   mainWindow.on("blur", unregisterDeptKeys);
+  mainWindow.webContents.on("console-message", (_event, details) => log(`RENDERER console ${details.level}: ${details.message} (${details.sourceId}:${details.lineNumber})`));
+  mainWindow.webContents.on("did-fail-load", (_event, code, description, url, isMainFrame) => log(`RENDERER did-fail-load code=${code} description=${description} url=${url} mainFrame=${isMainFrame}`));
+  mainWindow.webContents.on("render-process-gone", (_event, details) => log(`RENDERER process-gone ${JSON.stringify(details)}`));
+  mainWindow.webContents.on("unresponsive", () => log("RENDERER unresponsive"));
+  mainWindow.webContents.on("did-finish-load", () => log(`RENDERER loaded ${mainWindow.webContents.getURL()}`));
+  mainWindow.webContents.on("before-input-event", (_event, input) => {
+    if (input.key === "Escape") log(`INPUT Escape ${input.type} url=${mainWindow.webContents.getURL()}`);
+  });
+  mainWindow.webContents.on("dom-ready", () => {
+    mainWindow.webContents.executeJavaScript(`
+      window.addEventListener('error', e => console.error('[window.error]', e.message, e.filename, e.lineno, e.error?.stack));
+      window.addEventListener('unhandledrejection', e => console.error('[unhandledrejection]', e.reason?.stack || e.reason));
+    `).catch((err) => log(`RENDERER instrumentation failed: ${err}`));
+  });
   mainWindow.once("ready-to-show", () => {
     mainWindow.maximize();
     mainWindow.show();
