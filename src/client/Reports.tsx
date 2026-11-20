@@ -3194,9 +3194,9 @@ function TransferReport({ kind, onExit }: { kind: "item" | "table"; onExit: () =
   return <div className="rpt-page">
     <div className="rpt-bar"><strong>{title}</strong><FilterDates from={from} to={to} setFrom={setFrom} setTo={setTo} onShow={() => load()} /></div>
     {error && <div className="rpt-bar">{error}</div>}
-    <div className="rpt-grid"><table><thead><tr>{columns.map(([, label]) => <th key={label}>{label}</th>)}</tr></thead>
-      <tbody>{rows.map((row) => <tr key={row.id}>{columns.map(([key]) => <td key={key}>{key === "created_at" ? stampGrid(row[key]) : row[key] ?? ""}</td>)}</tr>)}
-        {!rows.length && <tr><td colSpan={columns.length}>No transfers found for this date range.</td></tr>}</tbody>
+    <div className="rpt-grid transfer-grid"><table><thead><tr>{columns.map(([key, label]) => <th key={key}>{label}</th>)}</tr></thead>
+      <tbody>{rows.map((row) => <tr key={row.id}>{columns.map(([key]) => <td key={key} className={key === "created_at" || key === "item_names" || key === "reason" ? undefined : "transfer-nowrap"}>{key === "created_at" ? stampGrid(row[key]) : row[key] ?? ""}</td>)}</tr>)}
+        {!rows.length && <tr><td className="transfer-empty" colSpan={columns.length}>No transfers found for this date range.</td></tr>}</tbody>
     </table></div>
   </div>;
 }
