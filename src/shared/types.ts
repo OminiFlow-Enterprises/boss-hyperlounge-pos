@@ -115,4 +115,6 @@ export type NavView =
   | "card-settlement-report"
   | "booking-report"
   | "advance-booking"
-  | "card-block";
+  | "card-block"
+  | "item-transfer-report"
+  | "table-transfer-report";

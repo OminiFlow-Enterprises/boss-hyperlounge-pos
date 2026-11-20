@@ -71,6 +71,8 @@ export const RIGHTS_TREE: RightNode[] = [
       { id: "report.tax", label: "Tax Wise Report" },
       { id: "report.settlement", label: "Settlement Report" },
       { id: "report.card", label: "Card Settlement Report" },
+      { id: "report.itemTransfer", label: "Item Transfer Report" },
+      { id: "report.tableTransfer", label: "Table Transfer Report" },
     ],
   },
   { id: "setting", label: "Setting" },
@@ -99,7 +101,7 @@ export function rightsPreset(role: UserRoleLabel): Record<string, boolean> {
   const on = new Set([
     "fnb", "fnb.bar", "fnb.nc", "fnb.restaurant", "fnb.club", "fnb.advance",
     "report", "report.gst", "report.pos", "report.item", "report.itemDetail",
-    "report.stock", "report.outlet", "report.time", "report.tax", "report.settlement", "report.card",
+    "report.stock", "report.outlet", "report.time", "report.tax", "report.settlement", "report.card", "report.itemTransfer", "report.tableTransfer",
     "logout",
   ]);
   return Object.fromEntries(ids.map((id) => [id, on.has(id)]));

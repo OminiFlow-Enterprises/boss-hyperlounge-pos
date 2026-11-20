@@ -357,6 +357,12 @@ export function createApp(options: CreateAppOptions) {
   app.get("/api/reports/item-wise", wrap((req, res) => {
     res.json(reports.itemWiseSales(req.ctx, req.query.from ? String(req.query.from) : undefined, req.query.to ? String(req.query.to) : undefined));
   }));
+  app.get("/api/reports/item-transfers", wrap((req, res) => {
+    res.json(reports.itemTransferReport(req.ctx, req.query.from ? String(req.query.from) : undefined, req.query.to ? String(req.query.to) : undefined));
+  }));
+  app.get("/api/reports/table-transfers", wrap((req, res) => {
+    res.json(reports.tableTransferReport(req.ctx, req.query.from ? String(req.query.from) : undefined, req.query.to ? String(req.query.to) : undefined));
+  }));
   app.get("/api/reports/gst", wrap((req, res) => {
     const mode = String(req.query.mode || "bills").toLowerCase();
     const filters = {

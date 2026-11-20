@@ -3160,11 +3160,38 @@ export function CardSettlementReport({ onExit }: { onExit: () => void }) {
   );
 }
 
+function TransferReport({ kind, onExit }: { kind: "item" | "table"; onExit: () => void }) {
+  const [from, setFrom] = useState(isoDay());
+  const [to, setTo] = useState(isoDay());
+  const [rows, setRows] = useState<any[]>([]);
+  const [error, setError] = useState("");
+  const title = kind === "item" ? "Item Transfer Report" : "Table Transfer Report";
+  async function load() {
+    setError("");
+    try {
+      const data = await api.get<any[]>(`/api/reports/${kind}-transfers?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+      setRows(data);
+    } catch (e) { setError(e instanceof Error ? e.message : "Unable to load transfer report"); }
+  }
+  useEffect(() => { load(); }, []);
+  const columns: Array<[string, string]> = kind === "item"
+    ? [["created_at", "Date / Time"], ["from_table", "From Table"], ["to_table", "To Table"], ["item_names", "Transferred Items"], ["item_count", "Qty"], ["staff_name", "Staff"], ["reason", "Reason"]]
+    : [["created_at", "Date / Time"], ["from_table", "From Table"], ["to_table", "To Table"], ["staff_name", "Staff"], ["reason", "Reason"]];
+  return <div className="rpt-page">
+    <div className="rpt-bar"><strong>{title}</strong><FilterDates from={from} to={to} setFrom={setFrom} setTo={setTo} onShow={() => load()} /></div>
+    {error && <div className="rpt-bar">{error}</div>}
+    <div className="rpt-grid"><table><thead><tr>{columns.map(([, label]) => <th key={label}>{label}</th>)}</tr></thead>
+      <tbody>{rows.map((row) => <tr key={row.id}>{columns.map(([key]) => <td key={key}>{key === "created_at" ? stampGrid(row[key]) : row[key] ?? ""}</td>)}</tr>)}
+        {!rows.length && <tr><td colSpan={columns.length}>No transfers found for this date range.</td></tr>}</tbody>
+    </table></div>
+  </div>;
+}
+
 export function ReportHost({ view, outlet, onExit }: { view: NavView; outlet?: string; onExit: () => void }) {
   const supported = [
     "item-wise-detail", "point-of-sales", "gst-report", "item-wise-sale", "item-wise-group",
     "settlement-report", "card-settlement-report", "booking-report", "card-block",
-    "advance-booking", "kot-report", "bill-report", "history", "reports", "time-sale", "tax-wise",
+    "advance-booking", "kot-report", "bill-report", "history", "reports", "time-sale", "tax-wise", "item-transfer-report", "table-transfer-report",
   ].includes(view);
   useEffect(() => {
     if (!supported) onExit();
@@ -3175,6 +3202,8 @@ export function ReportHost({ view, outlet, onExit }: { view: NavView; outlet?: s
   if (view === "gst-report") return <GstReport onExit={onExit} />;
   if (view === "item-wise-sale") return <ItemWiseSale onExit={onExit} />;
   if (view === "item-wise-group") return <ItemWiseGroupSales onExit={onExit} />;
+  if (view === "item-transfer-report") return <TransferReport kind="item" onExit={onExit} />;
+  if (view === "table-transfer-report") return <TransferReport kind="table" onExit={onExit} />;
   if (view === "settlement-report") return <SettlementReport outlet={outlet} onExit={onExit} />;
   if (view === "card-settlement-report") return <CardSettlementReport onExit={onExit} />;
   if (view === "booking-report") return <BookingReport onExit={onExit} />;

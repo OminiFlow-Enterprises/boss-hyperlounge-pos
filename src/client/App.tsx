@@ -157,6 +157,8 @@ const MENUS: Array<{ id: string; label: string; items: MenuNode[] }> = [
         { label: "Item Wise Sales", view: "item-wise-sale" },
         { label: "Item Wise Group Sales Report", view: "item-wise-group" },
         { label: "Item Wise Sales Detail", view: "item-wise-detail" },
+        { label: "Item Transfer Report", view: "item-transfer-report" },
+        { label: "Table Transfer Report", view: "table-transfer-report" },
       ] },
       { label: "Sales Report", children: [
         { label: "Item Combine Stock Report", view: "item-combine-stock" },
@@ -180,6 +182,8 @@ const VIEW_TITLE: Partial<Record<AppView, string>> = {
   "item-wise-sale": "Item Wise Sale",
   "item-wise-group": "Item Wise Group Sales Report",
   "item-wise-detail": "Item Wise Sales Detail",
+  "item-transfer-report": "Item Transfer Report",
+  "table-transfer-report": "Table Transfer Report",
   "item-combine-stock": "Item Combine Stock Report",
   "outlet-stock": "Outlet Wise Stock Report",
   "time-sale": "Time Sale Report",
@@ -555,7 +559,7 @@ export function App() {
       )}
       {alertText && <AlertBox message={alertText} onClose={closeAlert} />}
       {!alertText && error && <AlertBox message={error} onClose={() => setError("")} />}
-      <StaffMark name={actor?.staffName ?? ""} />
+      <StaffMark name={actor?.username ?? actor?.staffName ?? ""} />
     </div>
   );
 }

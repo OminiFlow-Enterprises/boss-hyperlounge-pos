@@ -229,6 +229,40 @@ export function itemWiseSales(ctx: AppContext, from?: string, to?: string) {
   return { from: range.start, to: range.end, rows: rows.map(stampClubTable) };
 }
 
+export function tableTransferReport(ctx: AppContext, from?: string, to?: string) {
+  assertPermission(ctx.actor.role, "VIEW_REPORTS");
+  const range = dateRange(from, to);
+  return ctx.db.prepare(
+    `SELECT tt.id, tt.created_at, f.code AS from_table, t.code AS to_table,
+            tt.reason, COALESCE(s.name, '') AS staff_name
+       FROM table_transfers tt
+       LEFT JOIN dining_tables f ON f.id = tt.from_table_id
+       LEFT JOIN dining_tables t ON t.id = tt.to_table_id
+       LEFT JOIN staff s ON s.id = tt.staff_id
+      WHERE tt.created_at BETWEEN ? AND ? ORDER BY tt.created_at DESC`,
+  ).all(range.from, range.to);
+}
+
+export function itemTransferReport(ctx: AppContext, from?: string, to?: string) {
+  assertPermission(ctx.actor.role, "VIEW_REPORTS");
+  const range = dateRange(from, to);
+  const rows = ctx.db.prepare(
+    `SELECT id, entity_id, user_name, old_value, new_value, reason, created_at
+       FROM audit_log WHERE action = 'ITEM_TRANSFER' AND created_at BETWEEN ? AND ?
+       ORDER BY created_at DESC`,
+  ).all(range.from, range.to) as Array<{ id: string; entity_id: string | null; user_name: string | null; old_value: string | null; new_value: string | null; reason: string | null; created_at: string }>;
+  return rows.map((row) => {
+    let transfer: { to?: string; itemIds?: string[] } = {};
+    try { transfer = JSON.parse(row.new_value || "{}"); } catch { /* retain the audit record */ }
+    const ids = Array.isArray(transfer.itemIds) ? transfer.itemIds : [];
+    const names = ids.length
+      ? ctx.db.prepare(`SELECT name FROM order_items WHERE id IN (${ids.map(() => "?").join(",")})`).all(...ids) as Array<{ name: string }>
+      : [];
+    const source = ctx.db.prepare("SELECT code FROM dining_tables WHERE id = ?").get(row.entity_id) as { code: string } | undefined;
+    return { id: row.id, created_at: row.created_at, from_table: source?.code || row.old_value || "", to_table: transfer.to || "", item_names: names.map((item) => item.name).join(", "), item_count: ids.length, reason: row.reason || "", staff_name: row.user_name || "" };
+  });
+}
+
 export function gstSummary(ctx: AppContext, from?: string, to?: string) {
   assertPermission(ctx.actor.role, "VIEW_REPORTS");
   const range = dateRange(from, to);
