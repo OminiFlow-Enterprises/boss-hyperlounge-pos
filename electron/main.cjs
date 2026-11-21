@@ -1,3 +1,8 @@
+if (process.env.POS_PRINT_HTML === "1") {
+  require("./print-html-file.cjs");
+  return;
+}
+
 const { app, BrowserWindow, Menu, dialog, globalShortcut, ipcMain } = require("electron");
 const { spawn, execFile, execFileSync } = require("node:child_process");
 const fs = require("node:fs");
@@ -339,6 +344,9 @@ async function openPos() {
   }
 
   mainWindow = new BrowserWindow({
+    icon: process.platform === "win32"
+      ? path.join(__dirname, "app-icon.ico")
+      : path.join(__dirname, "../dist/client/app-icon.png"),
     width: 1280,
     height: 800,
     show: false,

@@ -80,6 +80,14 @@ export function findCardByScan(ctx: AppContext, cardNumber?: string, cardUid?: s
   return null;
 }
 
+export function assertOrderCardUsable(ctx: AppContext, orderId: string) {
+  const row = ctx.db.prepare(
+    `SELECT COALESCE(o.card_id, s.card_id) AS card_id
+       FROM orders o LEFT JOIN table_sessions s ON s.id = o.session_id WHERE o.id = ?`,
+  ).get(orderId) as { card_id: string | null } | undefined;
+  if (row?.card_id) assertUsable(getCard(ctx, row.card_id));
+}
+
 export function balancesFromLedger(ctx: AppContext, cardId: string): CardBalances {
   const row = ctx.db
     .prepare(
@@ -100,7 +108,8 @@ function refreshCachedBalance(ctx: AppContext, cardId: string): CardBalances {
   return bal;
 }
 
-function assertUsable(card: CardRow): void {
+export function assertUsable(card: CardRow): void {
+  if (card.status === "BLOCKED" || card.status === "LOST") throw new AppError("Card blocked", 409, "CARD_BLOCKED");
   if (card.status === "EXPIRED" || (card.expiry_date && card.expiry_date < nowIso().slice(0, 10))) {
     throw new AppError("Card is expired", 409, "CARD_EXPIRED");
   }
@@ -186,6 +195,7 @@ export function ensureCardAndCreditAdvance(
       if (!card) throw err;
     }
   }
+  assertUsable(card);
   const guest = (input.guestName || "").trim();
   if (guest && card.customer_id) {
     ctx.db.prepare("UPDATE customers SET name = ? WHERE id = ?").run(guest, card.customer_id);
@@ -213,6 +223,7 @@ export function writeLedger(ctx: AppContext, input: LedgerWrite) {
   if (existing) return existing;
 
   const card = getCard(ctx, input.cardId);
+  if (input.type !== "EXPIRY" && (card.status === "BLOCKED" || card.status === "LOST")) assertUsable(card);
   const prev = balancesFromLedger(ctx, card.id);
   let newPaid = prev.paid;
   let newBonus = prev.bonus;
@@ -392,6 +403,8 @@ export function applyBonusRule(ctx: AppContext, cardTypeId: string, rechargeAmou
   return bonus;
 }
 
+export const CARD_RECHARGE_FEE = 10_000;
+
 export function rechargeCard(
   ctx: AppContext,
   input: {
@@ -406,6 +419,7 @@ export function rechargeCard(
 ) {
   assertPermission(ctx.actor.role, "RECHARGE");
   assertPositiveAmount(input.amount, "Recharge amount");
+  if (input.amount < CARD_RECHARGE_FEE) throw new AppError("Minimum recharge is Rs. 100.00");
   if (input.paymentMode === "MEMBER_CARD") {
     throw new AppError("Cannot recharge a member card using another member card");
   }
@@ -416,6 +430,11 @@ export function rechargeCard(
   const key = input.idempotencyKey ?? idempotencyKey("rch");
 
   const result = ctx.db.transaction(() => {
+    const prior = ctx.db.prepare("SELECT id, card_id, type FROM card_ledger WHERE idempotency_key = ?")
+      .get(key) as { id: string; card_id: string; type: string } | undefined;
+    if (prior && (prior.card_id !== card.id || prior.type !== "RECHARGE")) {
+      throw new AppError("Recharge reference is already in use", 409);
+    }
     const rechargeTxn = writeLedger(ctx, {
       cardId: card.id,
       type: "RECHARGE",
@@ -427,9 +446,23 @@ export function rechargeCard(
       idempotencyKey: key,
     });
 
+    if (!prior) writeLedger(ctx, {
+      cardId: card.id,
+      type: "ADJUSTMENT",
+      direction: "DEBIT",
+      paidAmount: CARD_RECHARGE_FEE,
+      bonusAmount: 0,
+      relatedLedgerId: (rechargeTxn as { id: string }).id,
+      reason: "Card recharge fee",
+      idempotencyKey: `${key}:fee`,
+    });
+
     let bonusTxn = null;
     const shouldBonus = input.applyBonus !== false;
-    const bonus = shouldBonus ? applyBonusRule(ctx, card.card_type_id, input.amount) : 0;
+    const savedBonus = prior
+      ? ctx.db.prepare("SELECT bonus_amount FROM card_ledger WHERE idempotency_key = ?").get(`${key}:bonus`) as { bonus_amount: number } | undefined
+      : undefined;
+    const bonus = prior ? savedBonus?.bonus_amount ?? 0 : shouldBonus ? applyBonusRule(ctx, card.card_type_id, input.amount) : 0;
     if (bonus > 0) {
       bonusTxn = writeLedger(ctx, {
         cardId: card.id,
@@ -456,6 +489,7 @@ export function rechargeCard(
         `Member ${result.card.customer_name}`,
         `Previous ${formatLedgerAmount(card.paid_balance + card.bonus_balance)}`,
         `Recharge ${formatLedgerAmount(input.amount)}`,
+        `Recharge fee ${formatLedgerAmount(CARD_RECHARGE_FEE)}`,
         result.bonusAmount ? `Bonus ${formatLedgerAmount(result.bonusAmount)}` : "",
         `New ${formatLedgerAmount(result.card.paid_balance + result.card.bonus_balance)}`,
       ].filter(Boolean),
@@ -583,6 +617,7 @@ export function swapCard(
 ) {
   assertPermission(ctx.actor.role, "CARD_SWAP");
   const oldCard = getCard(ctx, input.oldCardId);
+  if (oldCard.status === "BLOCKED" || oldCard.status === "LOST") assertUsable(oldCard);
   if (oldCard.status === "REPLACED") throw new AppError("Card has already been replaced");
 
   return ctx.db.transaction(() => {
@@ -661,6 +696,7 @@ export function swapCard(
 export function blockCard(ctx: AppContext, cardId: string, reason: BlockReason) {
   assertPermission(ctx.actor.role, "CARD_BLOCK");
   const card = getCard(ctx, cardId);
+  if (card.status !== "ACTIVE") assertUsable(card);
   const status = reason === "Lost" ? "LOST" : "BLOCKED";
   ctx.db.prepare("UPDATE member_cards SET status = ?, block_reason = ? WHERE id = ?").run(status, reason, cardId);
   audit(ctx, "CARD_BLOCK", "member_card", cardId, reason, card.status, status);
@@ -701,6 +737,7 @@ export function checkBalance(ctx: AppContext, query: string, exact = false) {
     }
   }
   if (!card) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
+  assertUsable(card);
   const ledger = expireOvernightBalance(ctx, card.id);
   const last = ctx.db
     .prepare("SELECT * FROM card_ledger WHERE card_id = ? ORDER BY created_at DESC LIMIT 1")
@@ -748,6 +785,10 @@ export function cardLedger(
     .all(...params);
 }
 
+export function listBlockedCards(ctx: AppContext) {
+  return ctx.db.prepare(`${CARD_SELECT} WHERE c.status IN ('BLOCKED', 'LOST') ORDER BY c.card_number`).all();
+}
+
 export function listCards(ctx: AppContext, status?: string) {
   if (status) return ctx.db.prepare(`${CARD_SELECT} WHERE c.status = ? ORDER BY c.created_at DESC`).all(status);
   return ctx.db.prepare(`${CARD_SELECT} ORDER BY c.created_at DESC`).all();
@@ -763,7 +804,7 @@ export function cardsRechargedToday(ctx: AppContext) {
        FROM card_ledger l
        JOIN member_cards c ON c.id = l.card_id
        JOIN customers cu ON cu.id = c.customer_id
-       WHERE l.type = 'RECHARGE' AND l.direction = 'CREDIT' AND l.created_at >= ?
+       WHERE l.type = 'RECHARGE' AND l.direction = 'CREDIT' AND l.created_at >= ? AND c.status = 'ACTIVE'
        GROUP BY c.id
        ORDER BY recharged_at DESC, c.card_number`,
     )

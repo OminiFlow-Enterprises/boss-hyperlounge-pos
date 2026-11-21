@@ -606,6 +606,13 @@ export function gstBillWise(
   };
 }
 
+export function settlementUsers(ctx: AppContext): string[] {
+  assertPermission(ctx.actor.role, "VIEW_REPORTS");
+  const users = ctx.db.prepare("SELECT DISTINCT name FROM staff WHERE active = 1 ORDER BY name")
+    .all() as Array<{ name: string }>;
+  return users.map((user) => user.name);
+}
+
 export function settlementReport(
   ctx: AppContext,
   from?: string,
@@ -677,9 +684,6 @@ export function settlementReport(
       allowance += Number(row.allowance) || 0;
     }
   }
-  const users = ctx.db
-    .prepare(`SELECT name FROM staff WHERE active = 1 ORDER BY name`)
-    .all() as Array<{ name: string }>;
   return {
     from: range.start,
     to: range.end,
@@ -692,7 +696,7 @@ export function settlementReport(
       { method: "MEMBER_CARD", amount: totals.MEMBER_CARD },
     ],
     allowance,
-    users: users.map((u) => u.name),
+    users: settlementUsers(ctx),
   };
 }
 
@@ -833,6 +837,78 @@ function stampKotTime(iso?: string) {
   const ap = h >= 12 ? "PM" : "AM";
   h = h % 12 || 12;
   return `${String(h).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")} ${ap}`;
+}
+
+export function kotCancellationReport(ctx: AppContext, filters: {
+  from: string; to: string; username: string; tableNo: string; page: number;
+}) {
+  assertPermission(ctx.actor.role, "VIEW_REPORTS");
+  const from = new Date(filters.from);
+  const to = new Date(filters.to);
+  if (!Number.isFinite(+from) || !Number.isFinite(+to) || from > to) {
+    throw new AppError("Enter a valid cancellation date and time range");
+  }
+  const pageSize = 100;
+  const page = filters.page;
+  if (!Number.isSafeInteger(page) || page < 1 || !Number.isSafeInteger((page - 1) * pageSize)) {
+    throw new AppError("Invalid report page");
+  }
+  const rows = ctx.db.prepare(`
+    WITH cancellations AS (
+      SELECT a.id, a.created_at, k.kot_number, k.table_id, a.reason AS remark,
+             a.user_id, a.user_name, a.new_value AS snapshot
+        FROM audit_log a
+        JOIN kots k ON k.id = a.entity_id
+       WHERE a.action = 'KOT_CANCEL' AND a.entity_type = 'kot'
+         AND a.created_at BETWEEN @from AND @to
+         -- Older full-void calls wrote a generic entry immediately before the actual reason.
+         AND NOT EXISTS (
+           SELECT 1 FROM audit_log next
+            WHERE next.rowid = a.rowid + 1 AND next.action = 'KOT_CANCEL'
+              AND next.entity_id = a.entity_id AND next.old_value IS NULL
+              AND a.reason = 'void' AND a.new_value = '"VOID"'
+         )
+      UNION ALL
+      SELECT k.id, k.created_at, k.kot_number, k.table_id,
+             COALESCE(a.reason, k.notes, legacy.reason),
+             COALESCE(a.user_id, legacy.user_id), COALESCE(a.user_name, legacy.user_name),
+             a.new_value
+        FROM kots k
+        LEFT JOIN audit_log a ON a.entity_id = k.id AND a.action = 'KOT_CANCEL_SLIP'
+        LEFT JOIN audit_log legacy ON legacy.rowid = CASE WHEN a.id IS NULL THEN COALESCE(
+          (SELECT item_audit.rowid
+             FROM kot_items ki
+             JOIN audit_log item_audit ON item_audit.entity_id = ki.order_item_id
+                                      AND item_audit.action = 'ITEM_CANCEL'
+            WHERE ki.kot_id = k.id AND ki.product_id = ''
+            ORDER BY item_audit.created_at DESC LIMIT 1),
+          (SELECT sent.rowid FROM audit_log sent
+            WHERE sent.entity_id = k.order_id AND sent.action = 'KOT_SEND'
+              AND sent.created_at >= k.created_at
+              AND EXISTS (SELECT 1 FROM json_each(sent.new_value) WHERE value = k.kot_number)
+            ORDER BY sent.created_at LIMIT 1)
+        ) END
+       WHERE k.type = 'CANCEL' AND k.created_at BETWEEN @from AND @to
+    ), details AS (
+      SELECT c.id, c.created_at, c.kot_number, c.remark,
+             COALESCE(json_extract(c.snapshot, '$.username'), s.username, c.user_name) AS username,
+             COALESCE(json_extract(c.snapshot, '$.tableNo'), t.code) AS table_no,
+             COALESCE(json_extract(c.snapshot, '$.tableName'), t.name) AS table_name
+        FROM cancellations c
+        LEFT JOIN staff s ON s.id = c.user_id
+        LEFT JOIN dining_tables t ON t.id = c.table_id
+    )
+    SELECT * FROM details
+     WHERE (@username = '' OR username = @username COLLATE NOCASE)
+       AND (@tableNo = '' OR table_no = @tableNo COLLATE NOCASE)
+     ORDER BY created_at DESC, id DESC
+     LIMIT @limit OFFSET @offset
+  `).all({
+    from: from.toISOString(), to: to.toISOString(),
+    username: filters.username.trim(), tableNo: filters.tableNo.trim(),
+    limit: pageSize + 1, offset: (page - 1) * pageSize,
+  });
+  return { rows: rows.slice(0, pageSize), hasNext: rows.length > pageSize };
 }
 
 export function kotReport(
@@ -1005,6 +1081,9 @@ export function billReport(
     tableNo?: string;
     status?: "all" | "active" | "cancelled";
     discountedOnly?: boolean;
+    complimentaryOnly?: boolean;
+    complimentaryAccountId?: string;
+    complimentaryAccount?: string;
   },
 ) {
   assertPermission(ctx.actor.role, "VIEW_REPORTS");
@@ -1032,6 +1111,21 @@ export function billReport(
   else if (status === "cancelled") where.push("i.status IN ('VOID','CANCELLED')");
   else where.push("i.status IN ('UNPAID','PARTIAL','PAID','VOID','CANCELLED')");
   if (filters?.discountedOnly) where.push("COALESCE(i.discount, 0) > 0");
+  const isComplimentary = `(COALESCE(i.complimentary_account_id, '') <> ''
+    OR COALESCE(i.complimentary_name, '') <> '' OR t.outlet = 'NC')`;
+  if (filters?.complimentaryOnly) where.push(isComplimentary);
+  const accountId = filters?.complimentaryAccountId?.trim();
+  if (accountId) {
+    where.push("i.complimentary_account_id = ?");
+    args.push(accountId);
+  }
+  const account = filters?.complimentaryAccount?.trim();
+  if (account) {
+    where.push(`(INSTR(UPPER(COALESCE(i.complimentary_name, '')), UPPER(?)) > 0
+      OR INSTR(UPPER(COALESCE(ca.name, '')), UPPER(?)) > 0
+      OR CAST(ca.code AS TEXT) = ?)`);
+    args.push(account, account, account.replace(/^0+(?=\d)/, ""));
+  }
 
   const invoices = ctx.db
     .prepare(
@@ -1043,6 +1137,8 @@ export function billReport(
               i.food_total, i.drinks_total, cu.name AS guest, cu.mobile AS mobile,
               COALESCE(NULLIF(t.outlet, ''), 'BAR') AS outlet_name,
               s.name AS username,
+              ${isComplimentary} AS is_complimentary,
+              COALESCE(NULLIF(i.complimentary_name, ''), ca.name, '') AS complimentary_account,
               (SELECT p.id FROM payments p WHERE p.invoice_id = i.id ORDER BY p.created_at DESC LIMIT 1) AS payment_id,
               COALESCE(
                 NULLIF((SELECT COALESCE(p.remark, '') FROM payments p WHERE p.invoice_id = i.id ORDER BY p.created_at DESC LIMIT 1), ''),
@@ -1052,6 +1148,7 @@ export function billReport(
        JOIN dining_tables t ON t.id = i.table_id
        LEFT JOIN customers cu ON cu.id = i.customer_id
        LEFT JOIN staff s ON s.id = i.cashier_id
+       LEFT JOIN complimentary_accounts ca ON ca.id = i.complimentary_account_id
        WHERE ${where.join(" AND ")}
        ORDER BY i.created_at, i.invoice_number`,
     )
@@ -1111,7 +1208,7 @@ export function cardSettlementReport(ctx: AppContext, from?: string, to?: string
   const rows = ctx.db
     .prepare(
       `WITH seq AS (
-         SELECT id, card_no, guest_name, advance, created_at,
+         SELECT id, card_no, guest_name, advance, mop, created_at,
                 LEAD(created_at) OVER (PARTITION BY card_no ORDER BY created_at, id) AS next_at
          FROM bookings
          WHERE card_no != '' AND (? = '' OR card_no = ?)
@@ -1122,19 +1219,25 @@ export function cardSettlementReport(ctx: AppContext, from?: string, to?: string
                 ELSE COALESCE(cu.name, '')
               END AS guest_name,
               b.created_at AS booking_date,
-              b.advance AS card_balance,
+              COALESCE(NULLIF(TRIM(b.mop), ''), recharge.payment_mode) AS payment_mode,
+              b.advance AS amount_paid,
+              b.advance - COALESCE((
+                SELECT fee.paid_amount FROM card_ledger fee
+                WHERE fee.idempotency_key = 'adv:' || b.id || ':fee'
+              ), 0) AS card_balance,
               MAX(0, COALESCE((
                 SELECT l.new_paid + l.new_bonus
                 FROM card_ledger l
                 WHERE l.card_id = mc.id
                   AND l.created_at >= b.created_at
                   AND l.created_at < COALESCE(b.next_at, '9999-12-31T23:59:59.999Z')
-                ORDER BY l.created_at DESC
+                ORDER BY l.created_at DESC, l.rowid DESC
                 LIMIT 1
               ), CASE WHEN b.next_at IS NULL
                    THEN COALESCE(mc.paid_balance, 0) + COALESCE(mc.bonus_balance, 0)
                    ELSE 0 END)) AS remaining_balance
        FROM seq b
+       LEFT JOIN card_ledger recharge ON recharge.idempotency_key = 'adv:' || b.id
        LEFT JOIN member_cards mc ON mc.card_number = b.card_no
        LEFT JOIN customers cu ON cu.id = mc.customer_id
        WHERE b.created_at BETWEEN ? AND ?
@@ -1196,32 +1299,36 @@ export function saveBooking(
   ctx: AppContext,
   body: { mobile?: string; guestName?: string; cardNo?: string; advance?: number; outlet?: string; mop?: string },
 ) {
-  const max = ctx.db.prepare("SELECT COALESCE(MAX(reservation_no), 429) AS n FROM bookings").get() as { n: number };
-  const id = uuid();
-  const no = max.n + 1;
-  const cardNo = (body.cardNo ?? "").trim();
-  const advance = body.advance ?? 0;
-  if (!/^\d{4}$/.test(cardNo)) throw new AppError("Card No must be 4 digits");
-  if (!(advance > 10000)) throw new AppError("Advance must be greater than 100.00");
-  ctx.db
-    .prepare(
-      `INSERT INTO bookings (id, reservation_no, mobile, guest_name, card_no, advance, outlet, mop, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(id, no, body.mobile ?? "", body.guestName ?? "", cardNo, advance, body.outlet ?? "THE BOSS CLUB", body.mop ?? "", nowIso());
-  let card = null;
-  if (cardNo && advance > 0) {
-    card = cards.ensureCardAndCreditAdvance(ctx, {
+  return ctx.db.transaction(() => {
+    const max = ctx.db.prepare("SELECT COALESCE(MAX(reservation_no), 429) AS n FROM bookings").get() as { n: number };
+    const id = uuid();
+    const no = max.n + 1;
+    const cardNo = (body.cardNo ?? "").trim();
+    const advance = body.advance ?? 0;
+    const mop = body.mop?.trim() || "CASH";
+    const createdAt = nowIso();
+    if (!/^\d{4}$/.test(cardNo)) throw new AppError("Card No must be 4 digits");
+    if (!(advance > 10000)) throw new AppError("Advance must be greater than 100.00");
+    ctx.db
+      .prepare(
+        `INSERT INTO bookings (id, reservation_no, mobile, guest_name, card_no, advance, outlet, mop, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, no, body.mobile ?? "", body.guestName ?? "", cardNo, advance, body.outlet ?? "THE BOSS CLUB", mop, createdAt);
+    const card = cards.ensureCardAndCreditAdvance(ctx, {
       cardNumber: cardNo,
       guestName: body.guestName,
       mobile: body.mobile,
       amount: advance,
-      paymentMode: body.mop,
+      paymentMode: mop,
       idempotencyKey: `adv:${id}`,
     });
-  }
-  const booking = ctx.db.prepare("SELECT * FROM bookings WHERE id = ?").get(id);
-  return { ...booking as object, card, balances: card ? cards.balancesFromLedger(ctx, card.id) : { paid: 0, bonus: 0, usable: 0 } };
+    const booking = ctx.db.prepare("SELECT * FROM bookings WHERE id = ?").get(id) as {
+      id: string; reservation_no: number; mobile: string; guest_name: string;
+      card_no: string; advance: number; outlet: string; mop: string; created_at: string;
+    };
+    return { ...booking, card, balances: cards.balancesFromLedger(ctx, card.id) };
+  })();
 }
 
 export function salesReport(ctx: AppContext, date = todayDate()) {

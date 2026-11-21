@@ -1,6 +1,6 @@
 {
   "name": "boss-hyperlounge-pos",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "BOSS Hyperlounge club/lounge POS — member cards, tables, KOT, billing, offline-first",
   "private": true,
   "type": "module",
@@ -73,7 +73,8 @@
           ]
         }
       ],
-      "signAndEditExecutable": false
+      "icon": "electron/app-icon.ico",
+      "signExecutable": false
     },
     "nsis": {
       "oneClick": false,

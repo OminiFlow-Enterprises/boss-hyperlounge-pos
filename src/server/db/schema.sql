@@ -402,7 +402,8 @@ CREATE TABLE IF NOT EXISTS invoices (
   complimentary_account_id TEXT,
   complimentary_name TEXT NOT NULL DEFAULT '',
   customer_display_name TEXT NOT NULL DEFAULT '',
-  customer_gstin TEXT NOT NULL DEFAULT ''
+  customer_gstin TEXT NOT NULL DEFAULT '',
+  bill_details TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS complimentary_accounts (
@@ -470,6 +471,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action, created_at);
+CREATE INDEX IF NOT EXISTS idx_kot_audit_entity ON audit_log(entity_id, action, created_at)
+  WHERE action IN ('KOT_CANCEL_SLIP', 'KOT_SEND', 'ITEM_CANCEL');
+CREATE INDEX IF NOT EXISTS idx_cancel_kots_created ON kots(created_at) WHERE type = 'CANCEL';
+CREATE INDEX IF NOT EXISTS idx_cancel_kot_items ON kot_items(kot_id) WHERE product_id = '';
 CREATE INDEX IF NOT EXISTS idx_orders_session ON orders(session_id);
 CREATE INDEX IF NOT EXISTS idx_orders_table ON orders(table_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);

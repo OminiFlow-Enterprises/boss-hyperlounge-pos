@@ -1,5 +1,6 @@
 import { createApp } from "./api/app.js";
 import { openDatabase } from "./db/database.js";
+import { scheduleBackups } from "./db/backupSchedule.js";
 import { seedIfEmpty } from "./db/seed.js";
 import { createHardware } from "./hardware/index.js";
 
@@ -11,6 +12,7 @@ const app = createApp({ db, hardware, online: process.env.OFFLINE !== "1" });
 
 const listener = app.listen(port, "0.0.0.0", () => {
   console.log(`BOSS Hyperlounge POS on http://0.0.0.0:${port}`);
+  scheduleBackups(db.name);
 });
 listener.on("error", (err) => {
   console.error(err instanceof Error ? err.message : err);

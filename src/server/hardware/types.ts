@@ -56,6 +56,7 @@ export interface BillReceiptPayload {
   waiter?: string;
   guestName?: string;
   guestGstin?: string;
+  remark?: string;
   pax?: string;
   createdAt: string;
   items: Array<{ name: string; rate: number; qty: number; amount: number }>;
@@ -81,7 +82,8 @@ export interface KotPrintPayload {
   kotNumber: string;
   tableCode: string;
   waiter?: string;
-  station: "KITCHEN" | "BAR";
+  station: "KITCHEN" | "BAR" | "BILL";
+  operatorName?: string;
   reprint: boolean;
   /**
    * First KOT on a table/session → NEW ORDER.

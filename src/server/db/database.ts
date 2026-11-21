@@ -154,6 +154,7 @@ export function migrate(db: Database.Database): void {
       db.exec("ALTER TABLE invoices ADD COLUMN complimentary_name TEXT NOT NULL DEFAULT ''");
     }
     if (!hasColumn(db, "invoices", "customer_display_name")) db.exec("ALTER TABLE invoices ADD COLUMN customer_display_name TEXT NOT NULL DEFAULT ''");
+    if (!hasColumn(db, "invoices", "bill_details")) db.exec("ALTER TABLE invoices ADD COLUMN bill_details TEXT NOT NULL DEFAULT '{}'");
     if (!hasColumn(db, "invoices", "customer_gstin")) db.exec("ALTER TABLE invoices ADD COLUMN customer_gstin TEXT NOT NULL DEFAULT ''");
   }
   if (hasColumn(db, "staff", "id")) {

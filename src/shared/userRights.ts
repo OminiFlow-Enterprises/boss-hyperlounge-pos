@@ -73,6 +73,7 @@ export const RIGHTS_TREE: RightNode[] = [
       { id: "report.card", label: "Card Settlement Report" },
       { id: "report.itemTransfer", label: "Item Transfer Report" },
       { id: "report.tableTransfer", label: "Table Transfer Report" },
+      { id: "report.kotCancellation", label: "KOT Cancellation Report" },
     ],
   },
   { id: "setting", label: "Setting" },
@@ -101,7 +102,7 @@ export function rightsPreset(role: UserRoleLabel): Record<string, boolean> {
   const on = new Set([
     "fnb", "fnb.bar", "fnb.nc", "fnb.restaurant", "fnb.club", "fnb.advance",
     "report", "report.gst", "report.pos", "report.item", "report.itemDetail",
-    "report.stock", "report.outlet", "report.time", "report.tax", "report.settlement", "report.card", "report.itemTransfer", "report.tableTransfer",
+    "report.stock", "report.outlet", "report.time", "report.tax", "report.settlement", "report.card", "report.itemTransfer", "report.tableTransfer", "report.kotCancellation",
     "logout",
   ]);
   return Object.fromEntries(ids.map((id) => [id, on.has(id)]));
@@ -188,6 +189,7 @@ export function viewRight(view: string, outlet?: string): string | null {
   if (view === "time-sale") return "report.time";
   if (view === "tax-wise") return "report.tax";
   if (view === "card-settlement-report") return "report.card";
+  if (view === "kot-cancellation-report") return "report.kotCancellation";
   if (view === "booking-report" || view === "advance-booking" || view === "card-block") return "fnb.advance";
   if (view === "billing" || view === "kot-report" || view === "bill-report" || view === "history" || view === "settlement-report") {
     if (outlet) return outletRight(outlet);

@@ -1,10 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { ignoreRepeatedPrintKey, printBill } from "./printActions";
 import { createPortal } from "react-dom";
 import { api, ApiError } from "./api";
-import { parseRupeesInput } from "../shared/money";
+import { billLineTaxes, parseRupeesInput } from "../shared/money";
+import { billApprovalFields } from "../shared/billApproval";
 import { formatTableNo } from "../shared/tableLabel";
 import { itemMatchScore } from "../shared/itemSearch";
-import type { PaymentMode } from "../shared/types";
+import type { BillDetails, BillLineEdit, PaymentMode } from "../shared/types";
 import { cardNoDigits, cardNoReady, stayOnCard } from "./formNav";
 import { ComplimentaryMasterDialog, type CompAccount } from "./ComplimentaryMaster";
 
@@ -157,7 +159,6 @@ export function PrepareBillDialog({
   onPrinted,
   onSettle,
   onChanged,
-  updateOnly = false,
   existingInvoiceId,
   onMessage,
 }: {
@@ -173,8 +174,6 @@ export function PrepareBillDialog({
   /** Save (F5) + Yes opens settlement. Does not ask to print. */
   onSettle: (invoice: any) => void;
   onChanged?: () => void;
-  /** Bill Report edits update the selected invoice without opening settlement. */
-  updateOnly?: boolean;
   existingInvoiceId?: string;
   onMessage: (m: string, after?: () => void) => void;
 }) {
@@ -200,11 +199,13 @@ export function PrepareBillDialog({
   const [gstin, setGstin] = useState("");
   const [address, setAddress] = useState("");
   const [remark, setRemark] = useState("");
+  const [remarkRequired, setRemarkRequired] = useState(false);
   const nc = outlet === "NC";
   const [comp, setComp] = useState(nc);
   const isComplimentary = nc || comp;
   const [accounts, setAccounts] = useState<CompAccount[]>([]);
   const [compId, setCompId] = useState("");
+  const [compRequired, setCompRequired] = useState(false);
   const [masterOpen, setMasterOpen] = useState(false);
   const compRef = useRef<HTMLSelectElement>(null);
   const remarkRef = useRef<HTMLInputElement>(null);
@@ -212,6 +213,7 @@ export function PrepareBillDialog({
   const gridRef = useRef<HTMLDivElement>(null);
   const discRef = useRef<HTMLInputElement>(null);
   const printRef = useRef<HTMLButtonElement>(null);
+  const printedWithEnter = useRef(false);
   const addNameRef = useRef<HTMLInputElement>(null);
   const addQtyRef = useRef<HTMLInputElement>(null);
   const editNameRef = useRef<HTMLInputElement>(null);
@@ -231,10 +233,66 @@ export function PrepareBillDialog({
   const [addPick, setAddPick] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
   const [addQty, setAddQty] = useState("1");
+  const [invalidAddField, setInvalidAddField] = useState<"item" | "qty" | null>(null);
   const [pending, setPending] = useState<BillProduct | null>(null);
   const [dropBox, setDropBox] = useState<{ top: number; left: number; width: number; up: boolean } | null>(null);
-  const [ask, setAsk] = useState<null | "save">(null);
+  const [ask, setAsk] = useState<"save" | "print" | null>(null);
+  const [printChoice, setPrintChoice] = useState<{ id: string } | null>(null);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [masterPin, setMasterPin] = useState("");
+  const [approvalError, setApprovalError] = useState("");
+  const masterPinRef = useRef<HTMLInputElement>(null);
+  const [ready, setReady] = useState(false);
+  const invoiceId = useRef<string | undefined>(undefined);
+  const serviceChargeMode = useRef<"INCLUSIVE" | "EXCLUSIVE">();
+  const edits = useRef<BillLineEdit[]>([]);
+  const editPreview = useRef<Promise<boolean>>();
+  const savedApprovalFields = useRef("");
+  const savedRemark = useRef("");
+
+  function billFields() {
+    return {
+      billDetails: {
+        mobile: mob,
+        pax,
+        address,
+        remark: remark.trim() || savedRemark.current,
+        excludeItemIds: noDisc,
+        discountPct: discMode.current === "pct" ? wantPct.current : undefined,
+      } satisfies BillDetails,
+      ...discountBody(),
+      otherCharges: isComplimentary ? 0 : Math.round((Number(delivery) || 0) * 100),
+      complimentaryAccountId: isComplimentary ? compId : undefined,
+      customerDisplayName: name.trim(),
+      customerGstin: gstin.trim(),
+    };
+  }
+
+  function needsApproval() {
+    return edits.current.length > 0 || billApprovalFields(billFields()) !== savedApprovalFields.current;
+  }
+
+  function highlightRemark() {
+    closeApproval();
+    setRemarkRequired(true);
+    remarkRef.current?.focus();
+  }
+
+  function validateBillFields() {
+    if (isComplimentary && !compId) {
+      closeApproval();
+      setCompRequired(true);
+      compRef.current?.focus();
+      return false;
+    }
+    if (needsApproval() && !remark.trim()) {
+      highlightRemark();
+      return false;
+    }
+    return true;
+  }
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
   function discountBody(next?: { discountPct?: number; discountAmt?: number; mode?: "pct" | "amt"; excludeItemIds?: string[] }) {
     const mode = next?.mode ?? discMode.current;
@@ -260,8 +318,11 @@ export function PrepareBillDialog({
     try {
       preview = await api.post<any>("/api/invoices/preview", {
         orderId,
+        invoiceId: invoiceId.current,
+        edits: edits.current,
+        serviceChargeMode: serviceChargeMode.current,
         ...discountBody(next),
-        serviceChargePct: next?.serviceChargePct ?? svcPctValue(svcPct),
+        serviceChargePct: next?.serviceChargePct ?? svcPctValue(svcPctDraft.current),
         otherCharges: Math.round((Number(next?.otherCharges ?? delivery) || 0) * 100),
       });
     } catch (e) {
@@ -277,10 +338,6 @@ export function PrepareBillDialog({
       setBill(preview);
       if (mode === "amt") setDiscPct(Number(preview.discountPct ?? 0).toFixed(2));
       setDiscAmt(rupee(preview.discount ?? 0));
-      if (next?.serviceChargePct == null && preview.serviceChargePct != null && discPct === "0.00" && !bill) {
-        svcPctDraft.current = String(preview.serviceChargePct);
-        setSvcPct(svcPctDraft.current);
-      }
     }
     return preview;
   }
@@ -288,6 +345,22 @@ export function PrepareBillDialog({
   useEffect(() => {
     let cancel = false;
     previewRequest.current++;
+    setReady(false);
+    invoiceId.current = existingInvoiceId;
+    serviceChargeMode.current = undefined;
+    edits.current = [];
+    savedRemark.current = "";
+    savedApprovalFields.current = billApprovalFields({
+      customerDisplayName: guest,
+      billDetails: { mobile },
+    });
+    setName(guest);
+    setMob(mobile);
+    setPax("1");
+    setAddress("");
+    setRemark("");
+    setRemarkRequired(false);
+    setGstin("");
     // This dialog can be reused for another order. Clear all bill-specific
     // discount state before looking up an existing invoice so a previous
     // order's amount/mode/exclusions cannot leak into a new bill.
@@ -304,14 +377,33 @@ export function PrepareBillDialog({
     setComp(outlet === "NC");
     setCompId("");
     (async () => {
-      let next: { discountAmt?: number; mode?: "amt"; serviceChargePct?: number; otherCharges?: number } | undefined;
+      let next: Parameters<typeof load>[0] | undefined;
       let existingComplimentary = outlet === "NC";
       try {
         const snap = await api.get<any>(existingInvoiceId
           ? `/api/invoices/${encodeURIComponent(existingInvoiceId)}`
           : `/api/tables/${table.id}/invoice`);
         const inv = snap?.invoice;
-        if (inv && !cancel) {
+        if (inv?.order_id === orderId && !cancel) {
+          invoiceId.current = inv.id;
+          serviceChargeMode.current = inv.service_charge_mode;
+          const details: Partial<BillDetails> = JSON.parse(inv.bill_details || "{}");
+          setName(inv.customer_display_name || "");
+          setGstin(inv.customer_gstin || "");
+          setMob(details.mobile ?? "");
+          setPax(details.pax ?? "1");
+          setAddress(details.address ?? "");
+          savedRemark.current = details.remark ?? "";
+          savedApprovalFields.current = billApprovalFields({
+            billDetails: details,
+            discount: inv.discount,
+            otherCharges: inv.other_charges,
+            complimentaryAccountId: inv.complimentary_account_id,
+            customerDisplayName: inv.customer_display_name,
+            customerGstin: inv.customer_gstin,
+          });
+          const excludeItemIds = details.excludeItemIds ?? [];
+          setNoDisc(excludeItemIds);
           existingComplimentary = existingComplimentary || Boolean(inv.complimentary_account_id);
           if (outlet !== "NC") setComp(Boolean(inv.complimentary_account_id));
           setCompId(String(inv.complimentary_account_id || ""));
@@ -328,12 +420,25 @@ export function PrepareBillDialog({
           setSvcPct(String(serviceChargePct));
           svcPctDraft.current = String(serviceChargePct);
           setDelivery(String(otherCharges));
-          next = { mode: "amt", discountAmt, serviceChargePct, otherCharges };
+          if (details.discountPct != null) {
+            discMode.current = "pct";
+            wantPct.current = details.discountPct;
+            setDiscPct(String(details.discountPct));
+          }
+          next = { mode: discMode.current, discountAmt, serviceChargePct, otherCharges, excludeItemIds };
         }
-      } catch { /* bill not printed yet */ }
+      } catch (e) {
+        if (cancel) return;
+        if (existingInvoiceId || !(e instanceof ApiError && e.status === 404)) {
+          onMessage(e instanceof Error ? e.message : "Could not load saved bill");
+          return;
+        }
+      }
       if (cancel) return;
       try {
-        await load(next);
+        await load(next ?? { serviceChargePct: DEFAULT_SVC_PCT, otherCharges: 0, excludeItemIds: [] });
+        if (cancel) return;
+        setReady(true);
         setTimeout(() => {
           if (existingComplimentary) compRef.current?.focus();
           else { discRef.current?.focus(); discRef.current?.select(); }
@@ -393,22 +498,20 @@ export function PrepareBillDialog({
   const shown = useMemo(() => {
     const source = (bill?.items ?? []) as any[];
     const items = source.map((it, i) => {
-      if (isComplimentary && i !== rowSel) return { ...it, amount: 0, tax: 0 };
       if (i !== rowSel) return it;
       const raw = editQty.trim();
       const qty = raw === "" ? 0 : Number(raw);
       const priceRaw = editPrice.trim();
       const unit = priceRaw === "" ? 0 : Math.round(Number(priceRaw) * 100);
       if (!Number.isFinite(qty) || !Number.isFinite(unit)) return it;
-      const amount = isComplimentary ? 0 : Math.round(qty * unit);
-      const tax = isComplimentary ? 0 : Math.round(amount * (Number(it.tax_rate) / 100));
-      return { ...it, qty, amount, tax };
+      return { ...it, qty, unit_price: unit, amount: Math.round(qty * unit) };
     });
-    const extra = isComplimentary || !pending ? 0 : Math.round((Number(addQty) || 0) * Number(pending.base_price || 0));
+    const extra = pending ? Math.round((Number(addQty) || 0) * Number(pending.base_price || 0)) : 0;
     const totalQty = items.reduce((s, it) => s + Number(it.qty), 0) + (pending ? Number(addQty) || 0 : 0);
     if (isComplimentary) {
       return {
-        items,
+        items: items.map((it) => ({ ...it, amount: 0, tax: 0 })),
+        estimate: items.reduce((sum, it) => sum + Math.round(Number(it.qty) * Number(it.unit_price)), extra),
         totalQty,
         subtotal: 0,
         tax: 0,
@@ -423,16 +526,20 @@ export function PrepareBillDialog({
     const foodTotal = items.filter((it) => it.station === "KITCHEN").reduce((s, it) => s + Number(it.amount), 0);
     const drinksTotal = items.filter((it) => it.station !== "KITCHEN").reduce((s, it) => s + Number(it.amount), 0) + extra;
     const subtotal = foodTotal + drinksTotal;
-    const tax = items.reduce((s, it) => s + Number(it.tax), 0);
     const excluded = new Set(noDisc);
-    const discountable = items
-      .filter((it) => !(it.ids ?? [it.id]).some((id: string) => excluded.has(id)))
-      .reduce((s, it) => s + Number(it.amount), 0) + extra;
+    const taxLines = items.map((it) => ({
+      amount: Number(it.amount),
+      taxRate: Number(it.tax_rate) || 0,
+      excluded: (it.ids ?? [it.id]).some((id: string) => excluded.has(id)),
+    }));
+    if (extra > 0) taxLines.push({ amount: extra, taxRate: 0, excluded: false });
+    const discountable = taxLines.reduce((total, line) => line.excluded ? total : total + line.amount, 0);
     const svcMode = bill?.serviceChargeMode === "INCLUSIVE" ? "INCLUSIVE" : "EXCLUSIVE";
     const pct = svcPctValue(svcPct);
     const discount = discMode.current === "amt"
       ? Math.max(0, Math.min(Math.round((Number(discAmt) || 0) * 100), discountable))
       : Math.min(discountable, Math.round((discountable * (Number(discPct) || 0)) / 100));
+    const tax = billLineTaxes(taxLines, discount, discountable).reduce((total, lineTax) => total + lineTax, 0);
     const other = Math.round((Number(delivery) || 0) * 100);
     const after = Math.max(0, subtotal - discount);
     const service = svcMode === "INCLUSIVE"
@@ -543,6 +650,18 @@ export function PrepareBillDialog({
     requestAnimationFrame(() => { addQtyRef.current?.focus(); addQtyRef.current?.select(); });
   }
 
+  function stageEdit(edit: BillLineEdit) {
+    const previous = edits.current;
+    edits.current = [...previous, edit];
+    const preview = load().then(() => true, (error) => {
+      edits.current = previous;
+      onMessage(error instanceof Error ? error.message : "Could not change bill item");
+      return false;
+    });
+    editPreview.current = preview;
+    return preview;
+  }
+
   async function chooseName(it: any, p: BillProduct) {
     setNameOpen(false);
     setNameLocked(true);
@@ -552,12 +671,13 @@ export function PrepareBillDialog({
       requestAnimationFrame(focusQty);
       return;
     }
-    if (busy.current) return;
+    if (!ready || busy.current) return;
     busy.current = true;
     try {
-      await api.post(`/api/orders/${orderId}/bill-item`, { ids: it.ids ?? [it.id], productId: p.id, outlet });
-      await load();
-      onChanged?.();
+      if (!await stageEdit({ kind: "product", ids: it.ids ?? [it.id], productId: p.id, outlet })) {
+        setNameQuery(it.name ?? "");
+        return;
+      }
       requestAnimationFrame(focusQty);
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Could not change item");
@@ -572,12 +692,10 @@ export function PrepareBillDialog({
     const qty = Number(raw);
     if (!Number.isInteger(qty) || qty < 0) return;
     if (qty === Math.round(Number(it.qty))) return;
-    if (busy.current) return;
+    if (!ready || busy.current) return;
     busy.current = true;
     try {
-      await api.post(`/api/orders/${orderId}/bill-qty`, { ids: it.ids ?? [it.id], qty });
-      await load();
-      onChanged?.();
+      if (!await stageEdit({ kind: "qty", ids: it.ids ?? [it.id], qty })) setEditQty(String(it.qty));
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Could not change qty");
     } finally {
@@ -595,12 +713,10 @@ export function PrepareBillDialog({
       return;
     }
     if (price === Number(it.unit_price)) return;
-    if (busy.current) return;
+    if (!ready || busy.current) return;
     busy.current = true;
     try {
-      await api.post(`/api/orders/${orderId}/bill-price`, { ids: it.ids ?? [it.id], price });
-      await load();
-      onChanged?.();
+      if (!await stageEdit({ kind: "price", ids: it.ids ?? [it.id], price })) setEditPrice(rupee(it.unit_price));
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Could not change price");
     } finally {
@@ -610,26 +726,27 @@ export function PrepareBillDialog({
 
   async function addLine() {
     if (!pending) {
-      onMessage("Select an item");
+      setInvalidAddField("item");
       addNameRef.current?.focus();
       return;
     }
     const qty = Number(addQty);
     if (!Number.isInteger(qty) || qty === 0) {
-      onMessage("Enter qty");
+      setInvalidAddField("qty");
       addQtyRef.current?.focus();
       return;
     }
-    if (busy.current) return;
+    if (!ready || busy.current) return;
+    setInvalidAddField(null);
     busy.current = true;
     try {
-      await api.post(`/api/orders/${orderId}/items`, { productId: pending.id, qty, outlet });
+      const random = crypto.getRandomValues(new Uint8Array(16));
+      const id = "bill-" + Array.from(random, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      if (!await stageEdit({ kind: "add", id, productId: pending.id, qty, outlet })) return;
       setPending(null);
       setAddQuery("");
       setAddOpen(false);
       setAddQty("1");
-      await load();
-      onChanged?.();
       requestAnimationFrame(() => {
         if (outlet === "NC") remarkRef.current?.focus();
         else addNameRef.current?.focus();
@@ -649,6 +766,7 @@ export function PrepareBillDialog({
 
   useEffect(() => {
     function keys(e: KeyboardEvent) {
+      if (e.key === "Enter" && !e.repeat) printedWithEnter.current = false;
       if (ask || saving || masterOpen || document.querySelector(".cm-dlg, .confirm-dlg, .alert-dlg")) return;
       if (e.key === "Escape") {
         if (addOpen || nameOpen) {
@@ -662,13 +780,11 @@ export function PrepareBillDialog({
         e.stopPropagation();
         onClose();
       }
-      if (e.key === "F10") { e.preventDefault(); e.stopPropagation(); void printBill(true); }
+      if (e.key === "F10") { e.preventDefault(); e.stopPropagation(); if (!e.repeat) requestAction("print"); }
       if (e.key === "F5") {
         e.preventDefault();
         e.stopPropagation();
-        if (updateOnly) void updateBill();
-        else if (isComplimentary) void saveNc();
-        else setAsk("save");
+        if (!e.repeat) requestAction("save");
       }
       if (e.key === "F4") {
         const typing = document.activeElement === addNameRef.current || document.activeElement === addQtyRef.current || document.activeElement === editNameRef.current || (document.activeElement as HTMLElement | null)?.classList.contains("price");
@@ -695,29 +811,35 @@ export function PrepareBillDialog({
     return () => window.removeEventListener("keydown", keys, true);
   });
 
-  async function saveBill() {
+  async function saveBill(pin?: string) {
     if (busy.current) return null;
     busy.current = true;
     try {
-      if (isComplimentary && !compId) {
-        onMessage("Select Complimentary A/C", () => compRef.current?.focus());
-        return null;
-      }
       const invoice = await api.post<any>("/api/invoices/generate", {
         orderId,
-        invoiceId: updateOnly ? existingInvoiceId : undefined,
-        ...discountBody(),
+        invoiceId: invoiceId.current,
+        masterPin: pin,
+        edits: edits.current,
+        serviceChargeMode: serviceChargeMode.current,
+        ...billFields(),
         serviceChargePct: isComplimentary ? 0 : svcPctValue(svcPctDraft.current),
-        otherCharges: isComplimentary ? 0 : Math.round((Number(delivery) || 0) * 100),
-        reason: remark || undefined,
+        reason: remark.trim() || undefined,
         complimentary: isComplimentary,
-        complimentaryAccountId: isComplimentary ? compId : undefined,
-        customerDisplayName: name.trim(),
-        customerGstin: gstin.trim(),
       });
       return invoice;
     } catch (e) {
-      onMessage(e instanceof Error ? e.message : "Could not save bill");
+      if (e instanceof ApiError && e.details === "billRemark") {
+        highlightRemark();
+        return null;
+      }
+      const message = e instanceof Error ? e.message : "Could not save bill";
+      if (pin) {
+        setApprovalError(message);
+        if (e instanceof ApiError && e.status === 403 && /master PIN/i.test(e.message)) {
+          setMasterPin("");
+          masterPinRef.current?.focus();
+        }
+      } else onMessage(message);
       return null;
     } finally {
       busy.current = false;
@@ -725,49 +847,71 @@ export function PrepareBillDialog({
   }
 
   async function printInvoice(invoice: { id: string }) {
-    const printed = await api.post<{
-      ok?: boolean;
-      mode?: string;
-      html?: string;
-      printed?: boolean;
-      error?: string;
-    }>(`/api/invoices/${invoice.id}/print`).catch((e) => {
-      onMessage(e instanceof Error ? e.message : "Could not print bill");
-      return null;
-    });
-    if (printed) {
-      const { handleBillPrintResponse } = await import("./printBillHtml");
-      const sent = await handleBillPrintResponse(printed);
-      if (!sent.ok) onMessage(sent.error || "Bill print failed");
+    const result = await printBill(invoice.id);
+    if (!result.ok) onMessage(result.error || "Bill print failed");
+  }
+
+  function requestAction(action: "save" | "print") {
+    if (!ready || savingRef.current || saving || ask || printChoice) return;
+    // Commit the active field to the draft before a keyboard shortcut saves it.
+    (document.activeElement as HTMLElement | null)?.blur();
+    if (!validateBillFields()) return;
+    if ((action === "save" && !isComplimentary) || needsApproval()) {
+      setAsk(action);
+    } else {
+      void finishAction(action);
     }
   }
 
-  async function printBill(print = true) {
-    if (busy.current) return;
-    const invoice = await saveBill();
-    if (!invoice) return;
-    if (print) await printInvoice(invoice);
+  async function finishAction(action: "save" | "print", pin?: string) {
+    if (savingRef.current || (busy.current && !editPreview.current)) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      const pendingEdit = editPreview.current;
+      editPreview.current = undefined;
+      if (pendingEdit && !await pendingEdit) {
+        setAsk(null);
+        setPinOpen(false);
+        return;
+      }
+      if (!validateBillFields()) return;
+      if (needsApproval() && !pin) {
+        setAsk(action);
+        setPinOpen(true);
+        return;
+      }
+      const invoice = await saveBill(pin);
+      if (!invoice?.id) {
+        if (!pin) setAsk(null);
+        return;
+      }
+      closeApproval();
+      onChanged?.();
+      if (action === "print") await printAndClose(invoice);
+      else if (pin || invoiceId.current) setPrintChoice(invoice);
+      else if (isComplimentary) onPrinted(invoice);
+      else settleAfterSave(invoice);
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  }
+
+  async function printAndClose(invoice: { id: string }) {
+    try {
+      await printInvoice(invoice);
+    } catch (e) {
+      onMessage(e instanceof Error ? e.message : "Bill print failed");
+    }
     onPrinted(invoice);
   }
 
-  async function updateBill() {
-    if (busy.current || saving) return;
-    setSaving(true);
-    const invoice = await saveBill();
-    setSaving(false);
-    if (invoice?.id) onPrinted(invoice);
-  }
-
-  async function saveNc() {
-    if (busy.current || saving) return;
-    if (!compId) {
-      onMessage("Select Complimentary A/C", () => compRef.current?.focus());
-      return;
-    }
-    setSaving(true);
-    const inv = await saveBill();
-    setSaving(false);
-    if (inv?.id) onPrinted(inv);
+  function closeApproval() {
+    setAsk(null);
+    setPinOpen(false);
+    setMasterPin("");
+    setApprovalError("");
   }
 
   function settleAfterSave(invoice: any) {
@@ -811,11 +955,19 @@ export function PrepareBillDialog({
                         ref={compRef}
                         className="win green"
                         data-cycle="ud"
+                        aria-invalid={compRequired && !compId ? true : undefined}
                         value={compId}
-                        onChange={(e) => setCompId(e.target.value)}
+                        onChange={(e) => {
+                          setCompId(e.target.value);
+                          setCompRequired(false);
+                        }}
                         onKeyDown={(e) => {
                           if (e.key !== "Enter") return;
                           e.preventDefault();
+                          if (!compId) {
+                            setCompRequired(true);
+                            return;
+                          }
                           remarkRef.current?.focus();
                         }}
                       >
@@ -1040,12 +1192,14 @@ export function PrepareBillDialog({
                   <input
                     ref={addNameRef}
                     className="line"
+                    aria-invalid={invalidAddField === "item" && !pending ? true : undefined}
                     autoComplete="off"
                     spellCheck={false}
                     data-list={addOpen ? "open" : undefined}
                     value={addQuery}
                     onChange={(e) => {
                       const v = e.target.value;
+                      setInvalidAddField(null);
                       setPending(null);
                       setAddQuery(v);
                       setAddPick(0);
@@ -1055,7 +1209,7 @@ export function PrepareBillDialog({
                       if (pending && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
                         e.preventDefault();
                         setPending(null);
-                        setAddQuery(e.key);
+                        setAddQuery(e.key.toUpperCase());
                         setAddPick(0);
                         setAddOpen(true);
                         return;
@@ -1080,6 +1234,7 @@ export function PrepareBillDialog({
                         const chosen = addMatches[addPick] ?? addMatches[0];
                         if (chosen) chooseAdd(chosen);
                         else if (pending) addQtyRef.current?.focus();
+                        else if (addQuery.trim()) setInvalidAddField("item");
                       }
                     }}
                   />
@@ -1089,8 +1244,12 @@ export function PrepareBillDialog({
                     ref={addQtyRef}
                     className="line"
                     data-num="int"
+                    aria-invalid={invalidAddField === "qty" ? true : undefined}
                     value={addQty}
-                    onChange={(e) => setAddQty(e.target.value.replace(/\D/g, ""))}
+                    onChange={(e) => {
+                      setInvalidAddField(null);
+                      setAddQty(e.target.value.replace(/\D/g, ""));
+                    }}
                     onKeyDown={(e) => {
                       if (e.key !== "Enter") return;
                       e.preventDefault();
@@ -1144,10 +1303,13 @@ export function PrepareBillDialog({
                     <tr><td className="lbl">Point Redeem :</td><td><input className="win" data-num="dec" defaultValue="0.00" /></td></tr>
                     <tr><td className="lbl">Verify By :</td><td><input className="win" /></td></tr>
                     <tr><td className="lbl">Offer By :</td><td><input className="win" /></td></tr>
-                    <tr><td className="lbl">Remark :</td><td><input ref={remarkRef} className="win" value={remark} onChange={(e) => setRemark(e.target.value)} onKeyDown={(e) => {
+                    <tr><td className="lbl">Remark :</td><td><input ref={remarkRef} className="win" aria-invalid={remarkRequired || undefined} value={remark} onChange={(e) => {
+                      setRemark(e.target.value);
+                      if (e.target.value.trim()) setRemarkRequired(false);
+                    }} onKeyDown={(e) => {
                       if (e.key !== "Enter") return;
                       e.preventDefault();
-                      printRef.current?.focus();
+                      if (validateBillFields()) printRef.current?.focus();
                     }} /></td></tr>
                   </tbody>
                 </table>
@@ -1155,6 +1317,9 @@ export function PrepareBillDialog({
               <td>
                 <table className="bill-side">
                   <tbody>
+                    {isComplimentary && (
+                      <tr><td className="lbl">Table Estimate :</td><td><input className="win" readOnly value={rupee(shown.estimate ?? 0)} /></td></tr>
+                    )}
                     <tr><td className="lbl">Total Amount :</td><td><input className="win" readOnly value={rupee(shown.subtotal)} /></td></tr>
                     <tr>
                       <td className="lbl">Discount (%) :</td>
@@ -1167,10 +1332,11 @@ export function PrepareBillDialog({
                             value={isComplimentary ? "0.00" : (discMode.current === "amt" ? (shown.discountable ? ((shown.discount / shown.discountable) * 100).toFixed(2) : "0.00") : discPct)}
                             readOnly={isComplimentary}
                             onChange={(e) => { const v = numText(e.target.value); discMode.current = "pct"; wantPct.current = Number(v) || 0; setDiscPct(v); }}
-                            onBlur={(e) => { discMode.current = "pct"; wantPct.current = Number(e.target.value) || 0; void load({ mode: "pct", discountPct: wantPct.current }); }}
+                            onBlur={() => { if (discMode.current === "pct" && !isComplimentary) void load(); }}
                             onKeyDown={(e) => {
                               if (e.key === "Enter") {
                                 e.preventDefault();
+                                if (e.repeat || !validateBillFields()) return;
                                 discMode.current = "pct";
                                 wantPct.current = Number((e.target as HTMLInputElement).value) || 0;
                                 void load({ mode: "pct", discountPct: wantPct.current }).then(() => printRef.current?.focus());
@@ -1184,10 +1350,11 @@ export function PrepareBillDialog({
                             value={isComplimentary ? "0.00" : (discMode.current === "amt" ? discAmt : rupee(shown.discount))}
                             readOnly={isComplimentary}
                             onChange={(e) => { const v = numText(e.target.value); discMode.current = "amt"; wantAmt.current = Number(v) || 0; setDiscAmt(v); }}
-                            onBlur={(e) => { discMode.current = "amt"; wantAmt.current = Number(e.target.value) || 0; void load({ mode: "amt", discountAmt: wantAmt.current }); }}
+                            onBlur={() => { if (discMode.current === "amt" && !isComplimentary) void load(); }}
                             onKeyDown={(e) => {
                               if (e.key === "Enter") {
                                 e.preventDefault();
+                                if (e.repeat || !validateBillFields()) return;
                                 discMode.current = "amt";
                                 wantAmt.current = Number((e.target as HTMLInputElement).value) || 0;
                                 void load({ mode: "amt", discountAmt: wantAmt.current }).then(() => printRef.current?.focus());
@@ -1220,6 +1387,7 @@ export function PrepareBillDialog({
                             onKeyDown={(e) => {
                               if (e.key !== "Enter") return;
                               e.preventDefault();
+                              if (e.repeat || !validateBillFields()) return;
                               const serviceChargePct = svcPctValue((e.target as HTMLInputElement).value);
                               svcPctDraft.current = String(serviceChargePct);
                               setSvcPct(String(serviceChargePct));
@@ -1242,15 +1410,18 @@ export function PrepareBillDialog({
           </tbody>
         </table>
 
-        <div className="bill-btns" style={ask || saving ? { pointerEvents: "none" } : undefined}>
-          <button ref={printRef} type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => { if (!ask && !saving) void printBill(true); }} onKeyDown={(e) => {
-            if (e.key === "Enter") { e.preventDefault(); if (!ask && !saving) void printBill(true); }
-          }}>Print Bill (F10)</button>
-          <button type="button" className="fn" disabled={Boolean(ask) || saving} onClick={() => {
-            if (updateOnly) void updateBill();
-            else if (isComplimentary) void saveNc();
-            else setAsk("save");
-          }}>{updateOnly ? "Update (F5)" : "Save (F5)"}</button>
+        <div className="bill-btns" style={ask || saving || printChoice ? { pointerEvents: "none" } : undefined}>
+          <button ref={printRef} type="button" className="fn" disabled={!ready || Boolean(ask || printChoice) || saving} onKeyDown={(e) => {
+            if (e.key !== "Enter") {
+              ignoreRepeatedPrintKey(e);
+              return;
+            }
+            e.preventDefault();
+            if (printedWithEnter.current) return;
+            printedWithEnter.current = true;
+            requestAction("print");
+          }} onClick={() => requestAction("print")}>Print Bill (F10)</button>
+          <button type="button" className="fn" disabled={!ready || Boolean(ask || printChoice) || saving} onClick={() => requestAction("save")}>Save (F5)</button>
           <button type="button" className="fn" onClick={() => void load()}>Print Estimate</button>
           <button type="button" className="fn">Share Bill</button>
           <button type="button" className="fn" onClick={onClose}>Exit</button>
@@ -1272,25 +1443,76 @@ export function PrepareBillDialog({
           }}
         />
       )}
-      {ask === "save" && (
+      {printChoice && !saving && (
         <ConfirmAsk
-          message="Do you want to save?"
+          message="Do you want to print bill?"
+          defaultFocus="no"
+          ignoreEnterMs={250}
           onYes={() => {
-            window.setTimeout(() => {
-              setAsk(null);
-              setSaving(true);
-              void (async () => {
-                const inv = await saveBill();
-                if (!inv?.id) {
-                  setSaving(false);
-                  return;
-                }
-                settleAfterSave(inv);
-              })();
-            }, 100);
+            if (savingRef.current) return;
+            savingRef.current = true;
+            setSaving(true);
+            void printAndClose(printChoice).finally(() => {
+              savingRef.current = false;
+              setPrintChoice(null);
+              setSaving(false);
+            });
           }}
-          onNo={() => window.setTimeout(() => setAsk(null), 100)}
+          onNo={() => {
+            if (savingRef.current) return;
+            savingRef.current = true;
+            setSaving(true);
+            settleAfterSave(printChoice);
+          }}
         />
+      )}
+      {ask && !pinOpen && !saving && (
+        <ConfirmAsk
+          message={needsApproval() ? "Do you want to update bill?" : "Do you want to save?"}
+          allowHeldEnter={ask === "print" && printedWithEnter.current}
+          onYes={() => {
+            if (!validateBillFields()) return;
+            if (needsApproval()) setPinOpen(true);
+            else void finishAction(ask);
+          }}
+          onNo={closeApproval}
+        />
+      )}
+      {ask && pinOpen && createPortal(
+        <div className="confirm-overlay">
+          <form className="dialog confirm-dlg" role="dialog" aria-modal="true" aria-label="Master PIN"
+            onKeyDown={(e) => {
+              if (e.key === "Escape" && !saving) {
+                e.preventDefault();
+                e.stopPropagation();
+                closeApproval();
+              }
+            }}
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!saving && masterPin) void finishAction(ask, masterPin);
+            }}>
+            <div className="dialog-cap"><span className="cap-dot" />Master PIN</div>
+            <div className="dialog-body">
+              <label>Enter master PIN <input className="win" type="password" inputMode="numeric" required
+                aria-invalid={Boolean(approvalError) || undefined}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter" || masterPin) return;
+                  e.preventDefault();
+                  setApprovalError("Enter master PIN");
+                }}
+                ref={masterPinRef} autoFocus autoComplete="off" value={masterPin} onChange={(e) => {
+                  setMasterPin(e.target.value);
+                  setApprovalError("");
+                }} /></label>
+              {approvalError && <p role="alert">{approvalError}</p>}
+              <div className="bill-btns">
+                <button className="fn" type="submit" disabled={saving || !masterPin}>OK</button>
+                <button className="fn" type="button" disabled={saving} onClick={closeApproval}>Cancel</button>
+              </div>
+            </div>
+          </form>
+        </div>, document.body
       )}
     </div>
   );
@@ -1595,8 +1817,8 @@ export function SettleDialog({
           }
           payPaise = Math.min(usable, paise);
           if (payPaise !== paise) setAmount(rupee(payPaise));
-        } catch {
-          showWarn("Card not found", "card");
+        } catch (e) {
+          showWarn(e instanceof Error ? e.message : "Card not found", "card");
           busy.current = false;
           return;
         }
@@ -1801,11 +2023,8 @@ export function SettleDialog({
         </table>
         <div className="st-foot">
           <span className="st-vno">Voucher No : {inv?.invoice_number ?? ""}</span>
-          <button type="button" className="fn" tabIndex={-1} onClick={() => {
-            void api.post(`/api/invoices/${invoiceId}/print`).then(async (r) => {
-              const { handleBillPrintResponse } = await import("./printBillHtml");
-              await handleBillPrintResponse(r);
-            }).catch(() => null);
+          <button type="button" className="fn" tabIndex={-1} onKeyDown={ignoreRepeatedPrintKey} onClick={() => {
+            void printBill(invoiceId).catch(() => null);
           }}>Print</button>
           <button ref={saveBtnRef} type="button" className="fn" tabIndex={4} onClick={() => void save()}>Save (F2)</button>
           <button type="button" className="fn" tabIndex={-1} onClick={onClose}>Cancel (F4)</button>
@@ -1960,6 +2179,7 @@ export function AlertBox({ message, onClose }: { message: string; onClose: () =>
       if (e.key !== "Enter" && e.key !== "Escape") return;
       e.preventDefault();
       e.stopPropagation();
+      if (e.key === "Enter" && e.repeat) return;
       close.current();
     }
     window.addEventListener("keydown", keys, true);
@@ -1988,6 +2208,7 @@ export function ConfirmAsk({
   onNo,
   defaultFocus = "yes",
   ignoreEnterMs = 0,
+  allowHeldEnter = false,
 }: {
   message?: string;
   onYes: () => void;
@@ -1995,6 +2216,7 @@ export function ConfirmAsk({
   defaultFocus?: "yes" | "no";
   /** Ignore Enter/Y for this many ms after open (stops Save? Enter from answering Print?). */
   ignoreEnterMs?: number;
+  allowHeldEnter?: boolean;
 }) {
   const yesRef = useRef<HTMLButtonElement>(null);
   const noRef = useRef<HTMLButtonElement>(null);
@@ -2017,6 +2239,7 @@ export function ConfirmAsk({
       if (e.key === "Enter" || e.key === "y" || e.key === "Y") {
         e.preventDefault();
         e.stopPropagation();
+        if (e.repeat && !(allowHeldEnter && e.key === "Enter" && document.activeElement === yesRef.current)) return;
         if (Date.now() - openedAt.current < ignoreEnterMs) return;
         // Enter activates focused button (No when print ask defaults to No)
         if (document.activeElement === noRef.current) no.current();
@@ -2025,7 +2248,7 @@ export function ConfirmAsk({
     }
     window.addEventListener("keydown", keys, true);
     return () => window.removeEventListener("keydown", keys, true);
-  }, [defaultFocus, ignoreEnterMs]);
+  }, [defaultFocus, ignoreEnterMs, allowHeldEnter]);
 
   function pick(which: "yes" | "no", e: ReactMouseEvent) {
     e.preventDefault();

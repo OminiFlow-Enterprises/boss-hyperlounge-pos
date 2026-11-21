@@ -45,41 +45,6 @@ button { cursor: default; }
   background: var(--face);
 }
 
-.caption {
-  height: 36px;
-  display: flex;
-  align-items: center;
-  background: #fff;
-  border-bottom: 1px solid #d4d4d4;
-  user-select: none;
-  padding-left: 8px;
-}
-.caption-icon {
-  width: 16px;
-  height: 16px;
-  margin-right: 6px;
-  background: #2b579a;
-}
-.caption-title {
-  flex: 1;
-  font-family: "Segoe UI", WinPOS, Tahoma, sans-serif;
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 0;
-  white-space: nowrap;
-  overflow: hidden;
-}
-.caption-btns { display: flex; height: 100%; }
-.caption-btns button {
-  width: 45px;
-  height: 100%;
-  border: 0;
-  background: transparent;
-  font-size: 13px;
-}
-.caption-btns button:hover { background: #e5e5e5; }
-.caption-btns .cap-close:hover { background: #e81123; color: #fff; }
-
 .menubar {
   display: flex;
   background: var(--face);
@@ -206,6 +171,12 @@ input.win, select.win {
   outline: none;
 }
 input.win.green, select.win.green { background: var(--green-box); }
+.bill-dlg [aria-invalid="true"],
+.confirm-dlg .win[aria-invalid="true"],
+.igrid-row .cell-qty input[aria-invalid="true"] {
+  outline: 2px solid #b42318;
+  background: #fff1ef;
+}
 input.win:focus,
 select.win:focus,
 textarea:focus,
@@ -392,11 +363,13 @@ label.chk input { width: 13px; height: 13px; margin: 0; }
   height: 22px;
   line-height: 18px;
   padding: 0 8px;
+  cursor: pointer;
   white-space: nowrap;
   background: #fff;
   color: #000;
 }
-.item-drop > div.on {
+.item-drop > div.on,
+.item-drop > div:hover {
   background: #0078d7;
   color: #fff;
 }
@@ -427,6 +400,7 @@ label.chk input { width: 13px; height: 13px; margin: 0; }
 }
 .fn-table td { padding: 0; vertical-align: middle; width: 1%; }
 .fn-table td.exit-cell { vertical-align: bottom; }
+.dashboard-estimate { color: var(--red); font-weight: 700; white-space: nowrap; margin-bottom: 3px; }
 .club-card-bal {
   display: flex;
   justify-content: flex-end;
@@ -766,6 +740,8 @@ table.data tbody tr:hover td.cell-on { background: #0078d7; color: #fff; }
 }
 .transfer-heading h1 { margin: 0; font-size: 20px; }
 .transfer-filters { padding: 8px 16px; }
+.kot-cancellation-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.kot-cancellation-controls label { display: flex; align-items: center; gap: 6px; }
 .transfer-filters .flt-dates { flex-wrap: wrap; gap: 8px 12px; }
 .transfer-grid {
   flex: 1; min-height: 0; overflow: auto; margin: 12px 16px 16px;
@@ -1064,7 +1040,6 @@ table.data tbody tr:hover td.cell-on { background: #0078d7; color: #fff; }
   .gst-manual-plus,
   .gst-manual-del,
   .gst-manual-reset { display: none !important; }
-  body:has(.gst-summery-slip) .caption,
   body:has(.gst-summery-slip) .menubar,
   body:has(.gst-summery-slip) .gst-filter,
   body:has(.gst-summery-slip) .cr-toolbar,
@@ -1144,9 +1119,12 @@ table.data tbody tr:hover td.cell-on { background: #0078d7; color: #fff; }
 .set-check { min-width: 0 !important; }
 .set-btns { display: flex; flex-direction: column; gap: 3px; padding-top: 18px; }
 .set-btns .fn { min-width: 72px; }
+.report-load-status { padding: 4px 8px; background: var(--face); }
+.report-load-status[role="alert"] { color: #a00000; }
 .set-grid-wrap { flex: 1; overflow: auto; background: #9a9a9a; }
 .set-table { width: 100%; background: transparent; font-size: 14px; font-weight: 700; white-space: nowrap; }
 .set-table th { font-weight: 700; }
+.set-table .set-sort { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .set-table th, .set-table td { background: #fff; }
 .set-table tbody tr:hover td { background: #cce6ff; color: #000; }
 .set-table tr.on td,

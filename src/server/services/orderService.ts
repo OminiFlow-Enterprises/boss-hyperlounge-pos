@@ -7,6 +7,7 @@ import { printerForStation } from "../hardware/index.js";
 import { deductStock, restoreStock } from "./inventoryService.js";
 import { displayTaxRate } from "./itemService.js";
 import { resolvePrice } from "./pricingService.js";
+import { assertOrderCardUsable, assertUsable, getCard } from "./cardService.js";
 import { syncClubCardCharge } from "./billingService.js";
 import { attachTableCard, getTable } from "./tableService.js";
 import { printedTableNo } from "./tableLabel.js";
@@ -35,7 +36,10 @@ export function createOrder(ctx: AppContext, tableId: string) {
   const table = getTable(ctx, tableId);
   if (!table.current_session_id) throw new AppError("Open the table before creating an order");
   const existing = getOpenOrderForSession(ctx, table.current_session_id);
-  if (existing) return existing;
+  if (existing) {
+    assertOrderCardUsable(ctx, existing.id);
+    return existing;
+  }
 
   const session = ctx.db
     .prepare("SELECT * FROM table_sessions WHERE id = ?")
@@ -45,6 +49,7 @@ export function createOrder(ctx: AppContext, tableId: string) {
     waiter_id: string | null;
   };
 
+  if (session.card_id) assertUsable(getCard(ctx, session.card_id));
   const id = uuid();
   const orderNumber = nextNumber(ctx.db, "order", "ORD-");
   ctx.db
@@ -132,6 +137,7 @@ const PUNCH_OUTLETS = new Set(["BAR", "RESTAURANT", "NC", "THE BOSS CLUB"]);
 export function addItem(
   ctx: AppContext,
   input: { orderId: string; productId: string; qty: number; notes?: string; at?: Date; outlet?: string },
+  billEdit?: { id: string; allowPaid: boolean },
 ) {
   assertPermission(ctx.actor.role, "CREATE_ORDER");
   if (!Number.isInteger(input.qty) || input.qty === 0) throw new AppError("Quantity must be a non-zero integer");
@@ -144,10 +150,11 @@ export function addItem(
         WHERE o.id = ?`,
     )
     .get(input.orderId) as { id: string; card_id: string | null; status: string; outlet: string } | undefined;
-  if (!order || order.status === "PAID" || order.status === "CANCELLED") {
+  if (!order || (order.status === "PAID" && !billEdit?.allowPaid) || order.status === "CANCELLED") {
     throw new AppError("Order cannot accept items");
   }
 
+  assertOrderCardUsable(ctx, input.orderId);
   let cardTypeId: string | null = null;
   if (order.card_id) {
     const card = ctx.db.prepare("SELECT card_type_id FROM member_cards WHERE id = ?").get(order.card_id) as
@@ -193,7 +200,7 @@ export function addItem(
     }
   }
 
-  const id = uuid();
+  const id = billEdit?.id ?? uuid();
   ctx.db
     .prepare(
       `INSERT INTO order_items
@@ -239,6 +246,7 @@ export function cancelItem(ctx: AppContext, itemId: string, reason: string) {
         waiterId: kot.waiter_id,
         station: kot.station,
         type: "CANCEL",
+        notes: reason,
         items: [{ orderItemId: item.id, productId: "", name: item.name, qty: item.qty, notes: reason }],
       });
       restoreStock(ctx, (ctx.db.prepare("SELECT product_id FROM order_items WHERE id = ?").get(itemId) as { product_id: string }).product_id, item.qty, `VOID:${item.id}`);
@@ -247,6 +255,20 @@ export function cancelItem(ctx: AppContext, itemId: string, reason: string) {
     syncClubCardCharge(ctx, item.order_id);
     return item;
   })();
+}
+
+function auditKotCancellation(ctx: AppContext, kotId: string, tableId: string, action: string, reason: string | null, before: unknown) {
+  const table = ctx.db.prepare("SELECT code, name FROM dining_tables WHERE id = ?").get(tableId) as
+    | { code: string; name: string }
+    | undefined;
+  const staff = ctx.db.prepare("SELECT username FROM staff WHERE id = ?").get(ctx.actor.staffId) as
+    | { username: string }
+    | undefined;
+  audit(ctx, action, "kot", kotId, reason, before, {
+    tableNo: table?.code,
+    tableName: table?.name,
+    username: staff?.username ?? ctx.actor.staffName,
+  });
 }
 
 function createKot(
@@ -296,6 +318,9 @@ function createKot(
       if (item.productId) deductStock(ctx, item.productId, item.qty, kotNumber);
     }
   }
+  if (input.type === "CANCEL") {
+    auditKotCancellation(ctx, id, input.tableId, "KOT_CANCEL_SLIP", input.notes ?? null, null);
+  }
   return ctx.db.prepare("SELECT * FROM kots WHERE id = ?").get(id) as {
     id: string;
     kot_number: string;
@@ -322,6 +347,7 @@ export async function sendKot(
       }
     | undefined;
   if (!order) throw new AppError("Order not found", 404);
+  assertOrderCardUsable(ctx, order.id);
   const punchedCard = String(options.cardNumber ?? "").trim();
   if (punchedCard) attachTableCard(ctx, order.table_id, punchedCard);
   const openOrder = order;
@@ -402,6 +428,7 @@ export async function sendKot(
       kotNumber: kot.kot_number,
       tableCode: printedTableNo(ctx, { tableId: openOrder.table_id, orderId: openOrder.id }),
       waiter: steward,
+      operatorName: ctx.actor.staffName,
       station,
       reprint: false,
       orderBanner: banner,
@@ -567,6 +594,7 @@ export function modifyItemQty(ctx: AppContext, itemId: string, newQty: number) {
       }
     | undefined;
   if (!item || item.voided) throw new AppError("Item not found");
+  assertOrderCardUsable(ctx, item.order_id);
   if (newQty === item.qty) return item;
   if (!item.kot_id) {
     ctx.db.prepare("UPDATE order_items SET qty = ? WHERE id = ?").run(newQty, item.id);
@@ -606,11 +634,12 @@ export function modifyItemQty(ctx: AppContext, itemId: string, newQty: number) {
 }
 
 /** Sets the billed quantity of a line without printing a KOT. Qty 0 removes the line. */
-export function setBillLineQty(ctx: AppContext, orderId: string, ids: string[], qty: number) {
+export function setBillLineQty(ctx: AppContext, orderId: string, ids: string[], qty: number, billEdit?: { allowPaid: boolean }) {
   assertPermission(ctx.actor.role, "CREATE_ORDER");
+  assertOrderCardUsable(ctx, orderId);
   if (!Number.isInteger(qty) || qty < 0) throw new AppError("Quantity must be a whole number");
   const order = ctx.db.prepare("SELECT status FROM orders WHERE id = ?").get(orderId) as { status: string } | undefined;
-  if (!order || order.status === "PAID" || order.status === "CANCELLED") throw new AppError("Bill cannot be changed");
+  if (!order || (order.status === "PAID" && !billEdit?.allowPaid) || order.status === "CANCELLED") throw new AppError("Bill cannot be changed");
   const items = ids
     .map((id) => ctx.db.prepare("SELECT * FROM order_items WHERE id = ? AND order_id = ? AND voided = 0").get(id, orderId) as
       | { id: string; product_id: string; qty: number; kot_id: string | null }
@@ -641,14 +670,15 @@ export function setBillLineQty(ctx: AppContext, orderId: string, ids: string[], 
     }
   }
   audit(ctx, "BILL_QTY", "order", orderId, null, sum, qty);
-  syncClubCardCharge(ctx, orderId);
+  if (!billEdit) syncClubCardCharge(ctx, orderId);
   return { qty };
   })();
 }
 
 /** Replaces the product on a bill line and keeps the quantity. Does not print a KOT. */
-export function setBillLineProduct(ctx: AppContext, orderId: string, ids: string[], productId: string, outlet?: string) {
+export function setBillLineProduct(ctx: AppContext, orderId: string, ids: string[], productId: string, outlet?: string, billEdit?: { allowPaid: boolean }) {
   assertPermission(ctx.actor.role, "CREATE_ORDER");
+  assertOrderCardUsable(ctx, orderId);
   const order = ctx.db
     .prepare(
       `SELECT o.id, o.card_id, o.status, COALESCE(s.outlet, t.outlet, 'BAR') AS outlet
@@ -658,7 +688,7 @@ export function setBillLineProduct(ctx: AppContext, orderId: string, ids: string
         WHERE o.id = ?`,
     )
     .get(orderId) as { id: string; card_id: string | null; status: string; outlet: string } | undefined;
-  if (!order || order.status === "PAID" || order.status === "CANCELLED") throw new AppError("Bill cannot be changed");
+  if (!order || (order.status === "PAID" && !billEdit?.allowPaid) || order.status === "CANCELLED") throw new AppError("Bill cannot be changed");
   const items = ids
     .map((id) => ctx.db.prepare("SELECT * FROM order_items WHERE id = ? AND order_id = ? AND voided = 0").get(id, orderId) as
       | { id: string; product_id: string; qty: number; kot_id: string | null }
@@ -702,17 +732,18 @@ export function setBillLineProduct(ctx: AppContext, orderId: string, ids: string
     ctx.db.prepare("UPDATE order_items SET qty = 0, voided = 1, status = 'VOID' WHERE id = ?").run(extra.id);
   }
   audit(ctx, "BILL_ITEM", "order", orderId, null, items.map((item) => item.product_id), productId);
-  syncClubCardCharge(ctx, orderId);
+  if (!billEdit) syncClubCardCharge(ctx, orderId);
   return ctx.db.prepare("SELECT * FROM order_items WHERE id = ?").get(first.id);
   })();
 }
 
 /** Sets the billed price of a line, in paise, without printing a KOT. */
-export function setBillLinePrice(ctx: AppContext, orderId: string, ids: string[], unitPrice: number) {
+export function setBillLinePrice(ctx: AppContext, orderId: string, ids: string[], unitPrice: number, billEdit?: { allowPaid: boolean }) {
   assertPermission(ctx.actor.role, "CREATE_ORDER");
+  assertOrderCardUsable(ctx, orderId);
   if (!Number.isInteger(unitPrice) || unitPrice < 0) throw new AppError("Enter a price");
   const order = ctx.db.prepare("SELECT status FROM orders WHERE id = ?").get(orderId) as { status: string } | undefined;
-  if (!order || order.status === "PAID" || order.status === "CANCELLED") throw new AppError("Bill cannot be changed");
+  if (!order || (order.status === "PAID" && !billEdit?.allowPaid) || order.status === "CANCELLED") throw new AppError("Bill cannot be changed");
   const items = ids
     .map((id) => ctx.db.prepare("SELECT id, unit_price FROM order_items WHERE id = ? AND order_id = ? AND voided = 0").get(id, orderId) as
       | { id: string; unit_price: number }
@@ -726,7 +757,7 @@ export function setBillLinePrice(ctx: AppContext, orderId: string, ids: string[]
       ctx.db.prepare("UPDATE order_items SET unit_price = ? WHERE id = ?").run(unitPrice, item.id);
     }
     audit(ctx, "BILL_PRICE", "order", orderId, null, before, unitPrice);
-    syncClubCardCharge(ctx, orderId);
+    if (!billEdit) syncClubCardCharge(ctx, orderId);
     return { unitPrice };
   })();
 }
@@ -762,6 +793,7 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
     kotNumber: kot.kot_number,
     tableCode: printedTableNo(ctx, { tableId: kot.table_id, orderId: kot.order_id }),
     waiter: waiter?.name,
+    operatorName: ctx.actor.staffName,
     station: kot.station,
     reprint: true,
     orderBanner: kot.type === "NEW" ? "NEW ORDER" : "RUNNING ORDER",
@@ -776,13 +808,17 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
   return { ok: print.ok, error: print.error, reprint: true };
 }
 
-export function advanceKot(ctx: AppContext, kotId: string, status: KotStatus) {
+export function advanceKot(ctx: AppContext, kotId: string, status: KotStatus, reason = "void") {
   const kot = ctx.db.prepare("SELECT * FROM kots WHERE id = ?").get(kotId) as
-    | { id: string; status: KotStatus; station: Station }
+    | { id: string; status: KotStatus; station: Station; table_id: string }
     | undefined;
   if (!kot) throw new AppError("KOT not found", 404);
   const permission = kot.station === "BAR" ? "KDS_BAR" : "KDS_KITCHEN";
   assertPermission(ctx.actor.role, permission);
+  if (status === "VOID") {
+    assertPermission(ctx.actor.role, "VOID_KOT");
+    if (kot.status === "VOID") return kot;
+  }
   const now = nowIso();
   const fields: Record<KotStatus, string | null> = {
     NEW: null,
@@ -800,8 +836,7 @@ export function advanceKot(ctx: AppContext, kotId: string, status: KotStatus) {
     ctx.db.prepare("UPDATE kots SET status = ? WHERE id = ?").run(status, kotId);
   }
   if (status === "VOID") {
-    assertPermission(ctx.actor.role, "VOID_KOT");
-    audit(ctx, "KOT_CANCEL", "kot", kotId, "void", kot.status, "VOID");
+    auditKotCancellation(ctx, kotId, kot.table_id, "KOT_CANCEL", reason, kot.status);
   }
   return ctx.db.prepare("SELECT * FROM kots WHERE id = ?").get(kotId);
 }
@@ -814,14 +849,17 @@ export function voidKot(ctx: AppContext, kotId: string, reason: string) {
     qty: number;
   }>;
   return ctx.db.transaction(() => {
+    const kot = ctx.db.prepare("SELECT * FROM kots WHERE id = ?").get(kotId) as
+      | { order_id: string; status: KotStatus }
+      | undefined;
+    if (!kot) throw new AppError("KOT not found", 404);
+    if (kot.status === "VOID") return advanceKot(ctx, kotId, "VOID", reason);
     for (const item of items) {
       ctx.db.prepare("UPDATE order_items SET voided = 1, status = 'VOID' WHERE id = ?").run(item.order_item_id);
       if (item.product_id) restoreStock(ctx, item.product_id, item.qty, `KOTVOID:${kotId}`);
     }
-    const kot = ctx.db.prepare("SELECT order_id FROM kots WHERE id = ?").get(kotId) as { order_id: string } | undefined;
-    const result = advanceKot(ctx, kotId, "VOID");
-    audit(ctx, "KOT_CANCEL", "kot", kotId, reason, null, "VOID");
-    if (kot) syncClubCardCharge(ctx, kot.order_id);
+    const result = advanceKot(ctx, kotId, "VOID", reason);
+    syncClubCardCharge(ctx, kot.order_id);
     return result;
   })();
 }

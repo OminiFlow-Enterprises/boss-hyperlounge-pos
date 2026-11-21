@@ -1,9 +1,11 @@
 import net from "node:net";
-import { formatKotEscPos, formatReceiptEscPos, formatTestEscPos } from "./escpos.js";
+import { formatReceiptEscPos } from "./escpos.js";
+import { printHtmlToQueue } from "./htmlPrinter.js";
+import { formatKotHtml } from "./kotReceiptHtml.js";
 import type { IPrinter, KotPrintPayload, ReceiptPayload } from "./types.js";
 
 export type TcpPrinterTarget = {
-  /** Windows queue name, for logs only. */
+  /** Windows queue name used for KOTs. */
   name: string;
   host: string;
   port?: number;
@@ -59,11 +61,23 @@ export class TcpEscPosPrinter implements IPrinter {
   }
 
   async printKOT(payload: KotPrintPayload) {
-    return this.send(formatKotEscPos(payload));
+    return printHtmlToQueue(formatKotHtml(payload), this.name, "kot");
   }
 
   async testPrint() {
-    return this.send(formatTestEscPos(this.name, this.host));
+    const station = this.name === POS_PRINTERS.kitchen.name ? "KITCHEN"
+      : this.name === POS_PRINTERS.bill.name ? "BILL" : "BAR";
+    return this.printKOT({
+      kotNumber: "76018",
+      tableCode: "1 /",
+      waiter: "A",
+      station,
+      reprint: false,
+      orderBanner: "RUNNING ORDER",
+      createdAt: new Date().toISOString(),
+      operatorName: "TEST",
+      items: [{ qty: 1, name: "TEST ITEM" }],
+    });
   }
 }
 

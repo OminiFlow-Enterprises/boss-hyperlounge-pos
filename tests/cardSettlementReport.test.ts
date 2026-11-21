@@ -32,7 +32,7 @@ describe("card settlement report", () => {
       guestName: "Jai",
       cardNo: "1001",
       advance: rupeesToPaise(1500),
-      mop: "CASH",
+      mop: "BANK TRANSFER / HDFC",
     }) as { id: string; card: { id: string } };
     const table2 = getTableByCode(waiter, "02");
     openTable(waiter, { tableId: table2.id });
@@ -56,10 +56,14 @@ describe("card settlement report", () => {
     const older = filtered.rows[0];
     const newer = filtered.rows[1];
     expect(older.guest_name).toBe("Jai");
-    expect(older.card_balance).toBe(rupeesToPaise(2000));
-    expect(older.remaining_balance).toBe(rupeesToPaise(2000) - invoice.grand_total);
-    expect(newer.card_balance).toBe(rupeesToPaise(1500));
-    expect(newer.remaining_balance).toBe(rupeesToPaise(2000) - invoice.grand_total + rupeesToPaise(1500) - invoice2.grand_total);
+    expect(older.payment_mode).toBe("CASH");
+    expect(older.amount_paid).toBe(rupeesToPaise(2000));
+    expect(older.card_balance).toBe(rupeesToPaise(1900));
+    expect(older.remaining_balance).toBe(rupeesToPaise(1900) - invoice.grand_total);
+    expect(newer.payment_mode).toBe("BANK TRANSFER / HDFC");
+    expect(newer.amount_paid).toBe(rupeesToPaise(1500));
+    expect(newer.card_balance).toBe(rupeesToPaise(1400));
+    expect(newer.remaining_balance).toBe(rupeesToPaise(1900) - invoice.grand_total + rupeesToPaise(1400) - invoice2.grand_total);
 
     const firstBills = cardSettlementBills(cashier, String(older.booking_id));
     expect(firstBills.rows).toEqual([
@@ -94,7 +98,7 @@ describe("card settlement report", () => {
     const old = cardSettlementReport(cashier, "2024-05-02", "2024-05-02", "2214");
     expect(old.rows).toHaveLength(1);
     expect(old.rows[0].guest_name).toBe("Old Guest");
-    expect(old.rows[0].card_balance).toBe(rupeesToPaise(300));
+    expect(old.rows[0].card_balance).toBe(rupeesToPaise(200));
     expect(cardSettlementBills(cashier, saved.id).rows).toEqual([]);
 
     const today = new Date().toISOString().slice(0, 10);

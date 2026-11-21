@@ -13,14 +13,15 @@ import { buildBillTotalLines } from "./billTotals.js";
  * Font A, 48 cols ≈ 72–76mm printable. Do NOT set GS L / GS W — those stick
  * on the printer and can clip Qty on later IBS Windows-driver prints.
  */
-export const KOT_COLS = 48;
+export const KOT_SIDE_COLS = 3;
+export const KOT_COLS = 48 - 2 * KOT_SIDE_COLS;
 export const BILL_COLS = 48;
 
 const ESC = 0x1b;
 const GS = 0x1d;
 
 const COLON_AT = 10;
-const QTY_W = 3;
+const KOT_LEFT_PAD = " ".repeat(KOT_SIDE_COLS);
 
 function enc(text: string): Buffer {
   return Buffer.from(text, "ascii");
@@ -28,6 +29,14 @@ function enc(text: string): Buffer {
 
 function line(text = ""): Buffer {
   return enc(`${text}\n`);
+}
+
+function kotLine(text: string): Buffer {
+  return line(KOT_LEFT_PAD + text);
+}
+
+export function kotQtyWidth(items: KotPrintPayload["items"]): number {
+  return items.reduce((width, item) => Math.max(width, String(item.qty).length), 5);
 }
 
 function field(label: string, value: string): string {
@@ -55,19 +64,18 @@ function wrapName(name: string, width: number): string[] {
   return lines.length ? lines : [""];
 }
 
-function itemRow(name: string, qty: string): string[] {
-  const nameWidth = KOT_COLS - QTY_W - 1;
+function itemRow(name: string, qty: string, qtyWidth: number): string[] {
+  const nameWidth = KOT_COLS - qtyWidth - 1;
   const names = wrapName(name, nameWidth);
-  const qtyCell = qty.slice(0, QTY_W).padStart(QTY_W, " ");
   return names.map((n, i) => {
     const left = n.padEnd(nameWidth, " ").slice(0, nameWidth);
-    return i === 0 ? `${left}|${qtyCell}` : `${left}|${" ".repeat(QTY_W)}`;
+    return `${left}|${(i === 0 ? qty : "").padStart(qtyWidth, " ")}`;
   });
 }
 
-function headerRow(): string {
-  const nameWidth = KOT_COLS - QTY_W - 1;
-  return `${"Item Name".padEnd(nameWidth, " ").slice(0, nameWidth)}|${"Qty".padStart(QTY_W, " ")}`;
+function headerRow(qtyWidth: number): string {
+  const nameWidth = KOT_COLS - qtyWidth - 1;
+  return `${"Item Name".padEnd(nameWidth, " ")}|${"Qty".padStart(qtyWidth, " ")}`;
 }
 
 export function escInit(): Buffer {
@@ -164,8 +172,9 @@ const FONT_5X7: Record<string, number[]> = {
 
 const RASTER_CHAR_W = 12; // match Font A cell
 const RASTER_CHAR_H = 24;
-const RASTER_WIDTH_DOTS = KOT_COLS * RASTER_CHAR_W; // 576
-const RASTER_WIDTH_BYTES = RASTER_WIDTH_DOTS / 8; // 72
+const RASTER_LEFT_DOTS = KOT_SIDE_COLS * RASTER_CHAR_W;
+const RASTER_WIDTH_DOTS = RASTER_LEFT_DOTS + KOT_COLS * RASTER_CHAR_W;
+const RASTER_WIDTH_BYTES = Math.ceil(RASTER_WIDTH_DOTS / 8);
 
 function setRasterDot(bitmap: Buffer, x: number, y: number): void {
   if (x < 0 || x >= RASTER_WIDTH_DOTS || y < 0 || y >= RASTER_CHAR_H) return;
@@ -194,10 +203,12 @@ function drawRasterChar(bitmap: Buffer, ch: string, ox: number): void {
 function rasterStruckRow(text: string): Buffer {
   const row = text.padEnd(KOT_COLS, " ").slice(0, KOT_COLS);
   const bitmap = Buffer.alloc(RASTER_WIDTH_BYTES * RASTER_CHAR_H, 0);
-  for (let i = 0; i < KOT_COLS; i++) drawRasterChar(bitmap, row[i]!, i * RASTER_CHAR_W);
+  for (let i = 0; i < KOT_COLS; i++) {
+    drawRasterChar(bitmap, row[i]!, RASTER_LEFT_DOTS + i * RASTER_CHAR_W);
+  }
   // Solid straight strike through mid glyph (3 dots thick)
   for (let y = 10; y <= 12; y++) {
-    for (let x = 0; x < RASTER_WIDTH_DOTS; x++) setRasterDot(bitmap, x, y);
+    for (let x = RASTER_LEFT_DOTS; x < RASTER_WIDTH_DOTS; x++) setRasterDot(bitmap, x, y);
   }
   const header = Buffer.from([
     GS,
@@ -236,7 +247,7 @@ function sizeNormal(): Buffer {
 
 /** Solid rule across the content width (native 18:33). */
 function solidRule(): Buffer[] {
-  return [underline(2), line(" ".repeat(KOT_COLS)), underline(0)];
+  return [align(1), underline(2), line(" ".repeat(KOT_COLS)), underline(0), align(0)];
 }
 
 function dashedRule(cols = BILL_COLS): Buffer {
@@ -285,8 +296,14 @@ function formatKotDate(iso: string): string {
   return `${day} ${mon} ${year}  ${hh}:${mm}:${ss}`;
 }
 
+export function stewardInitial(name?: string): string {
+  const initial = Array.from(name?.trim() ?? "")[0];
+  return initial?.toUpperCase() ?? "";
+}
+
 export function formatKotEscPos(payload: KotPrintPayload): Buffer {
   const chunks: Buffer[] = [escInit()];
+  const qtyWidth = kotQtyWidth(payload.items);
   const kotNo = String(payload.kotNumber).replace(/\D/g, "") || payload.kotNumber;
   const station = payload.station === "BAR" ? "BAR" : "KITCHEN";
 
@@ -306,10 +323,10 @@ export function formatKotEscPos(payload: KotPrintPayload): Buffer {
 
   // Meta block — denser leading like native (no blank between header and fields)
   chunks.push(dark(true));
-  chunks.push(line(field("KOT No.", kotNo)));
-  chunks.push(line(field("Table No.", payload.tableCode)));
-  chunks.push(line(field("Date", formatKotDate(payload.createdAt))));
-  chunks.push(line(field("Stward", payload.waiter?.trim() || "")));
+  chunks.push(kotLine(field("KOT No.", kotNo)));
+  chunks.push(kotLine(field("Table No.", payload.tableCode)));
+  chunks.push(kotLine(field("Date", formatKotDate(payload.createdAt))));
+  chunks.push(kotLine(field("Stward", stewardInitial(payload.waiter))));
   chunks.push(dark(false));
   chunks.push(line());
 
@@ -325,15 +342,15 @@ export function formatKotEscPos(payload: KotPrintPayload): Buffer {
 
   chunks.push(...solidRule());
   chunks.push(...heavy(true));
-  chunks.push(line(headerRow()));
+  chunks.push(kotLine(headerRow(qtyWidth)));
   chunks.push(...heavy(false));
   chunks.push(...solidRule());
 
   chunks.push(dark(true));
   for (const item of payload.items) {
-    const rows = itemRow(item.name, String(item.qty));
+    const rows = itemRow(item.name, String(item.qty), qtyWidth);
     if (item.qty < 0) chunks.push(...struckItemLines(rows));
-    else for (const row of rows) chunks.push(line(row));
+    else for (const row of rows) chunks.push(kotLine(row));
   }
   chunks.push(dark(false));
 
@@ -341,7 +358,7 @@ export function formatKotEscPos(payload: KotPrintPayload): Buffer {
   const remark = String(payload.remark ?? "").trim();
   if (remark) {
     chunks.push(dark(true));
-    for (const n of wrapName(remark, KOT_COLS)) chunks.push(line(n));
+    for (const n of wrapName(remark, KOT_COLS)) chunks.push(kotLine(n));
     chunks.push(dark(false));
   }
 
@@ -507,7 +524,7 @@ export function formatBillEscPos(payload: BillReceiptPayload): Buffer {
   chunks.push(line(`${metaLeft("Table No.", payload.tableNo)}Time ${time}`.slice(0, BILL_COLS)));
   chunks.push(
     line(
-      `${metaLeft("Waiter.", payload.waiter?.trim() || "")}Pax  :${payload.pax?.trim() ? ` ${payload.pax.trim()}` : ""}`.slice(
+      `${metaLeft("Waiter.", stewardInitial(payload.waiter))}Pax  :${payload.pax?.trim() ? ` ${payload.pax.trim()}` : ""}`.slice(
         0,
         BILL_COLS,
       ),
@@ -560,6 +577,11 @@ export function formatBillEscPos(payload: BillReceiptPayload): Buffer {
 
   for (const part of wrapName(amountInWords(payload.netTotal), BILL_COLS)) {
     chunks.push(line(part));
+  }
+  const remark = payload.remark?.trim();
+  if (remark) {
+    chunks.push(line());
+    for (const part of wrapName(`Remark: ${remark}`, BILL_COLS)) chunks.push(line(part));
   }
   chunks.push(line());
   chunks.push(align(1));

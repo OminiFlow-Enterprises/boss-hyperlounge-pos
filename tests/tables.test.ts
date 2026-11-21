@@ -92,7 +92,7 @@ describe("tables, KOT and billing", () => {
       cardNumber: "LOW-1",
       cardTypeCode: "REGULAR",
     });
-    rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(50), paymentMode: "CASH", applyBonus: false });
+    rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(150), paymentMode: "CASH", applyBonus: false });
     const table = getTableByCode(waiter, "06");
     openTable(waiter, { tableId: table.id });
     const order = createOrder(waiter, table.id) as { id: string };
@@ -113,7 +113,7 @@ describe("tables, KOT and billing", () => {
       cardNumber: "SHORT-1",
       cardTypeCode: "REGULAR",
     });
-    rechargeCard(cashier, { cardId: short.id, amount: rupeesToPaise(1000), paymentMode: "CASH", applyBonus: false });
+    rechargeCard(cashier, { cardId: short.id, amount: rupeesToPaise(1100), paymentMode: "CASH", applyBonus: false });
     const table = getTableByCode(waiter, "07");
     openTable(waiter, { tableId: table.id });
     const order = createOrder(waiter, table.id) as { id: string };
@@ -130,7 +130,7 @@ describe("tables, KOT and billing", () => {
       cardNumber: "RICH-1",
       cardTypeCode: "REGULAR",
     });
-    rechargeCard(cashier, { cardId: rich.id, amount: rupeesToPaise(4000), paymentMode: "CASH", applyBonus: false });
+    rechargeCard(cashier, { cardId: rich.id, amount: rupeesToPaise(4100), paymentMode: "CASH", applyBonus: false });
     const rest = settleInvoice(cashier, invoice.id, [{ method: "MEMBER_CARD", amount: rupeesToPaise(1000), memberCardId: rich.id }]);
     expect(rest.due).toBe(invoice.grand_total - rupeesToPaise(2000));
     expect(checkBalance(cashier, "RICH-1").balances.usable).toBe(rupeesToPaise(3000));
@@ -315,10 +315,10 @@ describe("tables, KOT and billing", () => {
     const clubOrder = createOrder(waiter, club.id) as { id: string };
     addItem(waiter, { orderId: clubOrder.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
     const clubNet = previewBill(cashier, clubOrder.id, { serviceChargePct: 0 }).grandTotal;
-    expect(checkBalance(cashier, "1001").balances.usable).toBe(rupeesToPaise(2000));
+    expect(checkBalance(cashier, "1001").balances.usable).toBe(rupeesToPaise(1900));
     await sendKot(waiter, clubOrder.id);
     const afterPunch = checkBalance(cashier, "1001").balances.usable;
-    expect(afterPunch).toBe(rupeesToPaise(2000) - clubNet);
+    expect(afterPunch).toBe(rupeesToPaise(1900) - clubNet);
 
     const rest = createTable(waiter, { code: "R1", outlet: "RESTAURANT" });
     openTable(waiter, { tableId: rest.id });
@@ -357,12 +357,12 @@ describe("tables, KOT and billing", () => {
     const line = addItem(waiter, { orderId: clubOrder.id, productId: seeded.products["FOOD-PZ"], qty: 2 }) as { id: string };
     await sendKot(waiter, clubOrder.id);
     const net2 = previewBill(cashier, clubOrder.id, { serviceChargePct: 0 }).grandTotal;
-    expect(checkBalance(cashier, "1002").balances.usable).toBe(rupeesToPaise(2000) - net2);
+    expect(checkBalance(cashier, "1002").balances.usable).toBe(rupeesToPaise(1900) - net2);
     setBillLineQty(cashier, clubOrder.id, [line.id], 1);
     const net1 = previewBill(cashier, clubOrder.id, { serviceChargePct: 0 }).grandTotal;
-    expect(checkBalance(cashier, "1002").balances.usable).toBe(rupeesToPaise(2000) - net1);
+    expect(checkBalance(cashier, "1002").balances.usable).toBe(rupeesToPaise(1900) - net1);
     setBillLineQty(cashier, clubOrder.id, [line.id], 0);
-    expect(checkBalance(cashier, "1002").balances.usable).toBe(rupeesToPaise(2000));
+    expect(checkBalance(cashier, "1002").balances.usable).toBe(rupeesToPaise(1900));
   });
 
   it("creates a new table from a typed code and reuses the same code", () => {

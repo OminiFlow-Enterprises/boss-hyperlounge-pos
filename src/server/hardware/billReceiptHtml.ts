@@ -1,4 +1,4 @@
-import { amountInWords } from "./escpos.js";
+import { amountInWords, stewardInitial } from "./escpos.js";
 import { buildBillTotalLines } from "./billTotals.js";
 import { BILL_VENUE_DEFAULTS, type BillReceiptPayload } from "./types.js";
 
@@ -243,6 +243,13 @@ html, body {
   line-height: 1.3;
   margin: 6px 0 0;
 }
+.bill-remark {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .sign {
   display: flex;
   justify-content: space-between;
@@ -275,6 +282,7 @@ export function renderBillReceiptHtml(payload: BillReceiptPayload): string {
   const venue = payload.venue ?? BILL_VENUE_DEFAULTS;
   const { date, time } = billDateParts(payload.createdAt);
   const outlet = outletLabel(payload.outlet);
+  const remark = payload.remark?.trim();
   const footer = (venue.footer || BILL_VENUE_DEFAULTS.footer || "~~** Thanks for coming--Visit Again**~").trim();
 
   const itemRows = payload.items
@@ -334,7 +342,7 @@ export function renderBillReceiptHtml(payload: BillReceiptPayload): string {
       <div class="meta-left">
         <div class="row"><span class="lbl">Bill No.</span><span class="colon">:</span><span class="val">${esc(payload.billNo)}</span></div>
         <div class="row"><span class="lbl">Table No.</span><span class="colon">:</span><span class="val">${esc(payload.tableNo)}</span></div>
-        <div class="row"><span class="lbl">Waiter.</span><span class="colon">:</span><span class="val">${esc(payload.waiter?.trim() || "")}</span></div>
+        <div class="row"><span class="lbl">Waiter.</span><span class="colon">:</span><span class="val">${esc(stewardInitial(payload.waiter))}</span></div>
         <div class="row"><span class="lbl">Name</span><span class="colon">:</span><span class="val">${esc(payload.guestName?.trim() || "")}</span></div>
         ${payload.guestGstin?.trim() ? `<div class="row"><span class="lbl">GSTIN</span><span class="colon">:</span><span class="val">${esc(payload.guestGstin.trim())}</span></div>` : ""}
       </div>
@@ -379,6 +387,7 @@ export function renderBillReceiptHtml(payload: BillReceiptPayload): string {
     </div>
 
     <div class="words">${esc(amountInWords(payload.netTotal))}</div>
+    ${remark ? `<div class="bill-remark"><strong>Remark:</strong> ${esc(remark)}</div>` : ""}
     <div class="thanks">${esc(footer)}</div>
     <div class="sign"><span>E.&.O.E</span><span>Guest Signature</span></div>
   </div>

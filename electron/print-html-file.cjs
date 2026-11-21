@@ -1,13 +1,13 @@
 /**
- * One-shot: electron electron/print-html-file.cjs <htmlPath> [printerName]
- * Silent-prints an HTML bill to the Windows queue (default: bill).
+ * One-shot: electron electron/print-html-file.cjs <htmlPath> [printerName] [bill|kot]
  */
 const { app, BrowserWindow } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const htmlPath = process.argv[2];
-const deviceName = process.argv[3] || "bill";
+const [htmlPath, queue, layout] = process.env.POS_PRINT_HTML === "1"
+  ? process.argv.slice(-3) : process.argv.slice(2);
+const deviceName = queue || "bill";
 
 if (!htmlPath || !fs.existsSync(htmlPath)) {
   console.error("Usage: electron electron/print-html-file.cjs <file.html> [printer]");
@@ -22,14 +22,25 @@ app.whenReady().then(async () => {
     webPreferences: { offscreen: true, contextIsolation: true, nodeIntegration: false },
   });
   await win.loadFile(path.resolve(htmlPath));
-  await new Promise((r) => setTimeout(r, 500));
+  await win.webContents.executeJavaScript("document.fonts.ready.then(() => true)");
+  const paper = layout === "kot"
+    ? {
+        pageSize: {
+          width: 80000,
+          height: Math.ceil(
+            (await win.webContents.executeJavaScript("document.body.getBoundingClientRect().height") + 1)
+              * 25400 / 96,
+          ),
+        },
+      }
+    : { preferCSSPageSize: true };
   win.webContents.print(
     {
       silent: true,
       printBackground: true,
       deviceName,
       margins: { marginType: "none" },
-      preferCSSPageSize: true,
+      ...paper,
       scaleFactor: 100,
       copies: 1,
     },
@@ -39,4 +50,7 @@ app.whenReady().then(async () => {
       app.exit(success ? 0 : 1);
     },
   );
+}).catch((error) => {
+  console.error(error);
+  app.exit(1);
 });

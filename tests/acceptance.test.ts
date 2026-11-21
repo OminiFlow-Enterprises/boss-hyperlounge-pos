@@ -35,7 +35,7 @@ describe("BOSS Hyperlounge acceptance workflow", () => {
       printReceipt: true,
       applyBonus: false,
     });
-    expect(recharge.card.paid_balance).toBe(rupeesToPaise(5000));
+    expect(recharge.card.paid_balance).toBe(rupeesToPaise(4900));
     expect(hardware.receipt.logs.some((l) => l.kind === "receipt")).toBe(true);
 
     const table = getTableByCode(waiter, "12");
@@ -87,7 +87,7 @@ describe("BOSS Hyperlounge acceptance workflow", () => {
     expect((paid.invoice as { status: string }).status).toBe("PAID");
 
     const remaining = balancesFromLedger(cashier, card.id);
-    expect(remaining.usable).toBe(rupeesToPaise(5000) - invoice.grand_total);
+    expect(remaining.usable).toBe(rupeesToPaise(4900) - invoice.grand_total);
     expect(getTableByCode(cashier, "12").status).toBe("AVAILABLE");
     expect(hardware.receipt.logs.filter((l) => l.kind === "receipt").length).toBeGreaterThanOrEqual(2);
 

@@ -1,11 +1,11 @@
 import { assertPermission } from "../../shared/permissions.js";
-import { formatINR } from "../../shared/money.js";
+import { billLineTaxes, formatINR } from "../../shared/money.js";
 import { AppError, InsufficientBalanceError } from "../lib/errors.js";
 import { audit, enqueueSync } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
 import { idempotencyKey, nextBillNumber, nextSequence, nowIso, peekNextBillNumber, uuid } from "../lib/ids.js";
-import type { PaymentLine, ServiceChargeMode } from "../../shared/types.js";
-import { purchaseOnCard, refundToCard, getCard, expireOvernightBalance, allocateSpend, writeLedger } from "./cardService.js";
+import type { BillDetails, PaymentLine, ServiceChargeMode } from "../../shared/types.js";
+import { assertOrderCardUsable, assertUsable, purchaseOnCard, refundToCard, getCard, expireOvernightBalance, allocateSpend, writeLedger } from "./cardService.js";
 import { closeTable, getTable, setTableStatus } from "./tableService.js";
 import { printedTableNo } from "./tableLabel.js";
 import { formatTableNo } from "../../shared/tableLabel.js";
@@ -59,6 +59,7 @@ export function previewBill(
     serviceChargePct?: number;
     serviceChargeMode?: ServiceChargeMode;
   } = {},
+  allowEmpty = false,
 ): BillPreview {
   const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId) as
     | { id: string; session_id: string; table_id: string }
@@ -84,7 +85,7 @@ export function previewBill(
     product_tax_rate: number | null;
     product_sales_group: string | null;
   }>;
-  if (!items.length) throw new AppError("Bill has no items");
+  if (!items.length && !allowEmpty) throw new AppError("Bill has no items");
 
   const mapped = groupSameItems(items.map((i) => {
     const tax_rate = displayTaxRate(ctx, {
@@ -126,24 +127,12 @@ export function previewBill(
     discountPct = Math.max(0, options.discountPct ?? 0);
     discount = Math.min(discountable, Math.round((discountable * discountPct) / 100));
   }
-  // Tax after discount (THE BOSS slip bases are post-discount)
-  const discable = mapped.filter((i) => !i.ids.some((id) => excluded.has(id)) && i.amount > 0);
-  let allocatedDisc = 0;
-  for (let i = 0; i < mapped.length; i++) {
-    const line = mapped[i];
-    const canDisc = !line.ids.some((id) => excluded.has(id)) && line.amount > 0;
-    let lineDisc = 0;
-    if (canDisc && discount > 0 && discountable > 0) {
-      const isLast = line === discable[discable.length - 1];
-      lineDisc = isLast
-        ? Math.max(0, discount - allocatedDisc)
-        : Math.round((discount * line.amount) / discountable);
-      if (lineDisc > line.amount) lineDisc = line.amount;
-      allocatedDisc += lineDisc;
-    }
-    const taxable = Math.max(0, line.amount - lineDisc);
-    line.tax = Math.round((taxable * line.tax_rate) / 100);
-  }
+  const taxes = billLineTaxes(mapped.map((line) => ({
+    amount: line.amount,
+    taxRate: line.tax_rate,
+    excluded: line.ids.some((id) => excluded.has(id)),
+  })), discount, discountable);
+  mapped.forEach((line, index) => { line.tax = taxes[index]; });
   const tax = mapped.reduce((s, i) => s + i.tax, 0);
   const otherCharges = options.otherCharges ?? 0;
   const afterDiscount = Math.max(0, subtotal - discount);
@@ -174,6 +163,36 @@ export function previewBill(
     items: mapped,
     invoiceNumber: openInvoiceNumber(ctx, orderId),
   };
+}
+
+export function previewRunningBill(ctx: AppContext, orderId: string) {
+  const invoice = ctx.db.prepare(
+    `SELECT discount, service_charge, service_charge_pct, service_charge_mode, other_charges,
+            bill_details, complimentary_account_id
+       FROM invoices WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')
+       ORDER BY created_at DESC LIMIT 1`,
+  ).get(orderId) as {
+    discount: number;
+    service_charge: number;
+    service_charge_pct: number;
+    service_charge_mode: ServiceChargeMode;
+    other_charges: number;
+    bill_details: string | null;
+    complimentary_account_id: string | null;
+  } | undefined;
+  if (!invoice) return previewBill(ctx, orderId, {}, true);
+  let details: Partial<BillDetails> = {};
+  try { details = JSON.parse(invoice.bill_details || "{}") ?? {}; } catch { /* Legacy invoice. */ }
+  const savedRate = invoice.service_charge_pct !== 0 || invoice.service_charge === 0;
+  const bill = previewBill(ctx, orderId, {
+    discount: invoice.discount,
+    excludeItemIds: details.excludeItemIds,
+    otherCharges: invoice.other_charges,
+    serviceChargePct: savedRate ? invoice.service_charge_pct : undefined,
+    serviceChargeMode: savedRate ? invoice.service_charge_mode : undefined,
+  }, true);
+  if (invoice.complimentary_account_id) zeroComplimentaryBill(bill);
+  return bill;
 }
 
 function groupSameItems<T extends { id: string; ids: string[]; product_id: string; name: string; unit_price: number; tax_rate: number; qty: number; amount: number; tax: number; sales_group?: string }>(
@@ -269,9 +288,11 @@ export function generateInvoice(
     complimentaryAccountId?: string;
     customerDisplayName?: string;
     customerGstin?: string;
+    billDetails?: BillDetails;
   } = {},
 ) {
   assertPermission(ctx.actor.role, "SETTLE_BILL");
+  assertOrderCardUsable(ctx, orderId);
   const preview = previewBill(ctx, orderId, options);
   const nc = orderOutlet(ctx, orderId) === "NC";
   const isComplimentary = nc || Boolean(options.complimentary);
@@ -297,6 +318,7 @@ export function generateInvoice(
         .get(orderId) as { id: string; status: string } | undefined;
 
   const bill = preview;
+  const billDetails = options.billDetails ? JSON.stringify(options.billDetails) : null;
   const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId) as {
     customer_id: string | null;
     card_id: string | null;
@@ -331,7 +353,8 @@ export function generateInvoice(
              food_total = ?, drinks_total = ?, service_charge = ?, service_charge_mode = ?, service_charge_pct = ?,
              discount = ?, tax = ?, other_charges = ?, grand_total = ?,
              complimentary_account_id = ?, complimentary_name = ?,
-             customer_display_name = COALESCE(?, customer_display_name), customer_gstin = COALESCE(?, customer_gstin)
+             customer_display_name = COALESCE(?, customer_display_name), customer_gstin = COALESCE(?, customer_gstin),
+             bill_details = COALESCE(?, bill_details)
            WHERE id = ?`,
         )
         .run(
@@ -348,6 +371,7 @@ export function generateInvoice(
           comp?.name ?? "",
           options.customerDisplayName == null ? null : String(options.customerDisplayName).trim(),
           options.customerGstin == null ? null : String(options.customerGstin).trim(),
+          billDetails,
           existing.id,
         );
       ctx.db.prepare("DELETE FROM invoice_items WHERE invoice_id = ?").run(existing.id);
@@ -379,8 +403,8 @@ export function generateInvoice(
            id, invoice_number, session_id, order_id, table_id, customer_id, card_id,
            food_total, drinks_total, service_charge, service_charge_mode, service_charge_pct,
            discount, tax, other_charges, grand_total, status, cashier_id, created_at, paid_at,
-           complimentary_account_id, complimentary_name, customer_display_name, customer_gstin
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           complimentary_account_id, complimentary_name, customer_display_name, customer_gstin, bill_details
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -407,6 +431,7 @@ export function generateInvoice(
         comp?.name ?? "",
         String(options.customerDisplayName ?? "").trim(),
         String(options.customerGstin ?? "").trim(),
+        billDetails ?? "{}",
       );
     writeItems(id);
     if (isComplimentary) {
@@ -499,6 +524,7 @@ export function syncClubCardCharge(ctx: AppContext, orderId: string, force = fal
     .get(orderId) as { id: string; card_id: string | null; status: string; outlet: string } | undefined;
   if (!order || order.outlet !== "THE BOSS CLUB" || !order.card_id) return;
   if (order.status === "PAID" || order.status === "CANCELLED") return;
+  assertOrderCardUsable(ctx, orderId);
   const held = clubChargeSoFar(ctx, orderId);
   const already = held.paid + held.bonus;
   if (!force && already === 0) {
@@ -588,6 +614,7 @@ export function settleClubFromCard(ctx: AppContext, invoiceId: string) {
     | undefined;
   const cardId = invoice.card_id || order?.card_id;
   if (!cardId) throw new AppError("Punch the card on this table first");
+  assertUsable(getCard(ctx, cardId));
   generateInvoice(ctx, invoice.order_id, {
     discount: Number(invoice.discount) || 0,
     discountFrom: "amount",
@@ -628,6 +655,8 @@ export function settleInvoice(
     if (invoice.status === "PAID" || invoice.status === "CANCELLED") {
       throw new AppError(`Invoice is ${invoice.status}`);
     }
+    assertOrderCardUsable(ctx, invoice.order_id);
+    if (invoice.card_id) assertUsable(getCard(ctx, invoice.card_id));
     const place = ctx.db
       .prepare(
         `SELECT COALESCE(s.outlet, t.outlet, 'BAR') AS outlet
@@ -649,6 +678,7 @@ export function settleInvoice(
       if (line.method === "MEMBER_CARD") {
         const cardId = line.memberCardId ?? invoice.card_id;
         if (!cardId) throw new AppError("Member card is required for card payment");
+        assertUsable(getCard(ctx, cardId));
         if (place.outlet === "THE BOSS CLUB") {
           const held = ctx.db
             .prepare(
@@ -733,6 +763,8 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
     drinks_total: number;
     service_charge: number;
     service_charge_pct: number;
+    service_charge_mode: string;
+    bill_details: string | null;
     discount: number;
     tax: number;
     other_charges: number;
@@ -760,9 +792,12 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
   }
   guestName = invoice.customer_display_name?.trim() || guestName;
   const subtotal = invoice.food_total + invoice.drinks_total;
-  const discountPct = subtotal > 0 ? Math.round((invoice.discount / subtotal) * 10000) / 100 : 0;
+  let billDetails: Partial<BillDetails> = {};
+  try { billDetails = JSON.parse(invoice.bill_details || "{}") ?? {}; } catch { /* Older invoice without usable details. */ }
+  const excluded = new Set(billDetails.excludeItemIds ?? []);
+  const inclusive = invoice.service_charge_mode === "INCLUSIVE";
   const unrounded =
-    subtotal - invoice.discount + invoice.service_charge + invoice.tax + invoice.other_charges;
+    subtotal - invoice.discount + (inclusive ? 0 : invoice.service_charge) + invoice.tax + invoice.other_charges;
   const roundOff = invoice.grand_total - unrounded;
   const rawItems = snap.items as Array<{
     name: string;
@@ -793,25 +828,32 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
 
   const taxLines = ctx.db
     .prepare(
-      `SELECT ii.amount, ii.name, ii.product_id,
+      `SELECT ii.amount, ii.name, ii.product_id, ii.order_item_id,
               p.sales_group AS sales_group, p.tax_rate AS product_tax_rate,
               oi.tax_rate AS line_tax_rate
          FROM invoice_items ii
          LEFT JOIN products p ON p.id = ii.product_id
          LEFT JOIN order_items oi ON oi.id = ii.order_item_id
-        WHERE ii.invoice_id = ?`,
+        WHERE ii.invoice_id = ?
+        ORDER BY ii.rowid`,
     )
     .all(invoiceId) as Array<{
     amount: number;
     name: string;
     product_id: string;
+    order_item_id: string;
     sales_group: string | null;
     product_tax_rate: number | null;
     line_tax_rate: number | null;
   }>;
+  const discountable = taxLines.reduce((total, line) => excluded.has(line.order_item_id) ? total : total + line.amount, 0);
+  const discountPct = invoice.discount > 0
+    ? billDetails.discountPct ?? (discountable > 0 ? Math.round((invoice.discount / discountable) * 10000) / 100 : 0)
+    : 0;
   const totalLines = buildBillTotalLines({
     lines: taxLines.map((row) => ({
       amount: row.amount,
+      excludeDiscount: excluded.has(row.order_item_id),
       taxRate: displayTaxRate(ctx, {
         name: row.name,
         salesGroup: row.sales_group,
@@ -824,6 +866,7 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
     discountPct,
     serviceCharge: invoice.service_charge,
     serviceChargePct: invoice.service_charge_pct ?? 0,
+    serviceChargeInclusive: inclusive,
     otherCharges: invoice.other_charges,
     roundOff,
     taxTotal: invoice.tax,
@@ -839,6 +882,7 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
     waiter,
     guestName,
     guestGstin: invoice.customer_gstin ?? "",
+    remark: typeof billDetails.remark === "string" ? billDetails.remark.trim() : undefined,
     createdAt: invoice.created_at,
     items,
     subtotal,

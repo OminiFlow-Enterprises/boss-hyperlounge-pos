@@ -28,11 +28,11 @@ function electronBinary(): string | null {
 
 /**
  * Silent-print HTML to a Windows queue (default `bill`) via Electron.
- * Used so Print Bill works from the API with live invoice data.
  */
 export async function printHtmlToQueue(
   html: string,
   deviceName = "bill",
+  layout: "bill" | "kot" = "bill",
 ): Promise<{ ok: boolean; error?: string }> {
   const root = projectRoot();
   const printer = deviceName.trim() || "bill";
@@ -42,19 +42,23 @@ export async function printHtmlToQueue(
   }
   const electronPath = electronBinary();
   if (!electronPath) {
-    return { ok: false, error: "Electron not installed — cannot silent-print HTML bill" };
+    return { ok: false, error: "Electron not installed — cannot silent-print HTML" };
   }
 
-  const tmp = path.join(os.tmpdir(), `boss-bill-${Date.now()}-${Math.random().toString(16).slice(2)}.html`);
-  fs.writeFileSync(tmp, html, "utf8");
+  const tmp = path.join(os.tmpdir(), `boss-${layout}-${Date.now()}-${Math.random().toString(16).slice(2)}.html`);
+  try {
+    fs.writeFileSync(tmp, html, "utf8");
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
 
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
 
   return new Promise((resolve) => {
-    const child = spawn(electronPath, [script, tmp, printer], {
+    const child = spawn(electronPath, [script, tmp, printer, layout], {
       cwd: root,
-      env,
+      env: { ...env, POS_PRINT_HTML: "1" },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });

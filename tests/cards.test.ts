@@ -27,9 +27,11 @@ describe("member cards", () => {
       cardNumber: "HL-2001",
       cardTypeCode: "REGULAR",
     });
-    rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(1250), paymentMode: "UPI" });
+    const recharge = { cardId: card.id, amount: rupeesToPaise(1250), paymentMode: "UPI", idempotencyKey: "recharge-retry" } as const;
+    rechargeCard(cashier, recharge);
+    rechargeCard(cashier, recharge);
     const ledger = balancesFromLedger(cashier, card.id);
-    expect(ledger.paid).toBe(rupeesToPaise(1250));
+    expect(ledger.paid).toBe(rupeesToPaise(1150));
     expect(card.paid_balance).toBe(0);
   });
 
@@ -47,28 +49,32 @@ describe("member cards", () => {
       paymentMode: "CASH",
     });
     expect(result.bonusAmount).toBe(rupeesToPaise(500));
-    expect(result.card.paid_balance).toBe(rupeesToPaise(5000));
+    expect(result.card.paid_balance).toBe(rupeesToPaise(4900));
     expect(result.card.bonus_balance).toBe(rupeesToPaise(500));
-    expect(result.card.paid_balance + result.card.bonus_balance).toBe(rupeesToPaise(5500));
+    expect(result.card.paid_balance + result.card.bonus_balance).toBe(rupeesToPaise(5400));
   });
 
   it("blocks spend on a blocked card and allows unblock", () => {
-    const { ctx } = createTestApp();
+    const { ctx, db } = createTestApp();
     const manager = ctx("manager");
     const cashier = ctx("cashier");
     const card = issueCard(cashier, {
-      customer: { name: "Lost Card", mobile: "9000000003" },
-      cardNumber: "HL-2003",
+      customer: { name: "Blocked Card", mobile: "9000000003" },
+      cardNumber: "2003",
       cardTypeCode: "REGULAR",
     });
     rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(1000), paymentMode: "CASH" });
-    blockCard(manager, card.id, "Lost");
+    blockCard(manager, card.id, "Customer request");
+    expect(() => checkBalance(cashier, card.card_number, true)).toThrow("Card blocked");
+    expect(() => rechargeCard(cashier, { cardId: card.id, amount: 100_000, paymentMode: "CASH" })).toThrow("Card blocked");
     expect(() =>
       purchaseOnCard(cashier, { cardId: card.id, amount: rupeesToPaise(100), invoiceId: "inv" }),
-    ).toThrow(/cannot be used/);
-    unblockCard(manager, card.id, "Found");
+    ).toThrow("Card blocked");
+    expect(() => saveBooking(cashier, { cardNo: "2003", advance: 100_000, mop: "CASH" })).toThrow("Card blocked");
+    expect(db.prepare("SELECT id FROM bookings WHERE card_no = ?").get("2003")).toBeUndefined();
+    unblockCard(manager, card.id, "Cleared");
     purchaseOnCard(cashier, { cardId: card.id, amount: rupeesToPaise(100), invoiceId: "inv" });
-    expect(balancesFromLedger(cashier, card.id).usable).toBe(rupeesToPaise(900));
+    expect(balancesFromLedger(cashier, card.id).usable).toBe(rupeesToPaise(800));
   });
 
   it("swaps balance onto a new card and kills the old one", () => {
@@ -87,9 +93,9 @@ describe("member cards", () => {
       reason: "Damaged",
     });
     expect(swap.oldCard.status).toBe("REPLACED");
-    expect(swap.transferred.usable).toBe(rupeesToPaise(3250));
+    expect(swap.transferred.usable).toBe(rupeesToPaise(3150));
     expect(balancesFromLedger(cashier, swap.oldCard.id).usable).toBe(0);
-    expect(balancesFromLedger(cashier, swap.newCard.id).usable).toBe(rupeesToPaise(3250));
+    expect(balancesFromLedger(cashier, swap.newCard.id).usable).toBe(rupeesToPaise(3150));
     expect(() =>
       purchaseOnCard(cashier, { cardId: swap.oldCard.id, amount: 100, invoiceId: "x" }),
     ).toThrow(/cannot be used/);
@@ -111,8 +117,8 @@ describe("member cards", () => {
       expect(err).toBeInstanceOf(InsufficientBalanceError);
       expect((err as InsufficientBalanceError).details).toEqual({
         required: rupeesToPaise(2850),
-        available: rupeesToPaise(1200),
-        shortfall: rupeesToPaise(1650),
+        available: rupeesToPaise(1100),
+        shortfall: rupeesToPaise(1750),
       });
     }
   });
@@ -134,7 +140,7 @@ describe("member cards", () => {
       amount: rupeesToPaise(500),
       reason: "Kitchen void",
     });
-    expect(balancesFromLedger(cashier, card.id).usable).toBe(rupeesToPaise(2000));
+    expect(balancesFromLedger(cashier, card.id).usable).toBe(rupeesToPaise(1900));
     expect(() =>
       refundToCard(manager, {
         cardId: card.id,
@@ -153,7 +159,7 @@ describe("member cards", () => {
       cardNumber: "HL-2099",
       cardTypeCode: "VIP",
     });
-    rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(100), paymentMode: "CASH", applyBonus: false });
+    rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(200), paymentMode: "CASH", applyBonus: false });
     const check = checkBalance(cashier, "9000000099");
     expect(check.card.card_number).toBe("HL-2099");
     expect(check.balances.usable).toBe(rupeesToPaise(100));
@@ -168,14 +174,14 @@ describe("member cards", () => {
     const saved = saveBooking(cashier, {
       guestName: "Aman",
       mobile: "9876500001",
-      cardNo: "C1001",
+      cardNo: "1001",
       advance: rupeesToPaise(1001),
       mop: "CASH",
     }) as { balances: { usable: number } };
-    expect(saved.balances.usable).toBe(rupeesToPaise(1001));
-    const check = checkBalance(cashier, "C1001");
-    expect(check.card.card_number).toBe("C1001");
-    expect(check.balances.usable).toBe(rupeesToPaise(1001));
+    expect(saved.balances.usable).toBe(rupeesToPaise(901));
+    const check = checkBalance(cashier, "1001");
+    expect(check.card.card_number).toBe("1001");
+    expect(check.balances.usable).toBe(rupeesToPaise(901));
   });
 
   it("credits a bank-transfer advance under the guest name and bank", () => {
@@ -189,7 +195,7 @@ describe("member cards", () => {
     }) as { guest_name: string; mop: string; balances: { usable: number } };
     expect(saved.guest_name).toBe("Ravi");
     expect(saved.mop).toBe("BANK TRANSFER / HDFC");
-    expect(saved.balances.usable).toBe(rupeesToPaise(500));
+    expect(saved.balances.usable).toBe(rupeesToPaise(400));
     const ledger = db.prepare(
       "SELECT payment_mode, reference_number FROM card_ledger WHERE type = 'RECHARGE' ORDER BY created_at DESC LIMIT 1",
     ).get() as { payment_mode: string; reference_number: string };
@@ -217,8 +223,8 @@ describe("member cards", () => {
     ).toThrow(InsufficientBalanceError);
 
     rechargeCard(cashier, { cardId: card.id, amount: rupeesToPaise(500), paymentMode: "CASH", applyBonus: false });
-    expect(checkBalance(cashier, "NIGHT-1").balances.usable).toBe(rupeesToPaise(500));
-    expect(expireOvernightBalance(cashier, card.id).usable).toBe(rupeesToPaise(500));
+    expect(checkBalance(cashier, "NIGHT-1").balances.usable).toBe(rupeesToPaise(400));
+    expect(expireOvernightBalance(cashier, card.id).usable).toBe(rupeesToPaise(400));
   });
 
   it("lists only cards recharged on the current business day", () => {
@@ -242,6 +248,6 @@ describe("member cards", () => {
     const rows = cardsRechargedToday(cashier);
     expect(rows.map((r) => r.card_number)).toContain("TODAY-1");
     expect(rows.map((r) => r.card_number)).not.toContain("OLD-1");
-    expect(rows.find((r) => r.card_number === "TODAY-1")?.usable).toBe(rupeesToPaise(1000));
+    expect(rows.find((r) => r.card_number === "TODAY-1")?.usable).toBe(rupeesToPaise(900));
   });
 });

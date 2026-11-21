@@ -36,3 +36,24 @@ export function assertPositiveAmount(paise: number, label = "Amount"): void {
     throw new Error(`${label} must be a positive amount`);
   }
 }
+
+/** Allocate the bill discount before rounding the tax on each item line. */
+export function billLineTaxes(
+  lines: Array<{ amount: number; taxRate: number; excluded: boolean }>,
+  discount: number,
+  discountable: number,
+): number[] {
+  const eligible = lines.filter((line) => !line.excluded && line.amount > 0);
+  const last = eligible[eligible.length - 1];
+  let allocated = 0;
+  return lines.map((line) => {
+    let share = 0;
+    if (!line.excluded && line.amount > 0 && discount > 0 && discountable > 0) {
+      share = Math.min(line.amount, line === last
+        ? Math.max(0, discount - allocated)
+        : Math.round((discount * line.amount) / discountable));
+      allocated += share;
+    }
+    return Math.round((Math.max(0, line.amount - share) * line.taxRate) / 100);
+  });
+}

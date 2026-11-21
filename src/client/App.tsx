@@ -1,10 +1,10 @@
-import { Component, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import { Component, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import { ignoreRepeatedPrintKey, reprintKot } from "./printActions";
 import { api, ApiError } from "./api";
 import { formatINR } from "../shared/money";
 import { formatTableNo } from "../shared/tableLabel";
 import type { Actor, NavView, PaymentMode } from "../shared/types";
 import { outletRight, rightOn, viewRight } from "../shared/userRights";
-import { ReportHost } from "./Reports";
 import { AlertBox, CapBtns, ConfirmAsk, ItemNotesDialog, ItemTransferDialog, PrepareBillDialog, PrepareTablePick, SettleDialog, TransferDialog } from "./BillDialogs";
 import { armReplaceOnFocus, blockLetterInsert, blockLetters, cardNoDigits, cardNoReady, moveFormFocus, replaceOnFirstKey, stayOnCard } from "./formNav";
 import { itemMatchScore } from "../shared/itemSearch";
@@ -12,6 +12,8 @@ import { ItemMasterDialog } from "./ItemMaster";
 import { ComplimentaryMasterDialog } from "./ComplimentaryMaster";
 import { LoginGate } from "./Login";
 import { UserMaster } from "./UserMaster";
+
+const ReportHost = lazy(() => import("./Reports").then((module) => ({ default: module.ReportHost })));
 
 class ReportCrashBoundary extends Component<{ children: ReactNode; onRecover: () => void }, { failed: boolean }> {
   state = { failed: false };
@@ -177,6 +179,7 @@ const MENUS: Array<{ id: string; label: string; items: MenuNode[] }> = [
         { label: "Item Wise Sales Detail", view: "item-wise-detail" },
         { label: "Item Transfer Report", view: "item-transfer-report" },
         { label: "Table Transfer Report", view: "table-transfer-report" },
+        { label: "KOT Cancellation Report", view: "kot-cancellation-report" },
       ] },
       { label: "Sales Report", children: [
         { label: "Item Combine Stock Report", view: "item-combine-stock" },
@@ -186,43 +189,11 @@ const MENUS: Array<{ id: string; label: string; items: MenuNode[] }> = [
         { label: "Time Sale Report", view: "time-sale" },
         { label: "Tax Wise Report", view: "tax-wise" },
         { label: "Settlement Report", view: "settlement-report" },
-        { label: "Card Settlement Report", view: "card-settlement-report" },
       ] },
       { label: "Card Settlement Report", view: "card-settlement-report" },
     ],
   },
 ];
-
-const VIEW_TITLE: Partial<Record<AppView, string>> = {
-  billing: "BAR (Restaurant)",
-  "gst-report": "FnB GST Report",
-  "point-of-sales": "FnB Point Of Sales",
-  "item-wise-sale": "Item Wise Sale",
-  "item-wise-group": "Item Wise Group Sales Report",
-  "item-wise-detail": "Item Wise Sales Detail",
-  "item-transfer-report": "Item Transfer Report",
-  "table-transfer-report": "Table Transfer Report",
-  "item-combine-stock": "Item Combine Stock Report",
-  "outlet-stock": "Outlet Wise Stock Report",
-  "time-sale": "Time Sale Report",
-  "tax-wise": "Tax Wise Report",
-  "kot-report": "KOT Report",
-  "bill-report": "Bill Report",
-  "settlement-report": "Restaurant Settlement Report",
-  "card-settlement-report": "Card Settlement Report",
-  "booking-report": "Restaurant Booking Register",
-  "advance-booking": "Restaurant Advance Booking",
-  "card-block": "Card Block",
-  history: "Bill Report",
-  login: "User Login",
-  "user-master": "User Master",
-};
-
-function sessionText(year: string) {
-  const match = /^(\d{4})-(\d{4})$/.exec(year);
-  if (!match) return "2026-27";
-  return `${match[1]}-${match[2].slice(2)}`;
-}
 
 function visibleMenus(rights: Record<string, boolean> | null | undefined) {
   return MENUS.map((menu) => {
@@ -279,7 +250,6 @@ function WinClock() {
 export function App() {
   const [actor, setActor] = useState<Actor | null>(null);
   const [signedIn, setSignedIn] = useState(false);
-  const [fy, setFy] = useState("2026-2027");
   const [view, setView] = useState<AppView>("billing");
   const [bootstrap, setBootstrap] = useState<any>(null);
   const [error, setError] = useState("");
@@ -309,8 +279,9 @@ export function App() {
   }
 
   async function refreshTables() {
-    const rows = await api.get<any[]>("/api/tables");
+    const rows = await api.get<Table[]>("/api/tables");
     setBootstrap((prev: any) => (prev ? { ...prev, tables: rows } : prev));
+    return rows;
   }
 
   useEffect(() => {
@@ -398,72 +369,14 @@ export function App() {
   if (!bootstrap) {
     return (
       <div className="winapp">
-        <div className="caption"><div className="caption-icon" /><div className="caption-title">Organisation : THE BOSS</div></div>
         <div className="login-dlg outset">Loading…</div>
       </div>
     );
   }
 
-  const billingName = outlet === "THE BOSS CLUB" ? "THE BOSS CLUB"
-    : outlet === "RESTAURANT" ? "RESTAURANT"
-    : outlet === "NC" ? "NC"
-    : "BAR (Restaurant)";
   const menus = visibleMenus(signedIn ? actor?.rights : null);
-  const deptLabel = view === "user-master"
-    ? "User Master"
-    : view === "billing"
-    ? billingName
-    : view === "settlement-report"
-    ? `Restaurant Settlement Report - ${outlet}`
-    : view === "kot-report"
-      ? `${outlet} KOT Report`
-      : (VIEW_TITLE[view] ?? outlet);
-
   return (
     <div className="winapp" onClick={() => { setMenu(null); setSub(null); }}>
-      <header className="caption">
-        <div className="caption-icon" />
-        <div className="caption-title">
-          Organisation : THE BOSS&nbsp;&nbsp;&nbsp;&nbsp;Session :{sessionText(fy)}&nbsp;&nbsp;&nbsp;&nbsp;Version : 1.0.0&nbsp;&nbsp;&nbsp;&nbsp;- [{deptLabel}]
-        </div>
-        <div className="caption-btns">
-          <button
-            type="button"
-            aria-label="Minimize"
-            onClick={() => {
-              if (window.bossWindow) void window.bossWindow.minimize();
-            }}
-          >
-            ─
-          </button>
-          <button
-            type="button"
-            aria-label="Maximize"
-            onClick={() => {
-              if (window.bossWindow) void window.bossWindow.maximize();
-            }}
-          >
-            ☐
-          </button>
-          <button
-            type="button"
-            className="cap-close"
-            aria-label="Close"
-            onMouseDown={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (window.bossWindow) void window.bossWindow.close();
-              else window.close();
-            }}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
-          >
-            ✕
-          </button>
-        </div>
-      </header>
       <nav className="menubar" onClick={(e) => e.stopPropagation()}>
         {menus.map((m) => (
           <button
@@ -556,8 +469,10 @@ export function App() {
           {view === "kot" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard /></div>}
           {view === "kitchen" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="KITCHEN" /></div>}
           {view === "bar" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="BAR" /></div>}
-          <ReportCrashBoundary onRecover={() => go("billing")}>
-            <ReportHost view={view as NavView} outlet={outlet} onExit={() => go("billing")} />
+          <ReportCrashBoundary key={view} onRecover={() => go("billing")}>
+            <Suspense fallback={<div className="rpt-page" role="status">Loading report…</div>}>
+              <ReportHost view={view as NavView} outlet={outlet} onExit={() => go("billing")} />
+            </Suspense>
           </ReportCrashBoundary>
         </div>
       )}
@@ -565,10 +480,9 @@ export function App() {
       {!signedIn && (
         <LoginGate
           terminalId={bootstrap.actor.terminalId}
-          onLogin={(next, year) => {
+          onLogin={(next) => {
             setActor(next);
             setSignedIn(true);
-            setFy(year);
             go("billing");
           }}
           onExit={() => {
@@ -588,7 +502,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   tables: Table[];
   products: Product[];
   outlet: string;
-  onRefresh: () => void;
+  onRefresh: () => Promise<Table[]>;
   onCatalog: () => void;
   onInvoice: (inv: any) => void;
   onMessage: (m: string, after?: () => void) => void;
@@ -638,11 +552,13 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   const [noteItem, setNoteItem] = useState<OrderItem | null>(null);
   /** Punch grid only — not written to DB until Print KOT. */
   const [draftItems, setDraftItems] = useState<OrderItem[]>([]);
+  const [draftEstimate, setDraftEstimate] = useState<{ key: string; total: number | null }>();
   const draftSeq = useRef(0);
   const [waiter, setWaiter] = useState("A");
   const [itemQuery, setItemQuery] = useState("");
   const [typed, setTyped] = useState("");
   const [qtyStr, setQtyStr] = useState("1");
+  const [qtyInvalid, setQtyInvalid] = useState(false);
   const [pending, setPending] = useState<Product | null>(null);
   const [nameLocked, setNameLocked] = useState(false);
   nameLockRef.current = nameLocked;
@@ -737,6 +653,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   }
 
   async function selectTable(id: string, code?: string, cardOverride?: string) {
+    setOrderId(null);
     setTableId(id);
     if (code) setTableCode(code);
     const t = tables.find((x) => x.id === id);
@@ -745,13 +662,13 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     const clubCardNo = existingCard || (clubMode ? typedCard : "");
     if (clubMode && clubCardNo) setClubCard(cardNoDigits(clubCardNo));
     try {
-      if (!t || t.status === "AVAILABLE") {
+      if (!t || t.status === "AVAILABLE" || t.status === "RESERVED") {
         await api.post(`/api/tables/${id}/open`, {
           outlet: deptOutlet(dept),
           cardNumber: typedCard || undefined,
-        }).catch(() => null);
+        });
       } else if (typedCard && !existingCard) {
-        await api.post(`/api/tables/${id}/card`, { cardNumber: typedCard }).catch(() => null);
+        await api.post(`/api/tables/${id}/card`, { cardNumber: typedCard });
       }
       const order = await api.post<any>("/api/orders", { tableId: id });
       setOrderId(order.id);
@@ -772,6 +689,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       onRefresh();
       focusInput(itemRef.current);
     } catch (e) {
+      setOrderId(null);
       onMessage(e instanceof Error ? e.message : "Could not open table");
     }
   }
@@ -919,11 +837,35 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         if (b.card.mobile && !String(b.card.mobile).startsWith("card-")) setMobile(b.card.mobile);
       }
       return true;
-    } catch {
+    } catch (e) {
       if (forClub) setClubBalPaise(0);
       else setCheckBal("0.00");
-      onMessage("Card not found", forClub ? focusClubCard : undefined);
+      onMessage(e instanceof Error ? e.message : "Card not found", forClub ? focusClubCard : undefined);
       return false;
+    }
+  }
+
+  async function enterClubCard(cardNumber: string) {
+    if (!await loadCard(cardNumber, true)) return;
+    const cardInput = clubCardRef.current;
+    const stillEnteringCard = () =>
+      cardInput === document.activeElement && cardInput?.value === cardNumber;
+    try {
+      const rows = await onRefresh();
+      if (!stillEnteringCard()) return;
+      const runningTable = rows.find((table) =>
+        table.outlet === deptOutlet("CLUB")
+        && table.current_session_id
+        && table.status !== "AVAILABLE"
+        && table.status !== "RESERVED"
+        && table.card_number?.trim() === cardNumber,
+      );
+      setTableCode(runningTable?.code ?? "");
+      focusTableNo();
+    } catch (e) {
+      if (stillEnteringCard()) {
+        onMessage(e instanceof Error ? e.message : "Could not look up running tables", focusClubCard);
+      }
     }
   }
 
@@ -1044,7 +986,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     const it = items[index];
     if (!it) return;
     const appending = editingId === it.id && !nameLockRef.current;
-    const next = appending ? `${queryRef.current}${ch}` : ch;
+    const upper = ch.toUpperCase();
+    const next = appending ? `${queryRef.current}${upper}` : upper;
     nameLockRef.current = false;
     queryRef.current = next;
     setEditingId(it.id);
@@ -1183,8 +1126,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         }
         if (clubMode) setClubBalPaise(usable);
         else setCheckBal(amt(usable));
-      } catch {
-        onMessage("Card not found", clubMode ? focusClubCard : undefined);
+      } catch (e) {
+        onMessage(e instanceof Error ? e.message : "Card not found", clubMode ? focusClubCard : undefined);
         return false;
       }
     }
@@ -1202,19 +1145,28 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     return true;
   }
 
+  const sendingKot = useRef(false);
+  const committingQty = useRef(false);
+  const kotEnter = useRef<{ punched: boolean; printed: boolean } | null>(null);
+
+  async function punchQty() {
+    if (committingQty.current || sendingKot.current) return;
+    committingQty.current = true;
+    try {
+      await commitQty();
+    } finally {
+      committingQty.current = false;
+    }
+  }
+
   async function commitQty() {
     if (!pending) {
       itemRef.current?.focus();
       return;
     }
-    if (qtyStr.trim() === "-" || qtyStr.trim() === "") {
-      qtyRef.current?.focus();
-      qtyRef.current?.select();
-      return false;
-    }
     const n = parseQty(qtyStr);
+    setQtyInvalid(n == null);
     if (n == null) {
-      onMessage("Enter a valid qty");
       qtyRef.current?.focus();
       qtyRef.current?.select();
       return false;
@@ -1265,6 +1217,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   }
 
   async function printKot() {
+    if (sendingKot.current || committingQty.current) return;
     const id = orderId;
     if (!id) {
       onMessage("No items to print");
@@ -1274,7 +1227,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     if (pending) {
       const n = parseQty(qtyStr);
       if (n == null) {
-        onMessage("Enter a valid qty");
+        setQtyInvalid(true);
         qtyRef.current?.focus();
         qtyRef.current?.select();
         return;
@@ -1331,6 +1284,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       remarkRef.current?.focus();
       return;
     }
+    sendingKot.current = true;
     try {
       for (const it of toSend) {
         await api.post(`/api/orders/${id}/items`, {
@@ -1350,6 +1304,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "KOT failed");
       await clearServerUnsent(id).catch(() => null);
+    } finally {
+      sendingKot.current = false;
     }
   }
 
@@ -1530,6 +1486,13 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       return ev.key === "F10" || ev.code === "F10" || ev.keyCode === 121;
     }
     function keys(e: KeyboardEvent) {
+      // A held Enter can move focus from item to qty, remark or Print KOT.
+      const heldEnter = e.key === "Enter" && e.repeat ? kotEnter.current : null;
+      if (heldEnter) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      if (e.key === "Enter" && !e.repeat) kotEnter.current = null;
       if (document.querySelector(".alert-dlg, .cm-dlg, .confirm-overlay")) return;
       if (askExit) return;
       if (noteItem) return;
@@ -1563,6 +1526,28 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       }
       // Table / item transfer owns the keyboard (Outlet Up/Down, etc.)
       if (xferOpen || itemXferOpen) return;
+      if (e.key === "Enter" && !pickOpen && !billOrder && !settleInv && !payOpen) {
+        if (heldEnter) {
+          if (heldEnter.printed || committingQty.current) return;
+          if (pending) {
+            if (!heldEnter.punched) {
+              heldEnter.punched = true;
+              void punchQty();
+            }
+          } else if (draftItems.length && !(e.target === itemRef.current && itemQuery.trim())) {
+            heldEnter.printed = true;
+            void printKot();
+          }
+          return;
+        }
+        if (!e.repeat && orderId && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+          const fromQty = e.target === qtyRef.current;
+          const fromPrint = e.target === kotBtnRef.current;
+          if (fromQty || fromPrint || e.target === itemRef.current || e.target === remarkRef.current) {
+            kotEnter.current = { punched: fromQty, printed: fromPrint };
+          }
+        }
+      }
       if (e.altKey && e.key === "1") { e.preventDefault(); switchDept("CLUB"); }
       if (e.altKey && e.key === "2") { e.preventDefault(); switchDept("RESTAURANT"); }
       if (e.altKey && e.key === "3") { e.preventDefault(); switchDept("NC"); }
@@ -1598,7 +1583,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         if (access && !access.itemXfer) { onMessage("Permission denied"); return; }
         setItemXferOpen(true);
       }
-      if (e.key === "F5" || e.key === "F6" || e.key === "F16") { e.preventDefault(); void printKot(); }
+      if (e.key === "F5" || e.key === "F6" || e.key === "F16") { e.preventDefault(); if (!e.repeat) void printKot(); }
       if (e.key === "F7") { e.preventDefault(); onOpenView("kot-report", deptOutlet(dept)); }
       if (e.key === "F8") { e.preventDefault(); onOpenView("bill-report", deptOutlet(dept)); }
       if (e.key === "F12") { e.preventDefault(); onOpenView("settlement-report", deptOutlet(dept)); }
@@ -1608,6 +1593,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   useEffect(() => {
     const down = (e: KeyboardEvent) => keyHandler.current(e);
     const up = (e: KeyboardEvent) => {
+      if (e.key === "Enter") kotEnter.current = null;
       if (e.key === "F11" || e.code === "F11" || e.keyCode === 122) e.preventDefault();
     };
     window.addEventListener("keydown", down, true);
@@ -1653,11 +1639,12 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           e.preventDefault();
           e.stopPropagation();
           nameLockRef.current = false;
-          queryRef.current = e.key;
+          const upper = e.key.toUpperCase();
+          queryRef.current = upper;
           setNameLocked(false);
           setPending(null);
-          setItemQuery(e.key);
-          setTyped(e.key);
+          setItemQuery(upper);
+          setTyped(upper);
           setPick(0);
           setListOpen(true);
           return;
@@ -1707,6 +1694,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       inputMode="numeric"
       tabIndex={5}
       value={qtyStr}
+      aria-invalid={qtyInvalid && parseQty(qtyStr) == null ? true : undefined}
       onChange={(e) => setQtyStr(e.target.value.replace(/[^\d-]/g, "").replace(/(?!^)-/g, ""))}
       onFocus={(e) => e.target.select()}
       onKeyDown={(e) => {
@@ -1756,20 +1744,40 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         } else if (e.key === "Enter") {
           e.preventDefault();
           e.stopPropagation();
-          void commitQty();
+          void punchQty();
         }
       }}
     />
   ) : null;
-  const listTotal = estimateRows.reduce((s, t) => s + (t.net_total ?? t.running_total ?? 0), 0);
-  const grand = items.reduce((s, i) => s + i.qty * i.unit_price, 0);
+  const estimateFor = (t: Table) => (dept === "NC" ? 0 : t.net_total ?? t.running_total) ?? 0;
+  const listTotal = estimateRows.reduce((s, t) => s + estimateFor(t), 0);
   const clubItemNet = (Number(table?.net_total) || servedItems.reduce((s, it) => s + netOf(it), 0))
     + draftItems.reduce((s, it) => s + netOf(it), 0);
   const clubRemain = clubBalPaise - clubItemNet;
-  const tableEstimate = (table?.net_total ?? table?.running_total ?? 0)
-    || servedItems.reduce((s, i) => s + i.qty * i.unit_price, 0)
-    || grand;
+  const pendingQty = pending ? parseQty(qtyStr) : null;
+  const estimateItems = draftItems
+    .filter((item) => !(pending && pendingQty != null && item.id === editingId))
+    .map((item) => ({ productId: item.product_id, qty: item.qty, notes: item.notes }));
+  if (pending && pendingQty != null) {
+    estimateItems.push({ productId: pending.id, qty: pendingQty, notes: draftItems.find((item) => item.id === editingId)?.notes });
+  }
+  const requestBody = orderId && dept !== "NC" && estimateItems.length
+    ? JSON.stringify({ items: estimateItems, outlet: deptOutlet(dept) })
+    : "";
+  const estimateKey = JSON.stringify([orderId, requestBody]);
+  useEffect(() => {
+    if (!orderId || !requestBody) return;
+    let current = true;
+    api.post<{ grandTotal: number }>(`/api/orders/${orderId}/estimate`, JSON.parse(requestBody))
+      .then(({ grandTotal }) => { if (current) setDraftEstimate({ key: estimateKey, total: grandTotal }); })
+      .catch(() => { if (current) setDraftEstimate({ key: estimateKey, total: null }); });
+    return () => { current = false; };
+  }, [orderId, requestBody, estimateKey]);
+
   const showTableItems = Boolean(tableId);
+  const estimateNet = requestBody
+    ? (draftEstimate?.key === estimateKey ? draftEstimate.total : null)
+    : table ? estimateFor(table) : 0;
 
   return (
     <div className="billing">
@@ -1809,10 +1817,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                         stayOnCard(clubCardRef.current);
                         return;
                       }
-                      void loadCard(typedCard, true).then((ok) => {
-                        if (!ok) return;
-                        focusInput(tableRef.current);
-                      });
+                      void enterClubCard(typedCard);
                     }}
                   />
                 </label>
@@ -1954,7 +1959,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                   <div
                     key={p.id}
                     className={i === pick ? "on" : ""}
-                    onMouseEnter={() => setPick(i)}
                     onClick={() => chooseItem(p)}
                   >
                     {p.name}
@@ -2002,13 +2006,16 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                     if (e.key === "Enter") {
                       e.preventDefault();
                       e.stopPropagation();
-                      void printKot();
+                      if (!e.repeat) void printKot();
                     }
                   }}
                 >Print KOT (F5)</button></td>
-                <td><button className="fn" onClick={printKot}>Save (F5)</button></td>
+                <td><button className="fn" onKeyDown={ignoreRepeatedPrintKey} onClick={printKot}>Save (F5)</button></td>
                 <td><button className="fn" onClick={() => { if (access && !access.comp) onMessage("Permission denied"); else setCompMasterOpen(true); }}>F1 Complim.</button></td>
                 <td className="exit-cell">
+                  {showTableItems && (
+                    <div className="dashboard-estimate">Net Estimate: {estimateNet == null ? "—" : amt(estimateNet)}</div>
+                  )}
                   <button className="fn" onClick={requestExit}>Exit</button>
                 </td>
               </tr>
@@ -2075,7 +2082,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
               </tbody>
             </table>
             <div className="estimate-fill" />
-            <div className="estimate-total">Estimate: {dept === "NC" ? 0 : Math.round((tableEstimate || 0) / 100)}</div>
           </>
         ) : (
           <>
@@ -2131,7 +2137,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                             void openBillForTable(t);
                           }}
                         >
-                          {dept === "NC" ? 0 : (settle ? amt(t.net_total ?? t.running_total ?? 0) : Math.round((t.net_total ?? t.running_total ?? 0) / 100))}
+                          {amt(estimateFor(t))}
                         </button>
                       </td>
                       <td className={settle ? "" : "bill"}>{settle ? "Settlement" : "Bill"}</td>
@@ -2141,7 +2147,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
               </tbody>
             </table>
             <div className="estimate-fill" />
-            <div className="estimate-total">Total Amount : {dept === "NC" ? amt(0) : amt(listTotal || grand)}</div>
+            <div className="estimate-total">Total Amount : {amt(listTotal)}</div>
           </>
         )}
       </aside>
@@ -2524,7 +2530,7 @@ function KotBoard({ station }: { station?: "KITCHEN" | "BAR" }) {
               {k.reprint_count > 0 && <div className="reprint-mark">*** REPRINT ***</div>}
               <ul>{k.items?.map((i: any) => <li key={i.id}>{i.qty} × {i.name}</li>)}</ul>
               {next[k.status] && <button className="fn wide" onClick={() => api.post(`/api/kots/${k.id}/status`, { status: next[k.status] }).then(load)}>{next[k.status]}</button>}
-              <button className="fn wide" onClick={() => api.post(`/api/kots/${k.id}/reprint`).then(load)}>Reprint</button>
+              <button className="fn wide" onKeyDown={ignoreRepeatedPrintKey} onClick={() => reprintKot(k.id).then(load)}>Reprint</button>
             </div>
           ))}
         </div>

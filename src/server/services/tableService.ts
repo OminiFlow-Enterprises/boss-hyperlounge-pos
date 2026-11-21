@@ -3,9 +3,9 @@ import { AppError } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
 import { businessDayStart, nextNumber, nowIso, uuid } from "../lib/ids.js";
-import type { ServiceChargeMode, SplitType, TableStatus } from "../../shared/types.js";
-import { findCardByScan } from "./cardService.js";
-import { previewBill } from "./billingService.js";
+import type { SplitType, TableStatus } from "../../shared/types.js";
+import { assertOrderCardUsable, assertUsable, findCardByScan, getCard } from "./cardService.js";
+import { previewRunningBill } from "./billingService.js";
 import { dayCloseHour } from "./settingsService.js";
 
 export function listFloors(ctx: AppContext) {
@@ -56,12 +56,6 @@ function withNetTotals(ctx: AppContext, rows: Array<Record<string, unknown>>) {
       WHERE session_id = ? AND status IN ('OPEN','BILL_REQUESTED','SETTLING')
       ORDER BY created_at DESC LIMIT 1`,
   );
-  const invoiceStmt = ctx.db.prepare(
-    `SELECT discount, service_charge, service_charge_pct, service_charge_mode, other_charges
-       FROM invoices
-      WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')
-      ORDER BY created_at DESC LIMIT 1`,
-  );
   for (const row of rows) {
     const sessionId = row.current_session_id as string | null;
     const running = Number(row.running_total) || 0;
@@ -74,32 +68,8 @@ function withNetTotals(ctx: AppContext, rows: Array<Record<string, unknown>>) {
       row.net_total = running;
       continue;
     }
-    const inv = invoiceStmt.get(order.id) as
-      | { discount: number; service_charge: number; service_charge_pct: number; service_charge_mode: string; other_charges: number }
-      | undefined;
     try {
-      const savedPct = Number(inv?.service_charge_pct) || 0;
-      // Preserve an explicitly saved 0%. Older invoices can have a positive
-      // charge but no recorded rate, so keep the configured fallback for them.
-      const hasSavedPct = Boolean(inv) && (savedPct !== 0 || Number(inv?.service_charge) === 0);
-      const bill = previewBill(
-        ctx,
-        order.id,
-        inv
-          ? {
-              discount: Number(inv.discount) || 0,
-              discountFrom: "amount",
-              ...(hasSavedPct
-                ? {
-                    serviceChargePct: savedPct,
-                    serviceChargeMode: (inv.service_charge_mode || "EXCLUSIVE") as ServiceChargeMode,
-                  }
-                : {}),
-              otherCharges: Number(inv.other_charges) || 0,
-            }
-          : {},
-      );
-      row.net_total = bill.grandTotal;
+      row.net_total = previewRunningBill(ctx, order.id).grandTotal;
     } catch {
       row.net_total = running;
     }
@@ -204,6 +174,7 @@ export function openTable(
     cardId = card.id;
     if (!customerId) customerId = card.customer_id;
   }
+  if (cardId) assertUsable(getCard(ctx, cardId));
   const sessionId = uuid();
   const now = nowIso();
   ctx.db
@@ -225,6 +196,7 @@ export function attachTableCard(ctx: AppContext, tableId: string, cardNumber: st
   if (!number) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
   const card = findCardByScan(ctx, number);
   if (!card) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
+  assertUsable(card);
   const table = getTable(ctx, tableId);
   if (!table.current_session_id) throw new AppError("Open the table first");
   ctx.db
@@ -267,6 +239,8 @@ export function requestBill(ctx: AppContext, tableId: string) {
   assertPermission(ctx.actor.role, "REQUEST_BILL");
   const table = getTable(ctx, tableId);
   if (!table.current_session_id) throw new AppError("Table has no open session");
+  const order = ctx.db.prepare("SELECT id FROM orders WHERE session_id = ? AND status = 'OPEN'").get(table.current_session_id) as { id: string } | undefined;
+  if (order) assertOrderCardUsable(ctx, order.id);
   ctx.db.prepare("UPDATE dining_tables SET status = 'BILL_REQUESTED' WHERE id = ?").run(tableId);
   ctx.db.prepare("UPDATE orders SET status = 'BILL_REQUESTED' WHERE session_id = ? AND status = 'OPEN'").run(
     table.current_session_id,
@@ -293,6 +267,13 @@ export function closeTable(ctx: AppContext, tableId: string) {
   return getTable(ctx, tableId);
 }
 
+function assertSessionCardUsable(ctx: AppContext, sessionId: string | null) {
+  if (!sessionId) return;
+  const session = ctx.db.prepare("SELECT card_id FROM table_sessions WHERE id = ?")
+    .get(sessionId) as { card_id: string | null } | undefined;
+  if (session?.card_id) assertUsable(getCard(ctx, session.card_id));
+}
+
 export function transferTable(ctx: AppContext, fromTableId: string, toTableId: string, reason?: string) {
   if (fromTableId === toTableId) throw new AppError("Cannot transfer a table to itself");
   const why = String(reason ?? "").trim();
@@ -302,6 +283,8 @@ export function transferTable(ctx: AppContext, fromTableId: string, toTableId: s
   if (!from.current_session_id) throw new AppError("Source table has no running order");
   if (from.status === "PAYMENT_PENDING") throw new AppError("Printed bill table cannot be transferred");
   const sessionId = from.current_session_id;
+  assertSessionCardUsable(ctx, sessionId);
+  assertSessionCardUsable(ctx, to.current_session_id);
   const destOutlet = to.outlet || "BAR";
   if (to.current_session_id) {
     // A running destination keeps its session and order. Fold the source order
@@ -406,6 +389,8 @@ export function transferItems(
   const from = getTable(ctx, fromTableId);
   if (!from.current_session_id) throw new AppError("Current table has no running order");
   let to = getTable(ctx, toTableId);
+  assertSessionCardUsable(ctx, from.current_session_id);
+  assertSessionCardUsable(ctx, to.current_session_id);
   if (to.status === "AVAILABLE") {
     openTable(ctx, { tableId: to.id, waiterId: ctx.actor.staffId });
     to = getTable(ctx, to.id);
@@ -463,6 +448,8 @@ export function mergeTables(ctx: AppContext, sourceTableId: string, targetTableI
   }
   const sourceSession = source.current_session_id;
   const targetSession = target.current_session_id;
+  assertSessionCardUsable(ctx, sourceSession);
+  assertSessionCardUsable(ctx, targetSession);
 
   const sourceOrder = ctx.db
     .prepare("SELECT id FROM orders WHERE session_id = ? ORDER BY created_at LIMIT 1")
@@ -510,6 +497,7 @@ export function splitTable(
 ) {
   const table = getTable(ctx, input.tableId);
   if (!table.current_session_id) throw new AppError("Table has no running order");
+  assertSessionCardUsable(ctx, table.current_session_id);
   const payload = JSON.stringify(input);
   const splitId = uuid();
   ctx.db

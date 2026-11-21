@@ -1,13 +1,45 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { ignoreRepeatedPrintKey, printBill, printPage, reprintKot } from "./printActions";
 import { createPortal } from "react-dom";
 import { api } from "./api";
 import { parseRupeesInput } from "../shared/money";
 import type { NavView } from "../shared/types";
 import { AlertBox, CapBtns, ConfirmAsk, PrepareBillDialog, SettleDialog } from "./BillDialogs";
 import { cardNoDigits, cardNoReady, stayOnCard } from "./formNav";
+import type { CompAccount } from "./ComplimentaryMaster";
 
 const OUTLETS = ["BAR", "CAFE", "NC", "RESTAURANT", "THE BOSS CLUB"];
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+function useReportRequest() {
+  const current = useRef<AbortController | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => () => current.current?.abort(), []);
+
+  async function load<T>(path: string, apply: (result: T) => void) {
+    current.current?.abort();
+    const request = new AbortController();
+    current.current = request;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await api.get<T>(path, request.signal);
+      if (!request.signal.aborted) apply(result);
+    } catch (error) {
+      if (!request.signal.aborted) setError(error instanceof Error ? error.message : "Could not load report.");
+    } finally {
+      if (current.current === request && !request.signal.aborted) setLoading(false);
+    }
+  }
+  return { load, loading, error };
+}
+
+function ReportLoadStatus({ loading, error }: { loading: boolean; error: string }) {
+  if (loading) return <div className="report-load-status" role="status">Loading report…</div>;
+  if (error) return <div className="report-load-status" role="alert">{error}</div>;
+  return null;
+}
 
 function pad(n: number) { return String(n).padStart(2, "0"); }
 function dmy(d = new Date()) {
@@ -33,7 +65,7 @@ function CrystalChrome({ children, onExit, onExport, toolsVisible, onToggleTools
   return (
     <div className="cr-shell">
       <div className="cr-toolbar">
-        <button className="fn" onClick={() => window.print()}>Print</button>
+        <button className="fn" onKeyDown={ignoreRepeatedPrintKey} onClick={printPage}>Print</button>
         {onExport ? <button className="fn" onClick={onExport}>Export</button> : <button className="fn">Export</button>}
         {onToggleTools
           ? <button className="fn" onClick={onToggleTools}>{toolsVisible ? "Hide" : "Show"}</button>
@@ -526,7 +558,7 @@ export function GstReport({ onExit }: { onExit: () => void }) {
     const name = `GST-Summery-${from}.pdf`;
     const bridge = window.bossPrint?.exportPdf;
     if (!bridge) {
-      window.print();
+      void printPage();
       return;
     }
     const raw = await bridge({ landscape: true });
@@ -1091,8 +1123,8 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
         </div>
       </div>
       <div className="rpt-foot">
-        <button className="fn" onClick={() => window.print()}>S.Print</button>
-        <button className="fn" onClick={() => window.print()}>Print</button>
+        <button className="fn" onKeyDown={ignoreRepeatedPrintKey} onClick={printPage}>S.Print</button>
+        <button className="fn" onKeyDown={ignoreRepeatedPrintKey} onClick={printPage}>Print</button>
         <button className="fn" onClick={() => { const csv = ["Outlet,Item Name,Complementary,Sold,Amount,Unit", ...items.map((r) => [r.outlet, r.name, r.complimentary, r.sold, (r.amount / 100).toFixed(2), r.unit].map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","))].join("\n"); const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" })); a.download = `item-wise-sales-${from}-${to}.csv`; a.click(); URL.revokeObjectURL(a.href); }}>Export</button>
         <button className="fn" onClick={onExit}>Close</button>
       </div>
@@ -1596,12 +1628,8 @@ function SettlementUpdateDialog({
         )}
         <div className="st-foot">
           <span className="st-vno">Voucher No : {row?.voucher_no ?? ""}</span>
-          <button type="button" className="fn" tabIndex={-1} onClick={() => {
-            if (!row?.invoice_id) return;
-            void api.post(`/api/invoices/${row.invoice_id}/print`).then(async (res) => {
-              const { handleBillPrintResponse } = await import("./printBillHtml");
-              await handleBillPrintResponse(res as any);
-            }).catch(() => null);
+          <button type="button" className="fn" tabIndex={-1} onKeyDown={ignoreRepeatedPrintKey} onClick={() => {
+            if (row?.invoice_id) void printBill(row.invoice_id).catch(() => null);
           }}>Print</button>
           <button ref={updateRef} type="button" className="fn" tabIndex={4} onClick={() => void save()}>{parts.length ? "Post (F2)" : "Update (F2)"}</button>
           <button type="button" className="fn" tabIndex={-1} disabled={parts.length > 0} onClick={() => setAskDelete(true)}>Delete (F4)</button>
@@ -1625,7 +1653,43 @@ function SettlementUpdateDialog({
   );
 }
 
+const SETTLEMENT_COLUMNS = [
+  "VoucherRecei", "VoucherDate", "BillNo", "BillAmount", "TableNo", "Waiter",
+  "SettledAmou", "MOP", "USERNAME", "VoucherValu", "status", "OutletName", "MOP1",
+];
+
+type SettlementRow = {
+  payment_id: string;
+  receipt_no?: string;
+  voucher_date: string;
+  bill_no?: string;
+  bill_amount: number;
+  table_no?: string;
+  waiter?: string;
+  settled: number;
+  method?: string;
+  account?: string;
+  username?: string;
+  status?: string;
+  outlet_name?: string;
+};
+
+const compareSettlementMop = (a: SettlementRow, b: SettlementRow) =>
+  mopCell(a.method, a.account).localeCompare(mopCell(b.method, b.account));
+const compareSettlementAmount = (a: SettlementRow, b: SettlementRow) => a.settled - b.settled;
+const SETTLEMENT_SORT: Partial<Record<string, (a: SettlementRow, b: SettlementRow) => number>> = {
+  VoucherDate: (a, b) => new Date(a.voucher_date).getTime() - new Date(b.voucher_date).getTime(),
+  BillAmount: (a, b) => a.bill_amount - b.bill_amount,
+  SettledAmou: compareSettlementAmount,
+  VoucherValu: compareSettlementAmount,
+  MOP: compareSettlementMop,
+  MOP1: compareSettlementMop,
+};
+
 export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) {
+  const request = useReportRequest();
+  const usersRequest = useReportRequest();
+  const [users, setUsers] = useState<string[]>([]);
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
   const [outletName, setOutletName] = useState(outlet || "THE BOSS CLUB");
@@ -1634,7 +1698,18 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
   const [account, setAccount] = useState("Select");
   const [user, setUser] = useState("Select");
   const [settled, setSettled] = useState(false);
-  const [data, setData] = useState<any>({ rows: [], totals: [], users: [], allowance: 0 });
+  const [data, setData] = useState<{ rows: SettlementRow[]; totals: { method: string; amount: number }[]; allowance: number }>({
+    rows: [], totals: [], allowance: 0,
+  });
+  const [sort, setSort] = useState<{ column: string; direction: "ascending" | "descending" }>();
+  const rows = useMemo(() => {
+    if (!sort) return data.rows;
+    const compare = SETTLEMENT_SORT[sort.column];
+    if (!compare) return data.rows;
+    const direction = sort.direction === "ascending" ? 1 : -1;
+    return [...data.rows].sort((a, b) => direction * compare(a, b));
+  }, [data.rows, sort]);
+  const appliedPath = useRef("");
   const [sel, setSel] = useState<string | null>(null);
   const [col, setCol] = useState(0);
   const [editId, setEditId] = useState<string | null>(null);
@@ -1642,41 +1717,40 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
   selRef.current = sel;
 
   useEffect(() => { setOutletName(outlet || "THE BOSS CLUB"); }, [outlet]);
+  useEffect(() => { void usersRequest.load("/api/reports/settlement/users", setUsers); }, []);
 
-  async function load(nextOutlet = outletName) {
+  function show() {
     const q = new URLSearchParams({
-      from, to, outlet: nextOutlet, mop, bill, account, user, settled: settled ? "1" : "0",
+      from, to, outlet: outletName, mop, bill, account, user, settled: settled ? "1" : "0",
     });
-    setData(await api.get(`/api/reports/settlement?${q}`));
+    appliedPath.current = `/api/reports/settlement?${q}`;
+    void request.load(appliedPath.current, setData);
   }
-  useEffect(() => { load(outlet || "THE BOSS CLUB").catch(() => null); }, [outlet]);
   useEffect(() => {
-    const rows = data.rows || [];
     if (!rows.length) { setSel(null); return; }
     setSel(rows[rows.length - 1].payment_id);
     setCol(0);
-  }, [data]);
+  }, [rows]);
   useLayoutEffect(() => {
-    const rows = data.rows || [];
     if (!rows.length || sel !== rows[rows.length - 1].payment_id) return;
+    if (document.activeElement?.matches(".set-sort")) return;
     const scroller = document.querySelector(".set-grid-wrap") as HTMLElement | null;
     if (!scroller) return;
     scroller.scrollTop = scroller.scrollHeight;
     const tr = scroller.querySelector("tbody tr:last-child") as HTMLElement | null;
     tr?.focus({ preventScroll: true });
-  }, [data, sel]);
+  }, [rows, sel]);
   useEffect(() => {
     function keys(e: globalThis.KeyboardEvent) {
       if (editId || document.querySelector(".su-dlg, .alert-dlg, .confirm-dlg")) return;
-      if (e.target instanceof HTMLSelectElement) return;
-      const rows = data.rows || [];
+      if (e.target instanceof Element && e.target.closest("button, input, select")) return;
       if (!rows.length) return;
-      const idx = Math.max(0, rows.findIndex((r: any) => r.payment_id === selRef.current));
+      const idx = Math.max(0, rows.findIndex((r) => r.payment_id === selRef.current));
       if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
         e.preventDefault();
         e.stopPropagation();
         if (e.key === "ArrowLeft") setCol((c) => Math.max(0, c - 1));
-        if (e.key === "ArrowRight") setCol((c) => Math.min(20, c + 1));
+        if (e.key === "ArrowRight") setCol((c) => Math.min(SETTLEMENT_COLUMNS.length - 1, c + 1));
         if (e.key === "ArrowDown") setSel(rows[Math.min(rows.length - 1, idx + 1)].payment_id);
         if (e.key === "ArrowUp") setSel(rows[Math.max(0, idx - 1)].payment_id);
         requestAnimationFrame(() => document.querySelector(".set-table td.cell-on")?.scrollIntoView({ block: "nearest", inline: "nearest" }));
@@ -1693,13 +1767,14 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
     return () => window.removeEventListener("keydown", keys, true);
   });
 
-  const tot = (m: string) => (data.totals || []).find((t: any) => t.method === m)?.amount || 0;
+  const tot = (m: string) => data.totals.find((t) => t.method === m)?.amount || 0;
   const bank = tot("CARD") + tot("UPI");
   const grand = tot("CASH") + bank + tot("MEMBER_CARD");
-  const users: string[] = data.users || [];
 
   return (
     <div className="set-page">
+      <ReportLoadStatus loading={request.loading} error={request.error} />
+      {usersRequest.error && <div className="report-load-status" role="alert">Could not load settlement users. {usersRequest.error}</div>}
       <div className="set-filter">
         <div className="set-fields">
           <div className="set-title">Select Filter</div>
@@ -1721,15 +1796,15 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
           </div>
           <div className="set-row">
             <label>User : <select className="win" value={user} onChange={(e) => setUser(e.target.value)}>
-              <option>Select</option>
+              <option value="Select">{usersRequest.loading ? "Loading users…" : "All users"}</option>
               {users.map((name) => <option key={name}>{name}</option>)}
             </select></label>
             <label className="set-check"><input type="checkbox" checked={settled} onChange={(e) => setSettled(e.target.checked)} /> Settlement</label>
           </div>
         </div>
         <div className="set-btns">
-          <button className="fn" onClick={() => void load()}>Show</button>
-          <button className="fn" onClick={() => window.print()}>Print</button>
+          <button className="fn" onClick={show}>Show</button>
+          <button className="fn" onKeyDown={ignoreRepeatedPrintKey} onClick={printPage}>Print</button>
           <button className="fn" onClick={onExit}>Exit</button>
         </div>
       </div>
@@ -1737,17 +1812,33 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
         <table className="data set-table">
           <thead>
             <tr>
-              {["TType","SDid","VoucherRecei","VoucherDate","BillNo","BillAmount","TableNo","RoomTable","Waiter","SettledAmou","Allowance","Remark","MOP","USERNAME","VoucherValu","VoucherNo","status","Min.Diff","OutletName","OutletGroup","OUTLETID","MOP1"].map((h) => <th key={h}>{h}</th>)}
+              {SETTLEMENT_COLUMNS.map((column) => {
+                if (!SETTLEMENT_SORT[column]) return <th key={column}>{column}</th>;
+                const direction = sort?.column === column ? sort.direction : undefined;
+                return (
+                  <th key={column} aria-sort={direction}>
+                    <button
+                      type="button"
+                      className="set-sort"
+                      onClick={() => setSort((current) => ({
+                        column,
+                        direction: current?.column === column && current.direction === "ascending" ? "descending" : "ascending",
+                      }))}
+                    >
+                      {column} <span aria-hidden="true">{direction === "ascending" ? "▲" : direction === "descending" ? "▼" : "↕"}</span>
+                    </button>
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {(data.rows || []).map((r: any) => {
+            {rows.map((r) => {
               const mode = mopCell(r.method, r.account);
               const cells = [
-                "SALE", "", r.receipt_no ?? "", stampGrid(r.voucher_date), r.bill_no ?? "",
-                inr(r.bill_amount), r.table_no ?? "", "", r.waiter ?? "", inr(r.settled), inr(r.allowance),
-                r.remark || "----", mode, r.username ?? "", inr(r.settled), r.voucher_no ?? "",
-                r.status ?? "", "0", r.outlet_name || outletName, "FNB", "", mode,
+                r.receipt_no ?? "", stampGrid(r.voucher_date), r.bill_no ?? "",
+                inr(r.bill_amount), r.table_no ?? "", r.waiter ?? "", inr(r.settled),
+                mode, r.username ?? "", inr(r.settled), r.status ?? "", r.outlet_name || outletName, mode,
               ];
               const on = r.payment_id === sel;
               return (
@@ -1763,7 +1854,7 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
                   }}
                 >
                   {cells.map((text, c) => (
-                    <td key={c} className={`${[5, 9, 10, 14].includes(c) ? "num" : ""} ${on && c === col ? "cell-on" : ""}`.trim()}>
+                    <td key={c} className={`${[3, 6, 9].includes(c) ? "num" : ""} ${on && c === col ? "cell-on" : ""}`.trim()}>
                       {text}
                     </td>
                   ))}
@@ -1790,57 +1881,9 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
           paymentId={editId}
           outlet={outletName}
           onClose={() => setEditId(null)}
-          onChanged={() => { void load(); }}
+          onChanged={() => { void request.load(appliedPath.current, setData); }}
         />
       )}
-    </div>
-  );
-}
-
-export function BookingReport({ onExit }: { onExit: () => void }) {
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
-  const [rows, setRows] = useState<any[]>([]);
-  useEffect(() => { api.get<any[]>("/api/bookings").then(setRows).catch(() => null); }, []);
-  const total = rows.reduce((s, r) => s + (r.advance || 0), 0);
-  return (
-    <div className="rpt-page plain">
-      <div className="rpt-bar">
-        <label>Booking No. <input className="win" style={{ width: 80 }} /></label>
-        <label>Mobile No : <input className="win" style={{ width: 100 }} /></label>
-        <label>User Name: <select className="win"><option>Select</option></select></label>
-        <span className="spacer" />
-        <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-        <span>To</span>
-        <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} />
-        <button className="fn">Refresh</button>
-      </div>
-      <div className="bkr-title">Card Recharge Data &nbsp; Card against Bill Report</div>
-      <table className="data">
-        <thead>
-          <tr>
-            <th>CardNo</th><th>OutletName</th><th>BookingDate</th><th>Total</th>
-            <th>Consume_A...</th><th>Balance_Am...</th><th>Cash</th><th>Card</th><th>Wallet</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr className="grp">
-            <td>Total :</td><td /><td /><td>{inr(total)}</td><td>0.00</td><td>0</td><td /><td /><td />
-          </tr>
-          {rows.map((r) => (
-            <tr key={r.id}>
-              <td>{r.card_no}</td><td>{r.outlet}</td><td>{r.created_at}</td><td>{inr(r.advance)}</td>
-              <td>0.00</td><td>0</td><td /><td /><td />
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <div className="grid-fill gray" />
-      <div className="rpt-foot">
-        <button className="fn">Print</button>
-        <button className="fn">Export</button>
-        <button className="fn" onClick={onExit}>Close</button>
-      </div>
     </div>
   );
 }
@@ -1850,6 +1893,19 @@ export function CardBlock({ onExit }: { onExit: () => void }) {
   const [msg, setMsg] = useState("");
   const [askExit, setAskExit] = useState(false);
   const cardRef = useRef<HTMLInputElement>(null);
+  const [blocked, setBlocked] = useState<{ id: string; card_number: string; customer_name: string; block_reason: string }[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  async function loadBlocked() {
+    try {
+      setBlocked(await api.get<typeof blocked>("/api/cards/blocked"));
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Could not load blocked cards");
+    }
+  }
+
+  useEffect(() => { void loadBlocked(); }, []);
+
   function requestExit() {
     if (q.trim()) setAskExit(true);
     else onExit();
@@ -1866,15 +1922,33 @@ export function CardBlock({ onExit }: { onExit: () => void }) {
     return () => window.removeEventListener("keydown", keys, true);
   });
   async function block() {
+    if (busy) return;
     const number = cardNoDigits(q);
     if (!cardNoReady(number)) { stayOnCard(cardRef.current); return; }
+    setBusy(true);
     try {
-      const found = await api.get<any[]>(`/api/cards?q=${encodeURIComponent(number)}`);
-      if (!found[0]) { setMsg("Card not found"); return; }
-      await api.post(`/api/cards/${found[0].id}/block`, { reason: "Blocked from Card Block" });
-      setMsg(`Blocked ${found[0].card_number}`);
+      const [card] = await api.get<typeof blocked>(`/api/cards?q=${encodeURIComponent(number)}&exact=1`);
+      if (!card) { setMsg("Card not found"); return; }
+      await api.post(`/api/cards/${card.id}/block`, { reason: "Customer request" });
+      await loadBlocked();
+      setQ("");
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : "Failed");
+      setMsg(e instanceof Error ? e.message : "Could not block card");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function unblock(id: string) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await api.post(`/api/cards/${id}/unblock`, { reason: "Unblocked from Card Block" });
+      await loadBlocked();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Could not unblock card");
+    } finally {
+      setBusy(false);
     }
   }
   return (
@@ -1882,9 +1956,26 @@ export function CardBlock({ onExit }: { onExit: () => void }) {
       <div className="cb-head">Enter Card No.</div>
       <input ref={cardRef} className="win cb-input" data-num="card" inputMode="numeric" maxLength={4} value={q} onChange={(e) => setQ(cardNoDigits(e.target.value))} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void block(); } }} onBlur={() => { if (q && !cardNoReady(q)) stayOnCard(cardRef.current); }} />
       <div className="cb-btns">
-        <button className="fn" onClick={block}>Block Card</button>
+        <button className="fn" disabled={busy} onClick={block}>Block Card</button>
         <button className="fn" onClick={requestExit}>Exit</button>
       </div>
+      <div className="set-grid-wrap">
+        <table className="data">
+          <thead><tr><th>Blocked Card No.</th><th>Customer</th><th>Reason</th><th /></tr></thead>
+          <tbody>
+            {blocked.map((card) => (
+              <tr key={card.id}>
+                <td>{card.card_number}</td>
+                <td>{card.customer_name}</td>
+                <td>{card.block_reason}</td>
+                <td><button className="fn" disabled={busy} onClick={() => void unblock(card.id)}>Unblock</button></td>
+              </tr>
+            ))}
+            {!blocked.length && <tr><td colSpan={4}>No blocked cards</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {askExit && <ConfirmAsk message="Exit without save?" onYes={onExit} onNo={() => setAskExit(false)} />}
       {msg && <AlertBox message={msg} onClose={() => setMsg("")} />}
     </div>
   );
@@ -2129,6 +2220,7 @@ function shortBillNo(raw?: string | number | null) {
 }
 
 function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) {
+  const request = useReportRequest();
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
   const [outletName, setOutletName] = useState(outlet || "BAR");
@@ -2136,6 +2228,10 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
   const [tableNo, setTableNo] = useState("");
   const [status, setStatus] = useState<"all" | "active" | "cancelled">("all");
   const [discounted, setDiscounted] = useState(false);
+  const [complimentaryOnly, setComplimentaryOnly] = useState(false);
+  const [complimentaryAccountId, setComplimentaryAccountId] = useState("");
+  const [complimentaryAccounts, setComplimentaryAccounts] = useState<CompAccount[]>([]);
+  const [complimentaryAccountsError, setComplimentaryAccountsError] = useState(false);
   const [data, setData] = useState<any>({ rows: [], total: 0 });
   const [sel, setSel] = useState<string | null>(null);
   const [billEdit, setBillEdit] = useState<{
@@ -2161,7 +2257,16 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
   }, [outlet]);
 
   useEffect(() => {
-    api.get<any[]>("/api/products").then((list) => setCatalog(list || [])).catch(() => null);
+    if (!billEdit || catalog.length) return;
+    const controller = new AbortController();
+    api.get<typeof catalog>("/api/products", controller.signal).then(setCatalog).catch(() => null);
+    return () => controller.abort();
+  }, [billEdit, catalog.length]);
+
+  useEffect(() => {
+    api.get<CompAccount[]>("/api/complimentary")
+      .then(setComplimentaryAccounts)
+      .catch(() => setComplimentaryAccountsError(true));
   }, []);
 
   async function load(nextOutlet = outletName) {
@@ -2173,11 +2278,14 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
       table: tableNo,
       status,
       discounted: discounted ? "1" : "0",
+      complimentary: complimentaryOnly ? "1" : "0",
+      complimentaryAccountId,
     });
-    const next = await api.get<any>(`/api/reports/bills?${q}`);
-    setData(next);
-    const rows = next.rows || [];
-    setSel(rows.length ? String(rows[rows.length - 1].invoice_id || rows[rows.length - 1].invoice_number) : null);
+    await request.load<any>(`/api/reports/bills?${q}`, (next) => {
+      setData(next);
+      const rows = next.rows || [];
+      setSel(rows.length ? String(rows[rows.length - 1].invoice_id || rows[rows.length - 1].invoice_number) : null);
+    });
   }
 
   function onFilterEnter(e: KeyboardEvent) {
@@ -2262,6 +2370,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
 
   return (
     <div className="set-page bill-rpt-page">
+      <ReportLoadStatus loading={request.loading} error={request.error} />
       <div className="set-filter bill-rpt-filter">
         <div className="set-fields">
           <div className="set-row">
@@ -2279,6 +2388,15 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
             <label className="set-check"><input type="radio" name="bill-status" checked={status === "active"} onChange={() => setStatus("active")} /> Active Only</label>
             <label className="set-check"><input type="checkbox" checked={discounted} onChange={(e) => setDiscounted(e.target.checked)} /> Discounted Bill Only</label>
           </div>
+          <div className="set-row">
+            <label className="set-check"><input type="checkbox" checked={complimentaryOnly} onChange={(e) => setComplimentaryOnly(e.target.checked)} onKeyDown={onFilterEnter} /> Complimentary Only</label>
+            <label>Complimentary A/C <select className="win" value={complimentaryAccountId} onChange={(e) => setComplimentaryAccountId(e.target.value)} disabled={complimentaryAccountsError}>
+              <option value="">{complimentaryAccountsError ? "Could not load accounts" : "All accounts"}</option>
+              {complimentaryAccounts.map((account) => (
+                <option key={account.id} value={account.id}>{String(account.code).padStart(3, "0")} - {account.name}</option>
+              ))}
+            </select></label>
+          </div>
         </div>
         <div className="set-btns">
           <button type="button" className="fn" onClick={() => void load()}>Show</button>
@@ -2287,7 +2405,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
             const row = rows.find((r: any) => String(r.invoice_id || r.invoice_number) === sel);
             if (row) openRestaurantBill(row);
           }}>Details</button>
-          <button type="button" className="fn" onClick={() => window.print()}>Print</button>
+          <button type="button" className="fn" onKeyDown={ignoreRepeatedPrintKey} onClick={printPage}>Print</button>
           <button type="button" className="fn" disabled tabIndex={-1}>Export</button>
           <button type="button" className="fn" onClick={onExit}>Exit</button>
         </div>
@@ -2296,7 +2414,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
         <table className="data set-table bill-rpt-table">
           <thead>
             <tr>
-              {["Bill Date", "BillNo", "TableNo", "Net Amount", "Service Charge", "Remark", "UserName", "CASH", "card", "B.T.C.", "WALLET", "ROOM TRANSFER", "Other MOD", "ALLOWAN"].map((h) => (
+              {["Bill Date", "BillNo", "TableNo", "Net Amount", "Service Charge", "Complimentary A/C", "Remark", "UserName", "CASH", "card", "B.T.C.", "WALLET", "ROOM TRANSFER", "Other MOD", "ALLOWAN"].map((h) => (
                 <th key={h}>{h}</th>
               ))}
             </tr>
@@ -2319,6 +2437,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
                   <td>{tableLabel}</td>
                   <td className="num">{inr(r.net_amount)}</td>
                   <td className="num">{Number(r.service_charge) ? inr(r.service_charge) : ""}</td>
+                  <td>{r.complimentary_account || (r.is_complimentary ? "Complimentary" : "")}</td>
                   <td>{r.remark || ""}</td>
                   <td>{r.username || ""}</td>
                   <td className="num">{Number(r.cash) ? inr(r.cash) : ""}</td>
@@ -2344,7 +2463,6 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
         <PrepareBillDialog
           orderId={billEdit.orderId}
           existingInvoiceId={billEdit.invoiceId}
-          updateOnly
           table={billEdit.table}
           outlet={billEdit.outlet}
           waiter=""
@@ -2425,7 +2543,7 @@ function KotAddTableDialog({
     if (!id) { setErr("KOT still loading"); return; }
     printRef.current?.focus();
     try {
-      await api.post(`/api/kots/${id}/reprint`);
+      await reprintKot(id);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Print failed");
     }
@@ -2436,12 +2554,12 @@ function KotAddTableDialog({
     function keys(e: globalThis.KeyboardEvent) {
       if (document.querySelector(".confirm-dlg, .alert-dlg")) return;
       if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close.current(); return; }
-      if (e.key === "F6") { e.preventDefault(); e.stopPropagation(); reprintRef.current(); return; }
+      if (e.key === "F6") { e.preventDefault(); e.stopPropagation(); if (!e.repeat) reprintRef.current(); return; }
       if (e.key === "Enter") {
         e.preventDefault();
         e.stopPropagation();
         printRef.current?.focus();
-        reprintRef.current();
+        if (!e.repeat) reprintRef.current();
         return;
       }
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -2572,6 +2690,7 @@ function KotAddTableDialog({
 }
 
 function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) {
+  const request = useReportRequest();
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
   const [outletName, setOutletName] = useState(outlet || "BAR");
@@ -2610,10 +2729,11 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
       bill: billNo.trim(),
       complementary,
     });
-    const next = await api.get<any>(`/api/reports/kots?${q}`);
-    setData(next);
-    const rows = next.rows || [];
-    setSel(rows.length ? String(rows[rows.length - 1].id || rows[rows.length - 1].kot_number) : null);
+    await request.load<any>(`/api/reports/kots?${q}`, (next) => {
+      setData(next);
+      const rows = next.rows || [];
+      setSel(rows.length ? String(rows[rows.length - 1].id || rows[rows.length - 1].kot_number) : null);
+    });
   }
 
   function onFilterEnter(e: KeyboardEvent) {
@@ -2649,7 +2769,7 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
       return;
     }
     try {
-      await api.post(`/api/kots/${id}/reprint`);
+      await reprintKot(id);
     } catch (e) {
       setMiss(e instanceof Error ? e.message : "Reprint failed");
     }
@@ -2667,7 +2787,7 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
       if (e.key === "F1") {
         e.preventDefault();
         e.stopPropagation();
-        void reprintSelected();
+        if (!e.repeat) void reprintSelected();
         return;
       }
       const typing = (e.target as HTMLElement | null)?.closest("input, select, textarea");
@@ -2703,6 +2823,7 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
 
   return (
     <div className="set-page kot-rpt-page">
+      <ReportLoadStatus loading={request.loading} error={request.error} />
       <div className="set-filter bill-rpt-filter">
         <div className="set-fields">
           <div className="set-title">Select Filter &nbsp;— Restaurant KOT Report - {titleOutlet}</div>
@@ -2725,7 +2846,7 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
         <div className="set-btns">
           <button type="button" className="fn" onClick={() => void load()}>Show</button>
           <button type="button" className="fn" disabled tabIndex={-1}>Excel</button>
-          <button type="button" className="fn" onClick={() => window.print()}>Print</button>
+          <button type="button" className="fn" onKeyDown={ignoreRepeatedPrintKey} onClick={printPage}>Print</button>
           <button type="button" className="fn" onClick={onExit}>Exit</button>
         </div>
       </div>
@@ -2788,6 +2909,8 @@ type CardSettleRow = {
   card_no: string;
   guest_name: string;
   booking_date: string;
+  payment_mode: string;
+  amount_paid: number;
   card_balance: number;
   remaining_balance: number;
 };
@@ -2842,9 +2965,7 @@ function CardBillDialog({
     busyRef.current = invoiceId;
     setBusy(invoiceId);
     try {
-      const res = await api.post(`/api/invoices/${invoiceId}/print`);
-      const { handleBillPrintResponse } = await import("./printBillHtml");
-      const out = await handleBillPrintResponse(res as { ok?: boolean; mode?: string; html?: string; printed?: boolean; error?: string });
+      const out = await printBill(invoiceId);
       if (!out.ok) setWarn(out.error || "Print failed");
     } catch (e) {
       setWarn(e instanceof Error ? e.message : "Print failed");
@@ -2890,7 +3011,7 @@ function CardBillDialog({
           selRef.current = idx;
           setSel(idx);
         }
-        void printInvoice(invoiceId);
+        if (!e.repeat) void printInvoice(invoiceId);
       }
     }
     window.addEventListener("keydown", keys, true);
@@ -2959,7 +3080,7 @@ function CardBillDialog({
   );
 }
 
-export function CardSettlementReport({ onExit }: { onExit: () => void }) {
+export function CardSettlementReport({ onExit, title = "Card Settlement Report" }: { onExit: () => void; title?: string }) {
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
   const [card, setCard] = useState("");
@@ -3035,7 +3156,7 @@ export function CardSettlementReport({ onExit }: { onExit: () => void }) {
     <div className="set-page">
       <div className="set-filter">
         <div className="set-fields">
-          <div className="set-title">Card Settlement Report</div>
+          <div className="set-title">{title}</div>
           <div className="set-row">
             <label>Date From : <input ref={fromRef} className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
             <label>To Date : <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
@@ -3054,6 +3175,8 @@ export function CardSettlementReport({ onExit }: { onExit: () => void }) {
               <th>Card No</th>
               <th>Guest Name</th>
               <th>Booking Date</th>
+              <th>Payment Mode</th>
+              <th>Amount Paid</th>
               <th>Card Balance</th>
               <th>Remaining Balance</th>
               <th />
@@ -3071,6 +3194,8 @@ export function CardSettlementReport({ onExit }: { onExit: () => void }) {
                 <td>{r.card_no}</td>
                 <td>{r.guest_name}</td>
                 <td>{stampGrid(r.booking_date)}</td>
+                <td>{r.payment_mode || "—"}</td>
+                <td className="num">{inr(r.amount_paid)}</td>
                 <td className="num">{inr(r.card_balance)}</td>
                 <td className="num">{inr(r.remaining_balance)}</td>
                 <td>
@@ -3169,11 +3294,98 @@ function TransferReport({ kind, onExit }: { kind: "item" | "table"; onExit: () =
   );
 }
 
+type KotCancellationPage = {
+  rows: Array<{
+    id: string;
+    created_at: string;
+    kot_number: string;
+    username: string | null;
+    table_no: string | null;
+    table_name: string | null;
+    remark: string | null;
+  }>;
+  hasNext: boolean;
+};
+
+function KotCancellationReport({ onExit }: { onExit: () => void }) {
+  const today = isoDay();
+  const [filters, setFilters] = useState({ from: `${today}T00:00`, to: `${today}T23:59`, username: "", tableNo: "" });
+  const [applied, setApplied] = useState(filters);
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<KotCancellationPage>({ rows: [], hasNext: false });
+  const request = useReportRequest();
+
+  function load(nextFilters: typeof filters, nextPage: number) {
+    const from = new Date(nextFilters.from);
+    const to = new Date(nextFilters.to);
+    to.setSeconds(59, 999);
+    const query = new URLSearchParams({
+      ...nextFilters, from: from.toISOString(), to: to.toISOString(), page: String(nextPage),
+    });
+    void request.load<KotCancellationPage>(`/api/reports/kot-cancellations?${query}`, (result) => {
+      setApplied(nextFilters);
+      setPage(nextPage);
+      setData(result);
+    });
+  }
+  useEffect(() => { load(filters, 1); }, []);
+
+  return (
+    <section className="rpt-page transfer-report" aria-labelledby="kot-cancellation-title">
+      <header className="transfer-heading">
+        <h1 id="kot-cancellation-title">KOT Cancellation Report</h1>
+        <button type="button" className="fn" onClick={onExit}>Exit</button>
+      </header>
+      <form className="rpt-bar transfer-filters kot-cancellation-controls" onSubmit={(event) => {
+        event.preventDefault();
+        load(filters, 1);
+      }}>
+        <label>From <input type="datetime-local" required value={filters.from} onChange={(e) => setFilters({ ...filters, from: e.target.value })} /></label>
+        <label>To <input type="datetime-local" required min={filters.from} value={filters.to} onChange={(e) => setFilters({ ...filters, to: e.target.value })} /></label>
+        <label>Username <input value={filters.username} onChange={(e) => setFilters({ ...filters, username: e.target.value })} /></label>
+        <label>Table No. <input value={filters.tableNo} onChange={(e) => setFilters({ ...filters, tableNo: e.target.value })} /></label>
+        <button className="fn" disabled={request.loading}>Show</button>
+      </form>
+      <ReportLoadStatus loading={request.loading} error={request.error} />
+      <div className="transfer-grid transfer-grid--item" tabIndex={0} role="region" aria-labelledby="kot-cancellation-title" aria-busy={request.loading}>
+        <table>
+          <thead>
+            <tr>
+              <th className="transfer-created_at" scope="col">Cancelled At</th>
+              <th scope="col">KOT No.</th><th scope="col">Username</th><th scope="col">Table No.</th>
+              <th scope="col">Table Name</th><th scope="col">Remark</th>
+            </tr>
+          </thead>
+          <tbody>
+            {!request.loading && !request.error && data.rows.map((row) => (
+              <tr key={row.id}>
+                <td className="transfer-created_at">{stampGrid(row.created_at)}</td>
+                <td>{row.kot_number}</td><td>{row.username || "—"}</td><td>{row.table_no || "—"}</td>
+                <td>{row.table_name || "—"}</td><td>{row.remark || "—"}</td>
+              </tr>
+            ))}
+            {!request.loading && !request.error && !data.rows.length && (
+              <tr><td colSpan={6} className="transfer-empty">No KOT cancellations match these filters.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {(page > 1 || data.hasNext) && (
+        <div className="rpt-bar transfer-filters kot-cancellation-controls">
+          <button type="button" className="fn" disabled={request.loading || page === 1} onClick={() => load(applied, page - 1)}>Previous</button>
+          <span aria-live="polite">Page {page}</span>
+          <button type="button" className="fn" disabled={request.loading || !data.hasNext} onClick={() => load(applied, page + 1)}>Next</button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function ReportHost({ view, outlet, onExit }: { view: NavView; outlet?: string; onExit: () => void }) {
   const supported = [
     "item-wise-detail", "point-of-sales", "gst-report", "item-wise-sale", "item-wise-group",
     "settlement-report", "card-settlement-report", "booking-report", "card-block",
-    "advance-booking", "kot-report", "bill-report", "history", "reports", "time-sale", "tax-wise", "item-transfer-report", "table-transfer-report",
+    "advance-booking", "kot-report", "kot-cancellation-report", "bill-report", "history", "reports", "time-sale", "tax-wise", "item-transfer-report", "table-transfer-report",
   ].includes(view);
   useEffect(() => {
     if (!supported) onExit();
@@ -3188,10 +3400,11 @@ export function ReportHost({ view, outlet, onExit }: { view: NavView; outlet?: s
   if (view === "table-transfer-report") return <TransferReport key={view} kind="table" onExit={onExit} />;
   if (view === "settlement-report") return <SettlementReport outlet={outlet} onExit={onExit} />;
   if (view === "card-settlement-report") return <CardSettlementReport onExit={onExit} />;
-  if (view === "booking-report") return <BookingReport onExit={onExit} />;
+  if (view === "booking-report") return <CardSettlementReport onExit={onExit} title="Booking Report" />;
   if (view === "card-block") return <CardBlock onExit={onExit} />;
   if (view === "advance-booking") return <AdvanceBooking onExit={onExit} />;
   if (view === "kot-report") return <KotReport outlet={outlet} onExit={onExit} />;
+  if (view === "kot-cancellation-report") return <KotCancellationReport onExit={onExit} />;
   if (view === "bill-report" || view === "history") return <BillReport outlet={outlet} onExit={onExit} />;
   if (view === "reports") return <GstReport onExit={onExit} />;
   if (view === "time-sale" || view === "tax-wise") {

@@ -110,6 +110,7 @@ export type NavView =
   | "time-sale"
   | "tax-wise"
   | "kot-report"
+  | "kot-cancellation-report"
   | "bill-report"
   | "settlement-report"
   | "card-settlement-report"
@@ -118,3 +119,18 @@ export type NavView =
   | "card-block"
   | "item-transfer-report"
   | "table-transfer-report";
+
+export type BillLineEdit =
+  | { kind: "add"; id: string; productId: string; qty: number; outlet: string }
+  | { kind: "product"; ids: string[]; productId: string; outlet: string }
+  | { kind: "qty"; ids: string[]; qty: number }
+  | { kind: "price"; ids: string[]; price: number };
+
+export type BillDetails = {
+  mobile: string;
+  pax: string;
+  address: string;
+  remark: string;
+  excludeItemIds: string[];
+  discountPct?: number;
+};

@@ -1,124 +1,134 @@
 import type { KotPrintPayload } from "./types.js";
-import { KOT_COLS } from "./escpos.js";
 
-function esc(s: string): string {
-  return String(s)
+interface KotTicket {
+  department: KotPrintPayload["station"];
+  kotNo: string | number;
+  tableNo: string | number;
+  date: string;
+  time: string;
+  steward: string;
+  orderType: "NEW ORDER" | "RUNNING ORDER";
+  copyType: "Original Copy" | "Duplicate Copy";
+  items: KotPrintPayload["items"];
+  printTime: string;
+  operatorName: string;
+  remark?: string | null;
+}
+
+function esc(value: string | number): string {
+  return String(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
 
-function formatKotDate(iso: string): string {
-  const when = new Date(iso);
-  if (Number.isNaN(when.getTime())) return iso;
-  const day = when.getDate();
-  const mon = when.toLocaleString("en-GB", { month: "short" });
-  const year = when.getFullYear();
-  const hh = String(when.getHours()).padStart(2, "0");
-  const mm = String(when.getMinutes()).padStart(2, "0");
-  const ss = String(when.getSeconds()).padStart(2, "0");
-  return `${day} ${mon} ${year}  ${hh}:${mm}:${ss}`;
+function clockTime(when: Date): string {
+  return when.toLocaleTimeString("en-GB", { hourCycle: "h23" });
 }
 
-function padField(label: string, value: string): string {
-  const head = label.length >= 10 ? `${label}:` : `${label}${" ".repeat(10 - label.length)}:`;
-  return `${head} ${value}`;
+export function formatKotHtml(payload: KotPrintPayload, printedAt = new Date()): string {
+  const createdAt = new Date(payload.createdAt);
+  const validDate = Number.isFinite(createdAt.getTime());
+  return renderKotTicket({
+    department: payload.station,
+    kotNo: payload.kotNumber.replace(/^KOT-/i, ""),
+    tableNo: payload.tableCode,
+    date: validDate
+      ? createdAt.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+      : payload.createdAt,
+    time: validDate ? clockTime(createdAt) : "",
+    steward: Array.from(payload.waiter?.trim() ?? "")[0]?.toUpperCase() ?? "",
+    orderType: payload.orderBanner ?? "RUNNING ORDER",
+    copyType: payload.reprint ? "Duplicate Copy" : "Original Copy",
+    items: payload.items.map((item) => ({ ...item, name: item.name.toUpperCase() })),
+    printTime: clockTime(printedAt),
+    operatorName: payload.operatorName ?? "",
+    remark: payload.remark?.trim(),
+  });
 }
 
-/** HTML preview of KOT — cancel/minus rows use strikethrough like native IBS. */
-export function formatKotHtml(payload: KotPrintPayload): string {
-  const kotNo = String(payload.kotNumber).replace(/\D/g, "") || payload.kotNumber;
-  const station = payload.station === "BAR" ? "BAR" : "KITCHEN";
-  const banner = payload.orderBanner === "NEW ORDER" ? "NEW ORDER" : "RUNNING ORDER";
-  const copy = payload.reprint ? "Reprint Copy" : "Original Copy";
-  const remark = String(payload.remark ?? "").trim();
-
-  const itemRows = payload.items
-    .map((it) => {
-      const cancel = it.qty < 0;
-      const qty = String(it.qty);
-      const name = esc(it.name.toUpperCase());
-      const cls = cancel ? "item cancel" : "item";
-      return `<div class="${cls}"><span class="n">${name}</span><span class="bar">|</span><span class="q">${esc(qty)}</span></div>`;
-    })
-    .join("\n");
+export function renderKotTicket(ticket: KotTicket): string {
+  const rows = ticket.items.map(({ name, qty }) =>
+    `<div class="item${qty < 0 ? " cancelled" : ""}"><span>${esc(name)}</span><span class="qty">${qty.toFixed(2)}</span></div>`,
+  ).join("\n");
+  const time = ticket.time ? `    <span class="time">${esc(ticket.time)}</span>` : "";
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<title>KOT ${esc(kotNo)} preview</title>
+<meta charset="utf-8">
+<title>KOT ${esc(ticket.kotNo)}</title>
 <style>
-  html, body { margin: 0; background: #777; font-family: "Consolas", "Courier New", monospace; }
-  .slip {
-    width: ${KOT_COLS}ch;
-    margin: 24px auto;
-    padding: 16px 14px 28px;
+  @page { size: auto; margin: 0; }
+  html { background: #fff; }
+  body {
+    box-sizing: border-box;
+    width: 72mm;
+    margin: 0 auto;
+    padding: 2mm;
+    color: #000;
     background: #fff;
-    color: #111;
-    font-size: 13px;
-    line-height: 1.25;
-    white-space: pre;
-    box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    font: 500 13pt/1.35 Arial, "Helvetica Neue", Helvetica, sans-serif;
+    -webkit-font-smoothing: none;
   }
-  .c { text-align: center; white-space: normal; }
-  .title { font-size: 28px; font-weight: 900; letter-spacing: 1px; }
-  .sub { font-weight: 800; margin-bottom: 8px; }
-  .meta { font-weight: 700; }
-  .banner { text-align: center; font-weight: 900; text-decoration: underline; text-underline-offset: 2px; }
-  .copy { text-align: center; font-weight: 700; margin-bottom: 6px; }
-  .rule { border-top: 3px solid #111; margin: 4px 0; }
+  h1 { margin: 0 0 2px; text-align: center; font-size: 18pt; font-weight: 800; letter-spacing: 1px; }
+  .subtitle { margin: 0 0 10px; text-align: center; font-weight: 400; }
+  .meta {
+    display: grid;
+    grid-template-columns: 17mm minmax(0, 1fr);
+    row-gap: 4px;
+    margin: 0;
+    font-weight: 400;
+  }
+  .meta dd { margin: 0; overflow-wrap: anywhere; display: flex; }
+  .meta dd::before { content: ":"; }
+  .date { white-space: pre-wrap; }
+  .time { white-space: nowrap; }
+  .order { margin: 10px 0 12px; }
+  .order div {
+    font-size: 14pt;
+    font-weight: 800;
+    text-decoration: underline;
+    text-decoration-thickness: 2px;
+    text-underline-offset: 3px;
+  }
   .head, .item {
     display: grid;
-    grid-template-columns: 1fr 1ch 3ch;
-    font-weight: 700;
-    white-space: normal;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    column-gap: 2mm;
+    break-inside: avoid;
   }
-  .head { font-weight: 900; }
-  .q { text-align: right; }
-  .item.cancel {
-    position: relative;
-    text-decoration: line-through;
-    text-decoration-thickness: 2px;
-  }
-  .item.cancel::after {
-    content: "";
-    position: absolute;
-    left: 0; right: 0;
-    top: 50%;
-    border-top: 2px solid #111;
-    transform: translateY(-50%);
-    pointer-events: none;
-  }
-  .hint {
-    margin: 12px auto 0;
-    width: ${KOT_COLS}ch;
-    color: #eee;
-    font: 12px/1.4 Tahoma, sans-serif;
-    text-align: center;
-  }
+  .head { font-weight: 400; border-bottom: 1px dashed #000; }
+  .item { font-weight: 600; overflow-wrap: anywhere; }
+  .items { border-bottom: 1px dashed #000; }
+  .cancelled span { text-decoration: line-through; text-decoration-thickness: 2px; }
+  .qty { text-align: right; white-space: nowrap; }
+  .remark { margin: 4px 0 0; overflow-wrap: anywhere; }
+  footer { padding-bottom: 10mm; break-inside: avoid; }
+  .end { margin: 14px 0; text-align: center; font-weight: 400; }
+  .operator { display: flex; justify-content: space-between; gap: 2mm; font-size: 12pt; font-weight: 400; }
+  .operator span:last-child { text-align: right; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
-  <div class="slip">
-    <div class="c title">${esc(station)}</div>
-    <div class="c sub">Restaurant KOT</div>
-    <div class="meta">${esc(padField("KOT No.", kotNo))}</div>
-    <div class="meta">${esc(padField("Table No.", payload.tableCode))}</div>
-    <div class="meta">${esc(padField("Date", formatKotDate(payload.createdAt)))}</div>
-    <div class="meta">${esc(padField("Stward", payload.waiter?.trim() || ""))}</div>
-    <br/>
-    <div class="banner">${esc(banner)}</div>
-    <div class="copy">${esc(copy)}</div>
-    <div class="rule"></div>
-    <div class="head"><span>Item Name</span><span>|</span><span class="q">Qty</span></div>
-    <div class="rule"></div>
-    ${itemRows}
-    <div class="rule"></div>
-    ${remark ? `<div class="meta">${esc(remark)}</div>` : ""}
-  </div>
-  <div class="hint">KOT HTML preview — cancel/minus rows must show a straight strike through the item.</div>
+  <h1>${esc(ticket.department)}</h1>
+  <p class="subtitle">Restaurant KOT</p>
+  <dl class="meta">
+    <dt>KOT No.</dt><dd><span>${esc(ticket.kotNo)}</span></dd>
+    <dt>Table No.</dt><dd><span>${esc(ticket.tableNo)}</span></dd>
+    <dt>Date</dt><dd><span class="date">${esc(ticket.date)}${time}</span></dd>
+    <dt>Stward</dt><dd><span>${esc(ticket.steward)}</span></dd>
+  </dl>
+  <div class="order"><div>${esc(ticket.orderType)}</div><div>${esc(ticket.copyType)}</div></div>
+  <div class="head"><span>Item Name</span><span class="qty">Qty</span></div>
+  <div class="items">${rows}</div>
+  ${ticket.remark ? `<p class="remark">${esc(ticket.remark)}</p>` : ""}
+  <footer>
+    <p class="end">--- END ---</p>
+    <div class="operator"><time>${esc(ticket.printTime)}</time><span>${esc(ticket.operatorName.toUpperCase())}</span></div>
+  </footer>
 </body>
 </html>`;
 }

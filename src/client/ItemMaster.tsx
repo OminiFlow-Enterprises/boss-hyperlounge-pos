@@ -236,6 +236,11 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
   const [nextCode, setNextCode] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
+  const [nameFilter, setNameFilter] = useState("");
+  const visibleItems = useMemo(() => {
+    const query = nameFilter.trim().toLowerCase();
+    return query ? items.filter((item) => item.name.toLowerCase().includes(query)) : items;
+  }, [items, nameFilter]);
   const [sku, setSku] = useState("");
   const [salesGroup, setSalesGroup] = useState("");
   const [itemGroup, setItemGroup] = useState("");
@@ -334,12 +339,12 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
   }, [groupOpen]);
 
   useEffect(() => {
-    if (listSel > items.length - 1) setListSel(items.length ? items.length - 1 : 0);
-  }, [items.length, listSel]);
+    if (listSel > visibleItems.length - 1) setListSel(Math.max(0, visibleItems.length - 1));
+  }, [visibleItems.length, listSel]);
 
   useLayoutEffect(() => {
     scrollBoxRow(listRef.current, listRef.current?.querySelector("tbody tr.on") ?? null);
-  }, [listSel, items.length]);
+  }, [listSel, visibleItems]);
 
   function focusName(selectAll = false) {
     const el = nameRef.current;
@@ -355,6 +360,7 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
   function startNew(code?: string) {
     setEditingId(null);
     setName("");
+    setNameFilter("");
     setSku(code ?? nextCode);
     setSalesGroup("");
     setItemGroup("");
@@ -373,9 +379,10 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
     setTimeout(() => focusName(false), 0);
   }
 
-  function edit(item: MasterItem) {
-    const idx = items.findIndex((it) => it.id === item.id);
+  function edit(item: MasterItem, allItems = items) {
+    const idx = allItems.findIndex((it) => it.id === item.id);
     if (idx >= 0) setListSel(idx);
+    setNameFilter("");
     setEditingId(item.id);
     setName(item.name);
     setSku(item.sku);
@@ -519,7 +526,7 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
         const saved = await api.put<MasterItem>(`/api/items/${editingId}`, body);
         const data = await reload();
         const fresh = data.items.find((it) => it.id === saved.id);
-        if (fresh) edit(fresh);
+        if (fresh) edit(fresh, data.items);
       } else {
         await api.post("/api/items", body);
         const data = await reload();
@@ -541,7 +548,6 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
       await api.del(`/api/items/${id}`);
       const data = await reload();
       onSaved();
-      setListSel((i) => Math.max(0, Math.min(i, Math.max(0, data.items.length - 1))));
       if (editingId === id) startNew(data.nextCode);
       else listRef.current?.focus();
     } catch (e) {
@@ -586,7 +592,7 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
     const prefix = (now - findAt.current < 800 ? findBuf.current : "") + ch.toLowerCase();
     findBuf.current = prefix;
     findAt.current = now;
-    const rows = items.map((it, i) => ({ it, i }));
+    const rows = visibleItems.map((it, i) => ({ it, i }));
     const order = prefix.length === 1
       ? [...rows.slice(listSel + 1), ...rows.slice(0, listSel + 1)]
       : [...rows.slice(listSel), ...rows.slice(0, listSel)];
@@ -598,17 +604,17 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
     if ((e.target as HTMLElement).closest("button")) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setListSel((i) => Math.min(Math.max(items.length - 1, 0), i + 1));
+      setListSel((i) => Math.min(Math.max(visibleItems.length - 1, 0), i + 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setListSel((i) => Math.max(0, i - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const item = items[listSel];
+      const item = visibleItems[listSel];
       if (item) edit(item);
     } else if (e.key === "Delete") {
       e.preventDefault();
-      const item = items[listSel];
+      const item = visibleItems[listSel];
       if (item) setAskDelete(item);
     } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault();
@@ -630,8 +636,9 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
           <div className="im-main">
             <button type="button" className="fn im-add" onClick={() => startNew()}>Add Item</button>
             <div className="im-form">
-              <span className="im-lbl">Item Name :</span>
+              <label className="im-lbl" htmlFor="im-item-name">Item Name :</label>
               <input
+                id="im-item-name"
                 ref={nameRef}
                 className="win"
                 data-edit="text"
@@ -639,7 +646,11 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
                 maxLength={80}
                 autoComplete="off"
                 spellCheck={false}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  setNameFilter(e.target.value);
+                  setListSel(0);
+                }}
                 onKeyDown={(e) => {
                   if (e.key !== "Enter") return;
                   e.preventDefault();
@@ -906,7 +917,10 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
                 </tr>
               </thead>
               <tbody>
-                {items.map((item, i) => (
+                {!visibleItems.length && nameFilter.trim() && (
+                  <tr><td colSpan={6}>No matching items</td></tr>
+                )}
+                {visibleItems.map((item, i) => (
                   <tr
                     key={item.id}
                     className={i === listSel ? "on" : ""}

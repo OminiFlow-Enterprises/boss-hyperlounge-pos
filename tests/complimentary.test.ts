@@ -62,6 +62,33 @@ describe("NC complimentary bills", () => {
     const bills = billReport(cashier, undefined, undefined, { outlet: "NC" });
     const billRows = bills.rows as Array<{ invoice_id?: string; net_amount: number; remark: string }>;
     expect(billRows.some((row) => row.invoice_id === invoice.id && row.net_amount === 0 && row.remark === "ASHU BHAIYA JI")).toBe(true);
+
+    const regularTable = createTable(cashier, { code: "R1", outlet: "BAR" });
+    openTable(cashier, { tableId: regularTable.id });
+    const regularOrder = createOrder(cashier, regularTable.id) as { id: string };
+    addItem(cashier, { orderId: regularOrder.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
+    generateInvoice(cashier, regularOrder.id, {});
+
+    const matchingBill = { invoice_id: invoice.id, complimentary_account: edited.name };
+    expect(billReport(cashier, undefined, undefined, { complimentaryAccountId: edited.id }).rows).toEqual([
+      expect.objectContaining(matchingBill),
+    ]);
+    expect(billReport(cashier, undefined, undefined, { complimentaryAccountId: second.id }).rows).toEqual([]);
+    expect(billReport(cashier, undefined, undefined, { complimentaryOnly: true }).rows).toEqual([
+      expect.objectContaining(matchingBill),
+    ]);
+    expect(billReport(cashier, undefined, undefined, { complimentaryAccount: "ashu bhaiya" }).rows).toEqual([
+      expect.objectContaining(matchingBill),
+    ]);
+    expect(billReport(cashier, undefined, undefined, { complimentaryAccount: "001" }).rows).toEqual([
+      expect.objectContaining(matchingBill),
+    ]);
+    expect(billReport(cashier, undefined, undefined, { complimentaryAccount: "BAR STAFF" }).rows).toEqual([]);
+    deleteComplimentary(cashier, edited.id);
+    expect(billReport(cashier, undefined, undefined, { complimentaryAccount: "ashu bhaiya" }).rows).toEqual([
+      expect.objectContaining(matchingBill),
+    ]);
+
     const kots = kotReport(cashier, undefined, undefined, undefined, { outlet: "NC" });
     expect(kots.rows.length).toBeGreaterThan(0);
     const settled = settlementReport(cashier, undefined, undefined, "NC");

@@ -3,6 +3,7 @@
 export type BillLineForTax = {
   amount: number;
   taxRate: number;
+  excludeDiscount?: boolean;
   salesGroup?: string | null;
 };
 
@@ -86,6 +87,7 @@ export function buildBillTotalLines(input: {
   discountPct: number;
   serviceCharge: number;
   serviceChargePct: number;
+  serviceChargeInclusive?: boolean;
   otherCharges: number;
   roundOff: number;
   /** Prefer invoice tax total when present (keeps print aligned with settled bill). */
@@ -102,7 +104,8 @@ export function buildBillTotalLines(input: {
     });
   }
 
-  const subtotal = input.lines.reduce((s, l) => s + Math.max(0, l.amount), 0);
+  const eligible = input.lines.filter((line) => line.amount > 0 && !line.excludeDiscount);
+  const subtotal = eligible.reduce((sum, line) => sum + line.amount, 0);
   const vatByRate = new Map<number, Acc>();
   const gstByRate = new Map<number, Acc>();
   const otherByRate = new Map<number, Acc>();
@@ -113,9 +116,9 @@ export function buildBillTotalLines(input: {
   for (let i = 0; i < positive.length; i++) {
     const line = positive[i];
     const rate = Number(line.taxRate) || 0;
-    const isLast = i === positive.length - 1;
+    const isLast = line === eligible[eligible.length - 1];
     let lineDisc = 0;
-    if (discount > 0 && subtotal > 0) {
+    if (!line.excludeDiscount && discount > 0 && subtotal > 0) {
       lineDisc = isLast
         ? Math.max(0, discount - allocatedDisc)
         : Math.round((discount * line.amount) / subtotal);
@@ -150,7 +153,7 @@ export function buildBillTotalLines(input: {
   if (input.serviceCharge > 0) {
     const scPct = Number(input.serviceChargePct) || 10;
     rows.push({
-      label: `S.C. VOLUNTARY ${fmtPct(scPct, scPct % 1 === 0 ? 0 : 2)} %`,
+      label: `S.C. VOLUNTARY ${fmtPct(scPct, scPct % 1 === 0 ? 0 : 2)} %${input.serviceChargeInclusive ? " (Incl.)" : ""}`,
       amount: input.serviceCharge,
     });
   }
