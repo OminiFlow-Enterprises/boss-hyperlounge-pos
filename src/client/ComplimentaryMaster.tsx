@@ -146,7 +146,7 @@ export function ComplimentaryMasterDialog({
             <thead>
               <tr>
                 <th>Customer Name</th>
-                <th>CustomerCode</th>
+                <th>Customer Code</th>
                 <th>Edit</th>
                 <th>Delete</th>
               </tr>

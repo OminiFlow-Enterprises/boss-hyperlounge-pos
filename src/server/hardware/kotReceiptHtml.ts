@@ -12,6 +12,7 @@ interface KotTicket {
   items: KotPrintPayload["items"];
   printTime: string;
   operatorName: string;
+  waiterName?: string;
   remark?: string | null;
 }
 
@@ -41,18 +42,19 @@ export function formatKotHtml(payload: KotPrintPayload, printedAt = new Date()):
     steward: Array.from(payload.waiter?.trim() ?? "")[0]?.toUpperCase() ?? "",
     orderType: payload.orderBanner ?? "RUNNING ORDER",
     copyType: payload.reprint ? "Duplicate Copy" : "Original Copy",
-    items: payload.items.map((item) => ({ ...item, name: item.name.toUpperCase() })),
+    items: payload.items,
     printTime: clockTime(printedAt),
     operatorName: payload.operatorName ?? "",
+    waiterName: payload.waiter?.trim(),
     remark: payload.remark?.trim(),
   });
 }
 
 export function renderKotTicket(ticket: KotTicket): string {
   const rows = ticket.items.map(({ name, qty }) =>
-    `<div class="item${qty < 0 ? " cancelled" : ""}"><span>${esc(name)}</span><span class="qty">${qty.toFixed(2)}</span></div>`,
+    `<div class="item${qty < 0 ? " cancelled" : ""}"><span>${esc(name.toUpperCase())}</span><span class="qty">${qty.toFixed(2)}</span></div>`,
   ).join("\n");
-  const time = ticket.time ? `    <span class="time">${esc(ticket.time)}</span>` : "";
+  const dateTime = ticket.time ? `${ticket.date}   ${ticket.time}` : ticket.date;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -63,35 +65,36 @@ export function renderKotTicket(ticket: KotTicket): string {
   @page { size: auto; margin: 0; }
   html { background: #fff; }
   body {
+    display: flow-root;
     box-sizing: border-box;
     width: 72mm;
     margin: 0 auto;
-    padding: 2mm;
+    padding: 0 2mm;
     color: #000;
     background: #fff;
-    font: 500 13pt/1.35 Arial, "Helvetica Neue", Helvetica, sans-serif;
+    font: 400 9pt/1.25 Arial, Helvetica, sans-serif;
     -webkit-font-smoothing: none;
   }
-  h1 { margin: 0 0 2px; text-align: center; font-size: 18pt; font-weight: 800; letter-spacing: 1px; }
-  .subtitle { margin: 0 0 10px; text-align: center; font-weight: 400; }
+  h1 { margin: 0 0 2px; text-align: center; font-size: 10.5pt; font-weight: 800; }
+  .subtitle { margin: 0 0 4px; text-align: center; }
   .meta {
     display: grid;
-    grid-template-columns: 17mm minmax(0, 1fr);
-    row-gap: 4px;
+    grid-template-columns: 22mm minmax(0, 1fr);
+    row-gap: 2px;
     margin: 0;
     font-weight: 400;
   }
+  .meta dt { white-space: nowrap; }
   .meta dd { margin: 0; overflow-wrap: anywhere; display: flex; }
   .meta dd::before { content: ":"; }
-  .date { white-space: pre-wrap; }
-  .time { white-space: nowrap; }
-  .order { margin: 10px 0 12px; }
+  .date { white-space: pre; }
+  .order { margin: 6px 0; text-align: center; }
   .order div {
-    font-size: 14pt;
+    font-size: 10pt;
     font-weight: 800;
     text-decoration: underline;
-    text-decoration-thickness: 2px;
-    text-underline-offset: 3px;
+    text-decoration-thickness: 1.5px;
+    text-underline-offset: 2px;
   }
   .head, .item {
     display: grid;
@@ -100,15 +103,15 @@ export function renderKotTicket(ticket: KotTicket): string {
     column-gap: 2mm;
     break-inside: avoid;
   }
-  .head { font-weight: 400; border-bottom: 1px dashed #000; }
+  .head { border-bottom: 1px solid #000; }
   .item { font-weight: 600; overflow-wrap: anywhere; }
   .items { border-bottom: 1px dashed #000; }
   .cancelled span { text-decoration: line-through; text-decoration-thickness: 2px; }
   .qty { text-align: right; white-space: nowrap; }
-  .remark { margin: 4px 0 0; overflow-wrap: anywhere; }
-  footer { padding-bottom: 10mm; break-inside: avoid; }
-  .end { margin: 14px 0; text-align: center; font-weight: 400; }
-  .operator { display: flex; justify-content: space-between; gap: 2mm; font-size: 12pt; font-weight: 400; }
+  .waiter, .remark { margin: 2px 0 0; overflow-wrap: anywhere; }
+  footer { padding-bottom: 6mm; break-inside: avoid; }
+  .end { margin: 6px 0; text-align: center; }
+  .operator { display: flex; justify-content: space-between; gap: 2mm; font-size: 7.5pt; }
   .operator span:last-child { text-align: right; overflow-wrap: anywhere; }
 </style>
 </head>
@@ -118,12 +121,13 @@ export function renderKotTicket(ticket: KotTicket): string {
   <dl class="meta">
     <dt>KOT No.</dt><dd><span>${esc(ticket.kotNo)}</span></dd>
     <dt>Table No.</dt><dd><span>${esc(ticket.tableNo)}</span></dd>
-    <dt>Date</dt><dd><span class="date">${esc(ticket.date)}${time}</span></dd>
+    <dt>Date</dt><dd><span class="date">${esc(dateTime)}</span></dd>
     <dt>Stward</dt><dd><span>${esc(ticket.steward)}</span></dd>
   </dl>
   <div class="order"><div>${esc(ticket.orderType)}</div><div>${esc(ticket.copyType)}</div></div>
   <div class="head"><span>Item Name</span><span class="qty">Qty</span></div>
   <div class="items">${rows}</div>
+  ${ticket.waiterName ? `<p class="waiter">${esc(ticket.waiterName.toUpperCase())}</p>` : ""}
   ${ticket.remark ? `<p class="remark">${esc(ticket.remark)}</p>` : ""}
   <footer>
     <p class="end">--- END ---</p>

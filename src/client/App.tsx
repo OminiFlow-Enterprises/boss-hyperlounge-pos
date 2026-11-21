@@ -1,3 +1,4 @@
+import { formatUiLabel } from "./formatUiLabel";
 import { Component, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import { ignoreRepeatedPrintKey, reprintKot } from "./printActions";
 import { api, ApiError } from "./api";
@@ -153,12 +154,12 @@ const MENUS: Array<{ id: string; label: string; items: MenuNode[] }> = [
   },
   {
     id: "fnb",
-    label: "F n B",
+    label: "F&B",
     items: [
-      { label: "BAR", children: DEPT_LEAVES.map((x) => ({ ...x, outlet: "BAR" })) },
+      { label: "Bar", children: DEPT_LEAVES.map((x) => ({ ...x, outlet: "BAR" })) },
       { label: "NC", children: DEPT_LEAVES.map((x) => ({ ...x, outlet: "NC" })) },
-      { label: "RESTAURANT", children: DEPT_LEAVES.map((x) => ({ ...x, outlet: "RESTAURANT" })) },
-      { label: "THE BOSS CLUB", children: DEPT_LEAVES.map((x) => ({ ...x, outlet: "THE BOSS CLUB" })) },
+      { label: "Restaurant", children: DEPT_LEAVES.map((x) => ({ ...x, outlet: "RESTAURANT" })) },
+      { label: "The Boss Club", children: DEPT_LEAVES.map((x) => ({ ...x, outlet: "THE BOSS CLUB" })) },
       { label: "Advance Booking", children: [
         { label: "Booking", view: "advance-booking" },
         { label: "Card Block", view: "card-block" },
@@ -171,9 +172,9 @@ const MENUS: Array<{ id: string; label: string; items: MenuNode[] }> = [
     id: "report",
     label: "Report",
     items: [
-      { label: "F n B", children: [
+      { label: "F&B", children: [
         { label: "GST Report", view: "gst-report" },
-        { label: "Point Of Sales", view: "point-of-sales" },
+        { label: "Point of Sale", view: "point-of-sales" },
         { label: "Item Wise Sales", view: "item-wise-sale" },
         { label: "Item Wise Group Sales Report", view: "item-wise-group" },
         { label: "Item Wise Sales Detail", view: "item-wise-detail" },
@@ -846,10 +847,9 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   }
 
   async function enterClubCard(cardNumber: string) {
-    if (!await loadCard(cardNumber, true)) return;
     const cardInput = clubCardRef.current;
     const stillEnteringCard = () =>
-      cardInput === document.activeElement && cardInput?.value === cardNumber;
+      cardInput === clubCardRef.current && cardInput?.value === cardNumber;
     try {
       const rows = await onRefresh();
       if (!stillEnteringCard()) return;
@@ -861,7 +861,11 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         && table.card_number?.trim() === cardNumber,
       );
       setTableCode(runningTable?.code ?? "");
-      focusTableNo();
+      if (await loadCard(cardNumber, true)
+          && stillEnteringCard()
+          && cardInput === document.activeElement) {
+        focusTableNo();
+      }
     } catch (e) {
       if (stillEnteringCard()) {
         onMessage(e instanceof Error ? e.message : "Could not look up running tables", focusClubCard);
@@ -1886,18 +1890,18 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
               </div>
             </div>
             <div className="dept-body">
-              <button type="button" className={`dept-btn ${dept === "CLUB" ? "active" : ""}`} title="Alt+1" onClick={() => switchDept("CLUB")}>THE BOSS<br />CLUB</button>
-              <button type="button" className={`dept-btn ${dept === "RESTAURANT" ? "active" : ""}`} title="Alt+2" onClick={() => switchDept("RESTAURANT")}>RESTAURANT</button>
+              <button type="button" className={`dept-btn ${dept === "CLUB" ? "active" : ""}`} title="Alt+1" onClick={() => switchDept("CLUB")}>The Boss<br />Club</button>
+              <button type="button" className={`dept-btn ${dept === "RESTAURANT" ? "active" : ""}`} title="Alt+2" onClick={() => switchDept("RESTAURANT")}>Restaurant</button>
               <button type="button" className={`dept-btn ${dept === "NC" ? "active" : ""}`} title="Alt+3" onClick={() => switchDept("NC")}>NC</button>
-              <button type="button" className={`dept-btn ${dept === "BAR" ? "active" : ""}`} title="Alt+4" onClick={() => switchDept("BAR")}>BAR</button>
+              <button type="button" className={`dept-btn ${dept === "BAR" ? "active" : ""}`} title="Alt+4" onClick={() => switchDept("BAR")}>Bar</button>
             </div>
           </div>
         </div>
 
         <div className="igrid">
           <div className="igrid-head">
-            <div>Sr.No.</div>
-            <div>ItemName</div>
+            <div>No.</div>
+            <div>Item Name</div>
             <div>Rate</div>
             <div>Qty</div>
           </div>
@@ -2053,7 +2057,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
               <thead>
                 <tr>
                   <th>Code</th>
-                  <th>ItemName</th>
+                  <th>Item Name</th>
                   <th>Qty</th>
                 </tr>
               </thead>
@@ -2090,7 +2094,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
               <colgroup><col className={clubMode ? "c1 club" : "c1"} /><col className="c2" /><col /></colgroup>
               <thead>
                 <tr>
-                  <th>TableNo</th>
+                  <th>Table No.</th>
                   <th>Estimate</th>
                   <th>Bill/Settle</th>
                 </tr>
@@ -2346,7 +2350,7 @@ function CardSearch({ onPick }: { onPick: (c: Card) => void }) {
           {rows.map((c) => (
             <tr key={c.id} onClick={() => onPick(c)}>
               <td>{c.card_number}</td><td>{c.customer_name}</td><td>{c.mobile}</td>
-              <td>{formatINR(c.paid_balance + c.bonus_balance)}</td><td>{c.status}</td>
+              <td>{formatINR(c.paid_balance + c.bonus_balance)}</td><td>{formatUiLabel(c.status)}</td>
             </tr>
           ))}
         </tbody>
@@ -2394,7 +2398,7 @@ function BalanceScreen() {
       }} />
       {data && (
         <div style={{ marginTop: 10 }}>
-          <p>{data.card.customer_name} · {data.card.card_number} · {data.card.status}</p>
+          <p>{data.card.customer_name} · {data.card.card_number} · {formatUiLabel(data.card.status)}</p>
           <p><b>{formatINR(data.balances.usable)}</b></p>
         </div>
       )}
@@ -2415,7 +2419,7 @@ function CardsScreen() {
         <input ref={cardNoRef} className="win" data-num="card" inputMode="numeric" maxLength={4} placeholder="Card number" value={form.cardNumber} onChange={(e) => setForm({ ...form, cardNumber: cardNoDigits(e.target.value) })} onBlur={() => { if (form.cardNumber && !cardNoReady(form.cardNumber)) stayOnCard(cardNoRef.current); }} style={{ marginTop: 6 }} />
         <input className="win" placeholder="RFID UID" value={form.cardUid} onChange={(e) => setForm({ ...form, cardUid: e.target.value })} style={{ marginTop: 6 }} />
         <select className="win" value={form.cardTypeCode} onChange={(e) => setForm({ ...form, cardTypeCode: e.target.value })} style={{ marginTop: 6 }}>
-          <option>REGULAR</option><option>MEMBER</option><option>VIP</option><option>CORPORATE</option>
+          <option value="REGULAR">Regular</option><option value="MEMBER">Member</option><option>VIP</option><option value="CORPORATE">Corporate</option>
         </select>
         <button className="fn wide" style={{ marginTop: 8 }} onClick={async () => {
           if (!cardNoReady(form.cardNumber)) { stayOnCard(cardNoRef.current); return; }
@@ -2429,7 +2433,7 @@ function CardsScreen() {
           {cards.map((c) => (
             <tr key={c.id}>
               <td>{c.card_number}</td><td>{c.customer_name}</td>
-              <td>{formatINR(c.paid_balance + c.bonus_balance)}</td><td>{c.status}</td>
+              <td>{formatINR(c.paid_balance + c.bonus_balance)}</td><td>{formatUiLabel(c.status)}</td>
               <td>
                 <button className="fn" onClick={() => api.post(`/api/cards/${c.id}/block`, { reason: "Lost" }).then(async () => setCards(await api.get("/api/cards")))}>Block</button>
                 <button className="fn" onClick={() => api.post(`/api/cards/${c.id}/unblock`, { reason: "Customer request" }).then(async () => setCards(await api.get("/api/cards")))}>Unblock</button>
@@ -2485,7 +2489,7 @@ function LedgerScreen() {
       <CardSearch onPick={(c) => load(c.id)} />
       <select className="win" value={type} onChange={(e) => setType(e.target.value)} style={{ width: 180, marginTop: 6 }}>
         <option value="">All types</option>
-        {["RECHARGE","PURCHASE","REFUND","TRANSFER","CARD_SWAP","ADJUSTMENT","BONUS","EXPIRY","REVERSAL"].map((t) => <option key={t}>{t}</option>)}
+        {["RECHARGE","PURCHASE","REFUND","TRANSFER","CARD_SWAP","ADJUSTMENT","BONUS","EXPIRY","REVERSAL"].map((t) => <option key={t} value={t}>{formatUiLabel(t)}</option>)}
       </select>
       <input className="win" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter" style={{ marginTop: 6 }} />
       <table className="data">
@@ -2522,11 +2526,11 @@ function KotBoard({ station }: { station?: "KITCHEN" | "BAR" }) {
     <div className="kot-board">
       {cols.map((col) => (
         <div key={col} className="kot-col">
-          <b>{col === "SENT" ? "NEW ORDERS" : col}</b>
+          <b>{col === "SENT" ? "New Orders" : formatUiLabel(col)}</b>
           {kots.filter((k) => k.status === col || (col === "SENT" && k.status === "NEW")).map((k) => (
             <div key={k.id} className="kot-ticket">
               <b>{k.kot_number}</b>
-              <div className="meta">TABLE {k.table_label || k.table_code} · {k.station}</div>
+              <div className="meta">Table {k.table_label || k.table_code} · {formatUiLabel(k.station)}</div>
               {k.reprint_count > 0 && <div className="reprint-mark">*** REPRINT ***</div>}
               <ul>{k.items?.map((i: any) => <li key={i.id}>{i.qty} × {i.name}</li>)}</ul>
               {next[k.status] && <button className="fn wide" onClick={() => api.post(`/api/kots/${k.id}/status`, { status: next[k.status] }).then(load)}>{next[k.status]}</button>}
@@ -2548,7 +2552,7 @@ function Orders({ onOpen }: { onOpen: (id: string) => void }) {
       <tbody>
         {rows.map((o) => (
           <tr key={o.id} onClick={() => onOpen(o.id)}>
-            <td>{o.order_number}</td><td>{o.table_label || o.table_code}</td><td>{o.status}</td><td>{formatINR(o.total)}</td>
+            <td>{o.order_number}</td><td>{o.table_label || o.table_code}</td><td>{formatUiLabel(o.status)}</td><td>{formatINR(o.total)}</td>
           </tr>
         ))}
       </tbody>
@@ -2574,13 +2578,13 @@ function CustomersScreen() {
 }
 
 function ProductsScreen({ products }: { products: Product[] }) {
-  return <table className="data"><thead><tr><th>SKU</th><th>Name</th><th>Station</th><th>Price</th></tr></thead><tbody>{products.map((p) => <tr key={p.id}><td>{p.sku}</td><td>{p.name}</td><td>{p.station}</td><td>{formatINR(p.base_price)}</td></tr>)}</tbody></table>;
+  return <table className="data"><thead><tr><th>SKU</th><th>Name</th><th>Station</th><th>Price</th></tr></thead><tbody>{products.map((p) => <tr key={p.id}><td>{p.sku}</td><td>{p.name}</td><td>{formatUiLabel(p.station)}</td><td>{formatINR(p.base_price)}</td></tr>)}</tbody></table>;
 }
 
 function InventoryScreen() {
   const [rows, setRows] = useState<any[]>([]);
   useEffect(() => { api.get<any[]>("/api/inventory").then(setRows); }, []);
-  return <table className="data"><thead><tr><th>Product</th><th>Station</th><th>Qty</th></tr></thead><tbody>{rows.map((r) => <tr key={r.id}><td>{r.name}</td><td>{r.station}</td><td>{r.quantity}</td></tr>)}</tbody></table>;
+  return <table className="data"><thead><tr><th>Product</th><th>Station</th><th>Qty</th></tr></thead><tbody>{rows.map((r) => <tr key={r.id}><td>{r.name}</td><td>{formatUiLabel(r.station)}</td><td>{r.quantity}</td></tr>)}</tbody></table>;
 }
 
 function PurchaseScreen({ products }: { products: Product[] }) {
@@ -2632,7 +2636,7 @@ function ReportsScreen() {
 function StaffScreen() {
   const [rows, setRows] = useState<any[]>([]);
   useEffect(() => { api.get<any[]>("/api/staff").then(setRows); }, []);
-  return <table className="data"><thead><tr><th>Name</th><th>User</th><th>Role</th></tr></thead><tbody>{rows.map((s) => <tr key={s.id}><td>{s.name}</td><td>{s.username}</td><td>{s.role}</td></tr>)}</tbody></table>;
+  return <table className="data"><thead><tr><th>Name</th><th>User</th><th>Role</th></tr></thead><tbody>{rows.map((s) => <tr key={s.id}><td>{s.name}</td><td>{s.username}</td><td>{formatUiLabel(s.role)}</td></tr>)}</tbody></table>;
 }
 
 function SettingsScreen({ settings, onSaved }: { settings: Record<string, string>; onSaved: () => void }) {
@@ -2661,7 +2665,7 @@ function HistoryScreen({ invoice }: { invoice: Invoice | null }) {
         <tbody>
           {rows.map((r) => (
             <tr key={r.id}>
-              <td>{r.invoice_number}</td><td>{r.table_label || r.table_code}</td><td>{formatINR(r.grand_total)}</td><td>{r.status}</td>
+              <td>{r.invoice_number}</td><td>{r.table_label || r.table_code}</td><td>{formatINR(r.grand_total)}</td><td>{formatUiLabel(r.status)}</td>
             </tr>
           ))}
         </tbody>

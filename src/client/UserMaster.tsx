@@ -1,3 +1,4 @@
+import { formatUiLabel } from "./formatUiLabel";
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "./api";
 import { AlertBox, ConfirmAsk } from "./BillDialogs";
@@ -329,8 +330,8 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
           <span>User Role :</span>
           <select className="win" data-cycle="1" value={userRole} onChange={(e) => changeRole(e.target.value)} onKeyDown={enterNext}>
             <option value="">Select</option>
-            <option value="ADMIN">ADMIN</option>
-            <option value="OPERATOR">OPERATOR</option>
+            <option value="ADMIN">Admin</option>
+            <option value="OPERATOR">Operator</option>
           </select>
         </label>
         <label className="um-field">
@@ -410,7 +411,7 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
           <thead>
             <tr>
               <th>Username</th>
-              <th>UserRole</th>
+              <th>User Role</th>
               <th>Edit</th>
               <th>Delete</th>
             </tr>
@@ -464,7 +465,7 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
           <tbody>
             {outlets.map((row, i) => (
               <tr key={row.outlet} className={i === outletSel ? "on" : ""} onClick={() => setOutletSel(i)}>
-                <td>{row.outlet}</td>
+                <td>{formatUiLabel(row.outlet)}</td>
                 <td>
                   <input
                     className="cell"

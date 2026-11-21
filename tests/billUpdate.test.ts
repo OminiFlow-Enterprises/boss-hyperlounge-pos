@@ -87,6 +87,12 @@ it("previews bill edits without saving and requires the PIN to update only the s
     expect(original.status).toBe(200);
     const invoice = await original.json();
     expect(invoice.service_charge_pct).toBe(10);
+    const wrongPin = masterPin === "0000" ? "0001" : "0000";
+    const invalidServiceUpdate = await post("generate", {
+      orderId, invoiceId: invoice.id, serviceChargePct: 5, masterPin: wrongPin,
+    });
+    expect(invalidServiceUpdate.status).toBe(403);
+    expect(await invalidServiceUpdate.json()).toMatchObject({ error: "Incorrect master PIN" });
     const serviceOnly = await post("generate", { orderId, invoiceId: invoice.id, serviceChargePct: 5 });
     expect(serviceOnly.status).toBe(200);
     expect(await serviceOnly.json()).toMatchObject({ service_charge_pct: 5, discount: invoice.discount });
@@ -107,7 +113,7 @@ it("previews bill edits without saving and requires the PIN to update only the s
     const missingRemark = await post("generate", { ...changes, masterPin, reason: "  " });
     expect(missingRemark.status).toBe(403);
     expect(await missingRemark.json()).toMatchObject({ code: "BILL_REMARK_REQUIRED" });
-    expect((await post("generate", { ...changes, reason: "Corrected quantity", masterPin: "0000" })).status).toBe(403);
+    expect((await post("generate", { ...changes, reason: "Corrected quantity", masterPin: wrongPin })).status).toBe(403);
     expect(db.prepare("SELECT qty FROM order_items WHERE id = ?").get(itemId)).toEqual({ qty: 1 });
 
     const update = await post("generate", { ...changes, reason: "Corrected quantity", masterPin });

@@ -1,3 +1,4 @@
+import { formatUiLabel } from "./formatUiLabel";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { ignoreRepeatedPrintKey, printBill } from "./printActions";
 import { createPortal } from "react-dom";
@@ -19,9 +20,9 @@ type BillProduct = { id: string; name: string; sku: string; base_price?: number 
 type TodayCard = { id: string; card_number: string; customer_name: string; usable: number; available?: number; recharged: number };
 
 const PAY_MODES: Array<{ id: PaymentMode; label: string }> = [
-  { id: "CASH", label: "CASH" },
-  { id: "CARD", label: "BANK TRANSFER" },
-  { id: "MEMBER_CARD", label: "PREPAID CARD" },
+  { id: "CASH", label: "Cash" },
+  { id: "CARD", label: "Bank Transfer" },
+  { id: "MEMBER_CARD", label: "Prepaid Card" },
 ];
 
 const BANK_NAMES = [
@@ -930,7 +931,7 @@ export function PrepareBillDialog({
     <div className="dialog bill-dlg">
       <div className="dialog-cap">
         <span className="cap-dot" />
-        Restaurant Bill - {outlet}
+        Restaurant Bill - {formatUiLabel(outlet)}
         <CapBtns onClose={onClose} />
       </div>
       <div className="bill-body">
@@ -1053,7 +1054,7 @@ export function PrepareBillDialog({
             </colgroup>
             <thead>
               <tr>
-                <th>Sr.No.</th><th>ItemName</th><th>Qty</th><th>ItemPrice</th><th>Tax(%)</th><th>Amount</th><th />
+                <th>No.</th><th>Item Name</th><th>Qty</th><th>Item Price</th><th>Tax (%)</th><th>Amount</th><th />
               </tr>
             </thead>
             <tbody>
@@ -1868,7 +1869,7 @@ export function SettleDialog({
     <div className="dialog settle-dlg">
       <div className="dialog-cap">
         <span className="cap-dot" />
-        Restaurant Settlement - {outlet}
+        Restaurant Settlement - {formatUiLabel(outlet)}
         <CapBtns onClose={onClose} />
       </div>
       <div className="settle-body">
@@ -1907,7 +1908,7 @@ export function SettleDialog({
                     readOnly
                     tabIndex={2}
                     data-cycle="1"
-                    value={PAY_MODES.find((m) => m.id === method)?.label ?? "CASH"}
+                    value={PAY_MODES.find((m) => m.id === method)?.label ?? "Cash"}
                   />
                   <span className="st-drop-btn" aria-hidden="true" />
                 </span>

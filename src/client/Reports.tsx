@@ -1,3 +1,4 @@
+import { formatUiLabel } from "./formatUiLabel";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ignoreRepeatedPrintKey, printBill, printPage, reprintKot } from "./printActions";
 import { createPortal } from "react-dom";
@@ -109,7 +110,7 @@ export function ItemWiseDetail({ onExit }: { onExit: () => void }) {
   return (
     <div className="rpt-page">
       <div className="rpt-bar">
-        <label>Outlet Name: <select className="win"><option>Select</option>{OUTLETS.map((o) => <option key={o}>{o}</option>)}</select></label>
+        <label>Outlet Name: <select className="win"><option>Select</option>{OUTLETS.map((o) => <option key={o} value={o}>{formatUiLabel(o)}</option>)}</select></label>
         <label>Sales Group: <select className="win"><option>Select</option></select></label>
         <label>Item Name: <select className="win"><option>Select</option></select></label>
         <label>Date From : <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
@@ -127,7 +128,7 @@ export function ItemWiseDetail({ onExit }: { onExit: () => void }) {
             <h2>Item Wise Sales</h2>
             <div className="cr-meta">
               Date From {dmy(new Date(from))} To {dmy(new Date(to))}<br />
-              UserName : {""}TRIJOK
+              Username: {""}TRIJOK
               <span className="cr-page">Page No. : Page 1 of 1</span>
             </div>
             <table className="cr-table">
@@ -140,7 +141,7 @@ export function ItemWiseDetail({ onExit }: { onExit: () => void }) {
               <tbody>
                 {rows.map((r: any, i: number) => (
                   <tr key={i}>
-                    <td>{String(r.item_name || "").toUpperCase()}</td>
+                    <td>{r.item_name}</td>
                     <td>{r.bill_no}</td>
                     <td>{r.table_no}</td>
                     <td>{r.kot?.replace(/\D/g, "") || ""}</td>
@@ -182,14 +183,14 @@ export function PointOfSales({ onExit }: { onExit: () => void }) {
           {OUTLETS.map((o) => (
             <label key={o} className={sel === o ? "on" : ""} onClick={() => setSel(o)}>
               <input type="checkbox" checked={!!checked[o]} onChange={() => setChecked({ ...checked, [o]: !checked[o] })} />
-              {o}
+              {formatUiLabel(o)}
             </label>
           ))}
         </aside>
         <CrystalChrome onExit={onExit}>
           <div className="cr-paper">
             <h1>THE BOSS</h1>
-            <h2>Point Of Sales</h2>
+            <h2>Point of Sale</h2>
             <div className="cr-meta">From : {dmy(new Date(from))} &nbsp; To : {dmy(new Date(to))}</div>
             <p className="empty">Select outlets and click Show.</p>
           </div>
@@ -216,7 +217,7 @@ const GST_COLS: Array<[string, string, boolean?]> = [
   ["net_surchar", "NETSurCh", true],
   ["surchar_20", "SurChar", true],
   ["round_off", "RoundOff", true],
-  ["net_amount", "NetAmount", true],
+  ["net_amount", "Net Amount", true],
   ["mop", "MOP"],
   ["payment_modes", "PaymentModes"],
 ];
@@ -239,10 +240,10 @@ function gstSlipDate(isoDayStr: string) {
 
 /** Bottom of the FnB GST Summery — typed amounts, not taken from bills. */
 const GST_CASH_LINES: Array<{ id: string; label: string }> = [
-  { id: "club_card_return", label: "CLUB CARD RETURN" },
-  { id: "incentives", label: "INCENTIVES AMOUNT" },
-  { id: "expense", label: "CASH AFTER EXPENSE" },
-  { id: "entry_sale", label: "ENTRY SALE" },
+  { id: "club_card_return", label: "Club Card Return" },
+  { id: "incentives", label: "Incentives Amount" },
+  { id: "expense", label: "Cash After Expense" },
+  { id: "entry_sale", label: "Entry Sale" },
   { id: "party_payment", label: "Party Payment Cash Rec. Not Punch In Sale" },
   { id: "system_cash", label: "System Cash Sale" },
   { id: "cash_in_hand", label: "Cash in hand" },
@@ -706,9 +707,9 @@ export function GstReport({ onExit }: { onExit: () => void }) {
         </div>
         <label>Outlet Group: <select className="win" defaultValue="Select"><option>Select</option></select></label>
         <label>Outlet Name: <select className="win" value={outletName} onChange={(e) => setOutletName(e.target.value)}>
-          <option>Select</option>{OUTLETS.map((o) => <option key={o}>{o}</option>)}
+          <option>Select</option>{OUTLETS.map((o) => <option key={o} value={o}>{formatUiLabel(o)}</option>)}
         </select></label>
-        <label>MOP : <select className="win" defaultValue="Select"><option>Select</option><option>CASH</option><option>UPI</option><option>CARD</option></select></label>
+        <label>MOP : <select className="win" defaultValue="Select"><option>Select</option><option value="CASH">Cash</option><option>UPI</option><option value="CARD">Card</option></select></label>
         <label>Account : <select className="win" defaultValue="Select"><option>Select</option></select></label>
         <label>Bill No : <input className="win" value={billNo} onChange={(e) => setBillNo(e.target.value)} /></label>
         <fieldset>
@@ -800,9 +801,9 @@ export function GstReport({ onExit }: { onExit: () => void }) {
             </div>
             <div className="gst-foot-bar">
               <label>Advance : CA <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.advance)} /></label>
-              <label>BANK TRAN.. <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.bank)} /></label>
-              <label>CASH <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.cash)} /></label>
-              <label>PREPAID C.. <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.prepaid)} /></label>
+              <label>Bank Transfer <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.bank)} /></label>
+              <label>Cash <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.cash)} /></label>
+              <label>Prepaid Card <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.prepaid)} /></label>
               <label>Liquor <input className="win" readOnly tabIndex={-1} value={String(Math.round((Number(footer.liquor) || 0) / 100))} /></label>
               <label>Food <input className="win" readOnly tabIndex={-1} value={String(Math.round((Number(footer.food) || 0) / 100))} /></label>
             </div>
@@ -818,7 +819,7 @@ export function GstReport({ onExit }: { onExit: () => void }) {
             >
               <div className={`cr-paper gst-paper gst-summery-slip${editTools ? "" : " gst-tools-off"}`}>
                 <h1>THE BOSS</h1>
-                <h2>GST Summery</h2>
+                <h2>GST Summary</h2>
                 <div className="cr-meta">From : {fromLabel} &nbsp;&nbsp; To : {toLabel}</div>
                 <div className="gst-sum-pair">
                 <div className="gst-sum-left">
@@ -992,9 +993,9 @@ export function GstReport({ onExit }: { onExit: () => void }) {
             </CrystalChrome>
             <div className="gst-foot-bar">
               <label>Advance : CA <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.advance)} /></label>
-              <label>BANK TRAN.. <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.bank)} /></label>
-              <label>CASH <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.cash)} /></label>
-              <label>PREPAID C.. <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.prepaid)} /></label>
+              <label>Bank Transfer <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.bank)} /></label>
+              <label>Cash <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.cash)} /></label>
+              <label>Prepaid Card <input className="win" readOnly tabIndex={-1} value={gstAmt(footer.prepaid)} /></label>
               <label>Liquor <input className="win" readOnly tabIndex={-1} value={String(Math.round((Number(footer.liquor) || 0) / 100))} /></label>
               <label>Food <input className="win" readOnly tabIndex={-1} value={String(Math.round((Number(footer.food) || 0) / 100))} /></label>
             </div>
@@ -1068,7 +1069,7 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
         <label><input type="checkbox" checked={withTax} onChange={(e) => setWithTax(e.target.checked)} /> With Tax</label>
         <label>Waiter : <select className="win" value={filters.waiter} onChange={(e) => setFilters({ ...filters, waiter: e.target.value })}><option value="">Select</option>{options("waiter").map((v) => <option key={v}>{v}</option>)}</select></label>
         <label>MOP : <select className="win" value={filters.mop} onChange={(e) => setFilters({ ...filters, mop: e.target.value })}><option value="">Select</option>{[...new Set(rows.flatMap((r) => String(r.mop || "").split(",").filter(Boolean)))].sort().map((v) => <option key={v}>{v}</option>)}</select></label>
-        <label>Card <select className="win" value={filters.mop === "CARD" ? "CARD" : ""} onChange={(e) => setFilters({ ...filters, mop: e.target.value })}><option value="">Select</option><option>CARD</option></select></label>
+        <label>Card <select className="win" value={filters.mop === "CARD" ? "CARD" : ""} onChange={(e) => setFilters({ ...filters, mop: e.target.value })}><option value="">Select</option><option value="CARD">Card</option></select></label>
         <label><input type="checkbox" /> With Out Discount</label>
         <span className="spacer" />
         <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
@@ -1081,7 +1082,7 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
           {["BAR", "CAFE", "NC", "RESTAURANT", "THE BOSS CLUB"].map((o) => (
             <label key={o} className={sel === o ? "on" : ""} onClick={() => setSel(o)}>
               <input type="checkbox" checked={!!checked[o]} onChange={() => setChecked({ ...checked, [o]: !checked[o] })} />
-              {o}
+              {formatUiLabel(o)}
             </label>
           ))}
         </aside>
@@ -1089,7 +1090,7 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
           <table className="iws-grid">
             <thead>
               <tr>
-                <th>SN.</th><th>Item Name</th><th>Complementary</th><th>Sold</th>
+                <th>No.</th><th>Item Name</th><th>Complimentary</th><th>Sold</th>
                 <th>Amount</th><th>Group Total</th><th>Unit</th><th>Sub Unit</th>
               </tr>
             </thead>
@@ -1106,7 +1107,7 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
                   return (
                     <tr key={`${it.name}-${it.outlet}`}>
                       <td>{sl}</td>
-                      <td>{it.name.toUpperCase()}</td>
+                      <td>{it.name}</td>
                       <td>{it.complimentary}</td>
                       <td>{it.sold}</td>
                       <td>{inr(it.amount)}</td>
@@ -1203,7 +1204,7 @@ export function ItemWiseGroupSales({ onExit }: { onExit: () => void }) {
       <button className="fn" onClick={load} disabled={busy}>{busy ? "Loading…" : "Refresh"}</button>
     </div>
     <div className="iws-grid-wrap">
-      <table className="iws-grid"><thead><tr><th>SN.</th><th>Item Name</th><th>Complimentary (BTL)</th><th>Sold (BTL Equivalent)</th><th>Amount</th></tr></thead>
+      <table className="iws-grid"><thead><tr><th>No.</th><th>Item Name</th><th>Complimentary (BTL)</th><th>Sold (BTL Equivalent)</th><th>Amount</th></tr></thead>
         <tbody>{error ? <tr><td colSpan={5} className="empty">{error}</td></tr> : items.length ? items.map((it, i) => <tr key={it.name}><td>{i + 1}</td><td>{it.name}</td><td>{fmt(it.complimentaryEq)}</td><td>{fmt(it.bottleEq)}</td><td>{inr(it.amount)}</td></tr>) : <tr><td colSpan={5} className="empty">No matching 30 ml or bottle sales in this range</td></tr>}</tbody>
       </table>
     </div>
@@ -1549,7 +1550,7 @@ function SettlementUpdateDialog({
     <div className="dialog settle-dlg su-dlg">
       <div className="dialog-cap">
         <span className="cap-dot" />
-        Restaurant Settlement - {outlet}
+        Restaurant Settlement - {formatUiLabel(outlet)}
         <CapBtns onClose={() => { if (!busy.current) onClose(); }} />
       </div>
       <div className="settle-body">
@@ -1582,7 +1583,7 @@ function SettlementUpdateDialog({
               <td className="lbl">Payment Mode :</td>
               <td>
                 <select ref={modeRef} className="win" tabIndex={2} value={mode} onChange={(e) => setMode(e.target.value)}>
-                  {REPORT_PAY_MODES.filter((choice) => prepaid === (choice === "PREPAID CARD")).map((choice) => <option key={choice}>{choice}</option>)}
+                  {REPORT_PAY_MODES.filter((choice) => prepaid === (choice === "PREPAID CARD")).map((choice) => <option key={choice} value={choice}>{formatUiLabel(choice)}</option>)}
                 </select>
               </td>
             </tr>
@@ -1623,7 +1624,7 @@ function SettlementUpdateDialog({
         </table>
         {parts.length > 0 && (
           <ol aria-label="Payment parts entered">
-            {parts.map((part, index) => <li key={index}>{part.method}{part.method === "BANK TRANSFER" ? ` (${part.account})` : ""} {inr(part.amount)}</li>)}
+            {parts.map((part, index) => <li key={index}>{formatUiLabel(part.method)}{part.method === "BANK TRANSFER" ? ` (${part.account})` : ""} {inr(part.amount)}</li>)}
           </ol>
         )}
         <div className="st-foot">
@@ -1654,7 +1655,7 @@ function SettlementUpdateDialog({
 }
 
 const SETTLEMENT_COLUMNS = [
-  "VoucherRecei", "VoucherDate", "BillNo", "BillAmount", "TableNo", "Waiter",
+  "Voucher Receipt", "Voucher Date", "Bill No.", "Bill Amount", "Table No.", "Waiter",
   "SettledAmou", "MOP", "USERNAME", "VoucherValu", "status", "OutletName", "MOP1",
 ];
 
@@ -1780,11 +1781,11 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
           <div className="set-title">Select Filter</div>
           <div className="set-row">
             <label>Outlet : <select className="win" value={outletName} onChange={(e) => setOutletName(e.target.value)}>
-              {OUTLETS.map((o) => <option key={o}>{o}</option>)}
+              {OUTLETS.map((o) => <option key={o} value={o}>{formatUiLabel(o)}</option>)}
             </select></label>
             <label>Date From : <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
             <label>MOP : <select className="win" value={mop} onChange={(e) => setMop(e.target.value)}>
-              <option>Select</option><option>CASH</option><option>BANK TRANSFER</option><option>PREPAID CARD</option>
+              <option>Select</option><option value="CASH">Cash</option><option value="BANK TRANSFER">Bank Transfer</option><option value="PREPAID CARD">Prepaid Card</option>
             </select></label>
           </div>
           <div className="set-row">
@@ -1981,11 +1982,15 @@ export function CardBlock({ onExit }: { onExit: () => void }) {
   );
 }
 
+type AdvanceBookingRow = { id: string; reservation_no: number; card_no: string; guest_name: string; created_at: string };
+
 export function AdvanceBooking({ onExit }: { onExit: () => void }) {
   const blank = { guestName: "", cardNo: "", advance: "0.00", mop: "CASH" };
   const [form, setForm] = useState(blank);
   const [bankName, setBankName] = useState(BANK_ACCOUNTS[0]);
   const [no, setNo] = useState(430);
+  const [bookings, setBookings] = useState<AdvanceBookingRow[]>([]);
+  const [today, setToday] = useState(() => isoDay());
   const [msg, setMsg] = useState("");
   const [ok, setOk] = useState(false);
   const [askExit, setAskExit] = useState(false);
@@ -1999,10 +2004,29 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
   const bankValueRef = useRef(BANK_ACCOUNTS[0]);
 
   useEffect(() => {
+    function refreshDay() {
+      window.clearTimeout(timer);
+      const now = new Date();
+      setToday(isoDay(now));
+      const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+      timer = window.setTimeout(refreshDay, midnight.getTime() - now.getTime());
+    }
+    let timer: number | undefined;
+    refreshDay();
+    window.addEventListener("focus", refreshDay);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", refreshDay);
+    };
+  }, []);
+
+  useEffect(() => {
     guestRef.current?.focus();
-    api.get<any[]>("/api/bookings").then((rows) => {
+    api.get<AdvanceBookingRow[]>("/api/bookings").then((rows) => {
       const max = rows.reduce((m, r) => Math.max(m, r.reservation_no || 0), 429);
-      setNo(max + 1);
+      const loadedIds = new Set(rows.map((row) => row.id));
+      setBookings((current) => [...current.filter((row) => !loadedIds.has(row.id)), ...rows]);
+      setNo((current) => Math.max(current, max + 1));
     }).catch(() => null);
   }, []);
 
@@ -2102,14 +2126,15 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
     const mop = mopValueRef.current === "BANK TRANSFER" ? `BANK TRANSFER / ${bankValueRef.current}` : "CASH";
     try {
       const amt = formatAdvance();
-      const row = await api.post<any>("/api/bookings", {
+      const row = await api.post<AdvanceBookingRow>("/api/bookings", {
         guestName: form.guestName.trim(),
         cardNo: form.cardNo,
         advance: Math.round(Number(amt) * 100),
         mop,
       });
       setMsg(`Saved reservation ${row.reservation_no}`);
-      setNo((row.reservation_no || no) + 1);
+      setBookings((current) => [row, ...current.filter((booking) => booking.id !== row.id)]);
+      setNo((current) => Math.max(current, row.reservation_no + 1));
       resetPay();
       setForm(blank);
       setTimeout(() => guestRef.current?.focus(), 0);
@@ -2173,7 +2198,13 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
   });
   return (
     <div className="adv-page">
-      <aside className="adv-side" />
+      <aside className="adv-side" aria-label="Saved reservations">
+        <ul>
+          {bookings.filter((booking) => isoDay(new Date(booking.created_at)) === today).map((booking) => (
+            <li key={booking.id}>{booking.card_no} / {booking.guest_name}</li>
+          ))}
+        </ul>
+      </aside>
       <div className="adv-form">
         <div className="adv-top">
           <span>Reservation No : &nbsp; {no}</span>
@@ -2182,7 +2213,7 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
         <label>Guest Name <input ref={guestRef} className="win green" tabIndex={1} autoFocus value={form.guestName} onChange={(e) => setForm({ ...form, guestName: e.target.value })} onKeyDown={onEnter(checkGuest, () => cardRef.current?.focus())} /></label>
         <label>Card No <input ref={cardRef} className="win green" data-num="card" tabIndex={2} inputMode="numeric" maxLength={4} value={form.cardNo} onChange={(e) => setForm({ ...form, cardNo: cardNoDigits(e.target.value) })} onBlur={() => { if (form.cardNo && !cardNoReady(form.cardNo)) stayOnCard(cardRef.current); }} onKeyDown={onEnter(checkCard, () => advanceRef.current?.focus())} /></label>
         <label>Advance <input ref={advanceRef} className="win" data-num="dec" tabIndex={3} inputMode="decimal" value={form.advance} onChange={(e) => setAdvance(e.target.value)} onFocus={(e) => e.target.select()} onBlur={() => setForm((f) => ({ ...f, advance: formatAdvance(f.advance) }))} onKeyDown={onEnter(() => { const okAmt = checkAdvance(); if (okAmt) setForm((f) => ({ ...f, advance: formatAdvance(f.advance) })); return okAmt; }, () => mopRef.current?.focus())} /></label>
-        <label>MOP <span className="st-drop"><input ref={mopRef} className="win" readOnly tabIndex={4} data-cycle="1" value={form.mop} /><span className="st-drop-btn" aria-hidden="true" /></span></label>
+        <label>MOP <span className="st-drop"><input ref={mopRef} className="win" readOnly tabIndex={4} data-cycle="1" value={formatUiLabel(form.mop)} /><span className="st-drop-btn" aria-hidden="true" /></span></label>
         {form.mop === "BANK TRANSFER" && (
           <label>Bank Name <span className="st-drop"><input ref={bankRef} className="win" readOnly tabIndex={5} data-cycle="1" value={bankName} /><span className="st-drop-btn" aria-hidden="true" /></span></label>
         )}
@@ -2375,7 +2406,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
         <div className="set-fields">
           <div className="set-row">
             <label>Outlet Name : <select className="win" value={outletName} onChange={(e) => setOutletName(e.target.value)} onKeyDown={onFilterEnter}>
-              {OUTLETS.map((o) => <option key={o}>{o}</option>)}
+              {OUTLETS.map((o) => <option key={o} value={o}>{formatUiLabel(o)}</option>)}
             </select></label>
             <label>Bill No. : <input className="win" value={bill} onChange={(e) => setBill(e.target.value)} onKeyDown={onFilterEnter} /></label>
             <label>Table/Room No. : <input className="win" value={tableNo} onChange={(e) => setTableNo(e.target.value)} onKeyDown={onFilterEnter} /></label>
@@ -2414,7 +2445,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
         <table className="data set-table bill-rpt-table">
           <thead>
             <tr>
-              {["Bill Date", "BillNo", "TableNo", "Net Amount", "Service Charge", "Complimentary A/C", "Remark", "UserName", "CASH", "card", "B.T.C.", "WALLET", "ROOM TRANSFER", "Other MOD", "ALLOWAN"].map((h) => (
+              {["Bill Date", "Bill No.", "Table No.", "Net Amount", "Service Charge", "Complimentary A/C", "Remark", "Username", "Cash", "Card", "BTC", "Wallet", "Room Transfer", "Other MOD", "Allowance"].map((h) => (
                 <th key={h}>{h}</th>
               ))}
             </tr>
@@ -2603,7 +2634,7 @@ function KotAddTableDialog({
 
           <div className="kot-add-grid">
             <div className="kot-add-head">
-              <div>Sr.No.</div><div>ItemName</div><div>Rate</div><div>Qty</div><div>Remark</div>
+              <div>No.</div><div>Item Name</div><div>Rate</div><div>Qty</div><div>Remark</div>
             </div>
             <div className="kot-add-rows">
               {items.map((it, i) => (
@@ -2667,7 +2698,7 @@ function KotAddTableDialog({
           <table>
             <colgroup><col className="c-code" /><col /><col className="c-qty" /></colgroup>
             <thead>
-              <tr><th>Code</th><th>ItemName</th><th>Qty</th></tr>
+              <tr><th>Code</th><th>Item Name</th><th>Qty</th></tr>
             </thead>
             <tbody>
               {tableItems.map((row, i) => (
@@ -2839,7 +2870,7 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
             <label>Table No. : <input className="win" value={tableNo} onChange={(e) => setTableNo(e.target.value)} onKeyDown={onFilterEnter} /></label>
             <label>Bill No : <input className="win" value={billNo} onChange={(e) => setBillNo(e.target.value)} onKeyDown={onFilterEnter} /></label>
             <label>Outlet : <select className="win" value={outletName} onChange={(e) => setOutletName(e.target.value)} onKeyDown={onFilterEnter}>
-              {OUTLETS.map((o) => <option key={o}>{o}</option>)}
+              {OUTLETS.map((o) => <option key={o} value={o}>{formatUiLabel(o)}</option>)}
             </select></label>
           </div>
         </div>
@@ -2854,7 +2885,7 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
         <table className="data set-table bill-rpt-table">
           <thead>
             <tr>
-              {["KOT No", "Manual KOTNo", "Table No", "KOT Date", "Kot Time", "BillNo", "NetAmount", "StwardName", "KOTRemark", "UserID"].map((h) => (
+              {["KOT No", "Manual KOT No.", "Table No", "KOT Date", "KOT Time", "Bill No.", "Net Amount", "Steward Name", "KOT Remark", "User ID"].map((h) => (
                 <th key={h}>{h}</th>
               ))}
             </tr>
@@ -3048,7 +3079,7 @@ function CardBillDialog({
                 <tr key={r.invoice_id} className={i === sel ? "on" : ""} onClick={() => setSel(i)}>
                   <td>{r.invoice_number}</td>
                   <td>{r.table_no}</td>
-                  <td>{r.outlet}</td>
+                  <td>{formatUiLabel(r.outlet)}</td>
                   <td className="num">{inr(r.amount)}</td>
                   <td>
                     <button

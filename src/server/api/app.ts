@@ -397,6 +397,10 @@ export function createApp(options: CreateAppOptions) {
   }));
   app.post("/api/invoices/generate", wrap((req, res) => {
     const { orderId, invoiceId, edits = [], masterPin, ...billOptions } = req.body;
+    const expectedPin = process.env.POS_MASTER_PIN || "0166";
+    if (masterPin && masterPin !== expectedPin) {
+      throw new AppError("Incorrect master PIN", 403);
+    }
     const invoice = req.ctx.db.transaction(() => {
       const existing = billToUpdate(req.ctx, orderId, invoiceId);
       let savedDetails: Partial<BillDetails> = {};
@@ -453,8 +457,8 @@ export function createApp(options: CreateAppOptions) {
       }) !== billApprovalFields(savedFields);
       if (needsApproval) {
         if (!remark) throw new AppError("Enter a remark to update this bill", 403, "BILL_REMARK_REQUIRED", "billRemark");
-        if (masterPin !== (process.env.POS_MASTER_PIN || "0166")) {
-          throw new AppError(masterPin ? "Incorrect master PIN" : "Enter the master PIN to update this bill", 403);
+        if (!masterPin) {
+          throw new AppError("Enter the master PIN to update this bill", 403);
         }
       }
       applyBillEdits(req.ctx, orderId, edits, existing?.status === "PAID");

@@ -1,3 +1,4 @@
+import { formatUiLabel } from "./formatUiLabel";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { AlertBox, CapBtns, ConfirmAsk } from "./BillDialogs";
@@ -814,7 +815,7 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
                 <thead>
                   <tr>
                     <th />
-                    <th>DeptName</th>
+                    <th>Department</th>
                     <th>Rate</th>
                     <th>HSN</th>
                     <th>Inclusive</th>
@@ -830,7 +831,7 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
                       onMouseDown={() => setDeptSel(i)}
                     >
                       <td className="arr">{i === deptSel ? "►" : ""}</td>
-                      <td>{r.dept}</td>
+                      <td>{formatUiLabel(r.dept)}</td>
                       <td>
                         <input
                           className="cell num"
@@ -909,9 +910,9 @@ export function ItemMasterDialog({ onClose, onSaved }: { onClose: () => void; on
               <thead>
                 <tr>
                   <th />
-                  <th>ItemName</th>
-                  <th>ItemCode</th>
-                  <th>CostPrice</th>
+                  <th>Item Name</th>
+                  <th>Item Code</th>
+                  <th>Cost Price</th>
                   <th className="act">Edit</th>
                   <th className="act">Delete</th>
                 </tr>

@@ -122,7 +122,7 @@ export function LoginGate({
           <button type="button" onClick={onExit}><u>E</u>xit</button>
         </div>
         <hr className="login-rule" />
-        <div className="login-script">BOSS BILLING SOFTWARE</div>
+        <div className="login-script">BOSS Billing Software</div>
       </form>
       {changing && (
         <ChangePassword
