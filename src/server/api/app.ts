@@ -397,13 +397,7 @@ export function createApp(options: CreateAppOptions) {
     res.json(reports.settlementDetail(req.ctx, req.params.paymentId));
   }));
   app.put("/api/reports/settlement/:paymentId", wrap((req, res) => {
-    const body = req.body ?? {};
-    res.json(reports.updateSettlement(req.ctx, req.params.paymentId, {
-      method: body.method,
-      amount: Number(body.amount),
-      account: body.account,
-      remark: body.remark,
-    }));
+    res.json(reports.updateSettlement(req.ctx, req.params.paymentId, req.body ?? {}));
   }));
   app.delete("/api/reports/settlement/:paymentId", wrap((req, res) => {
     res.json(reports.deleteSettlement(req.ctx, req.params.paymentId));

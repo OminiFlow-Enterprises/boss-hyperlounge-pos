@@ -73,6 +73,7 @@ export function moveFormFocus(e: KeyboardEvent) {
   if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "ArrowUp" && e.key !== "ArrowDown") return false;
   const active = document.activeElement as HTMLElement | null;
   if (!active?.matches("input, select, textarea, button")) return false;
+  if (active instanceof HTMLSelectElement && (e.key === "ArrowUp" || e.key === "ArrowDown")) return false;
   if (active.dataset.list === "open") return false;
   // "1" owns every arrow. "ud" owns Up/Down only (dropdowns). Text edits keep Left/Right for the caret.
   if (active.dataset.cycle === "1" || active.classList.contains("xfer-outlet-box")) return false;

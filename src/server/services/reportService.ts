@@ -738,72 +738,65 @@ function applyPaidStatus(ctx: AppContext, invoiceId: string, orderId: string, gr
   ctx.db.prepare("UPDATE orders SET status = 'SETTLING' WHERE id = ? AND status = 'PAID'").run(orderId);
 }
 
+type SettlementPart = { method: string; amount: number; account: string; remark: string };
+
 export function updateSettlement(
   ctx: AppContext,
   paymentId: string,
-  input: { method?: string; amount?: number; account?: string; remark?: string },
+  input: { original?: SettlementPart; lines?: SettlementPart[] },
 ) {
   assertPermission(ctx.actor.role, "SETTLE_BILL");
-  const mode = String(input.method || "CASH");
-  const method = mode === "BANK TRANSFER" ? "CARD" : mode === "PREPAID CARD" ? "MEMBER_CARD" : mode === "CASH" ? "CASH" : "";
-  if (!method) throw new AppError("Select payment mode");
-  const amount = Number(input.amount);
-  if (!Number.isInteger(amount) || amount <= 0) throw new AppError("Enter settle amount");
-  const account = String(input.account || "").trim();
-  if (method === "CARD" && (!account || account === "Select" || account === "Cash.")) throw new AppError("Select bank name");
-  const remark = String(input.remark ?? "").trim();
-  if (!remark) throw new AppError("Enter Remark");
+  const { original } = input;
+  if (!original || !Array.isArray(input.lines) || !input.lines.length) {
+    throw new AppError("Enter at least one payment part");
+  }
+  const lines = input.lines.map((line) => {
+    const mode = line?.method;
+    const method = mode === "BANK TRANSFER" ? "CARD" : mode === "PREPAID CARD" ? "MEMBER_CARD" : mode === "CASH" ? "CASH" : "";
+    if (!method) throw new AppError("Select payment mode");
+    const amount = line.amount;
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new AppError("Enter settle amount");
+    const account = String(line.account || "").trim();
+    if (method === "CARD" && (!account || account === "Select" || account === "Cash.")) throw new AppError("Select bank name");
+    return { method, amount, account: method === "CASH" ? "Cash." : account, remark: String(line.remark ?? "").trim() };
+  });
 
   return ctx.db.transaction(() => {
     const row = settlementRow(ctx, paymentId);
     if (!row) throw new AppError("Settlement not found", 404);
-    const current = String(row.method || "");
-    if (current === "MEMBER_CARD" && (method !== "MEMBER_CARD" || amount !== Number(row.amount))) {
-      throw new AppError("Prepaid card settlement cannot be changed");
+    if (row.status === "CANCELLED") throw new AppError("Invoice is CANCELLED");
+    if (row.method !== original.method || row.amount !== original.amount ||
+        row.account !== original.account || row.remark !== original.remark) {
+      throw new AppError("Settlement changed. Reopen it from the report and try again.", 409);
     }
-    if (method === "MEMBER_CARD" && current !== "MEMBER_CARD") {
+    if (lines.reduce((total, line) => total + line.amount, 0) !== row.amount) {
+      throw new AppError("Payment parts must add up to the selected settlement amount");
+    }
+
+    if (row.method === "MEMBER_CARD") {
+      if (lines.length !== 1 || lines[0].method !== "MEMBER_CARD") {
+        throw new AppError("Prepaid card settlement cannot be changed");
+      }
+      lines[0].account = String(row.account);
+    } else if (lines.some((line) => line.method === "MEMBER_CARD")) {
       throw new AppError("Prepaid card settlement cannot be added here");
     }
-    const others = Number(row.paid) - Number(row.amount);
-    if (others + amount > Number(row.bill_amount)) throw new AppError("Amount exceeds bill");
-    const storedAccount = method === "CASH" ? (account || "Cash.") : method === "CARD" ? account : String(row.account || "");
-    // When changing the mode for only part of an existing settlement, retain
-    // the unmodified remainder under its original payment mode.
-    if (method !== current && amount < Number(row.amount)) {
-      const remainder = Number(row.amount) - amount;
-      ctx.db.prepare("UPDATE payments SET method = ?, amount = ?, reference = ?, remark = ? WHERE id = ?")
-        .run(method, amount, storedAccount, remark, paymentId);
-      const splitPaymentId = uuid();
-      ctx.db.prepare(
-        `INSERT INTO payments (id, invoice_id, method, amount, member_card_id, ledger_id, reference, remark, receipt_no, voucher_no, created_at)
-         VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)`
-      ).run(
-        splitPaymentId,
-        row.invoice_id,
-        current,
-        remainder,
-        String(row.account || ""),
-        String(row.remark || ""),
+
+    const [first, ...remaining] = lines;
+    ctx.db.prepare("UPDATE payments SET method = ?, amount = ?, reference = ?, remark = ? WHERE id = ?")
+      .run(first.method, first.amount, first.account, first.remark, paymentId);
+    const insert = ctx.db.prepare(
+      "INSERT INTO payments (id, invoice_id, method, amount, reference, remark, receipt_no, voucher_no, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
+    const addedPayments = remaining.map((line) => {
+      const id = uuid();
+      insert.run(id, row.invoice_id, line.method, line.amount, line.account, line.remark,
         nextSequence(ctx.db, "settlement_receipt", 32901),
         nextSequence(ctx.db, "settlement_voucher", 47201),
-        nowIso(),
-      );
-      applyPaidStatus(ctx, String(row.invoice_id), String(row.order_id), Number(row.bill_amount), Number(row.paid));
-      audit(ctx, "SETTLEMENT_UPDATE", "payment", paymentId, null, row.amount, {
-        splitPaymentId,
-        retainedAmount: remainder,
-        retainedMethod: current,
-        method,
-        amount,
-        account: storedAccount,
-      });
-      return settlementRow(ctx, splitPaymentId);
-    }
-    ctx.db
-      .prepare("UPDATE payments SET method = ?, amount = ?, reference = ?, remark = ? WHERE id = ?")
-      .run(method, amount, storedAccount, remark, paymentId);
-    applyPaidStatus(ctx, String(row.invoice_id), String(row.order_id), Number(row.bill_amount), others + amount);
-    audit(ctx, "SETTLEMENT_UPDATE", "payment", paymentId, null, row.amount, { method, amount, account: storedAccount });
+        row.voucher_date);
+      return { id, ...line };
+    });
+    audit(ctx, "SETTLEMENT_UPDATE", "payment", paymentId, null, original, { ...first, addedPayments });
     return settlementRow(ctx, paymentId);
   })();
 }

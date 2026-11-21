@@ -759,12 +759,36 @@ table.data tbody tr:hover td.cell-on { background: #0078d7; color: #fff; }
 .rpt-bar label, .flt-dates { display: inline-flex; align-items: center; gap: 4px; font-weight: 700; }
 .rpt-bar .win { height: 26px; }
 .rpt-bar .spacer { flex: 1; }
-.transfer-grid { flex: 1; min-height: 0; overflow: auto; background: #fff; }
-.transfer-grid table { width: max-content; border-collapse: collapse; table-layout: auto; }
-.transfer-grid th, .transfer-grid td { padding: 2px 6px; text-align: left; vertical-align: top; font-weight: 700; }
-.transfer-grid th { white-space: nowrap; }
-.transfer-grid .transfer-nowrap { white-space: nowrap; }
-.transfer-grid .transfer-empty { padding: 8px; text-align: left; }
+.transfer-report { min-width: 0; background: var(--face); }
+.transfer-heading {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 16px; background: #fff; border-bottom: 1px solid #c0c0c0;
+}
+.transfer-heading h1 { margin: 0; font-size: 20px; }
+.transfer-filters { padding: 8px 16px; }
+.transfer-filters .flt-dates { flex-wrap: wrap; gap: 8px 12px; }
+.transfer-grid {
+  flex: 1; min-height: 0; overflow: auto; margin: 12px 16px 16px;
+  border: 1px solid #aeb8c1; background: #fff;
+}
+.transfer-grid table {
+  width: 100%; min-width: 590px; border-collapse: separate; border-spacing: 0; table-layout: fixed;
+}
+.transfer-grid--item table { min-width: 840px; }
+.transfer-grid th, .transfer-grid td {
+  padding: 9px 10px; border-bottom: 1px solid #d8e0e7;
+  text-align: left; vertical-align: top; line-height: 1.4; overflow-wrap: anywhere;
+}
+.transfer-grid th {
+  position: sticky; top: 0; background: #e5ebf2; color: #1c2f43; white-space: nowrap;
+}
+.transfer-grid tbody tr:nth-child(even) { background: #f5f7fa; }
+.transfer-grid .transfer-created_at { width: 175px; white-space: nowrap; }
+.transfer-grid .transfer-from_table, .transfer-grid .transfer-to_table { width: 106px; }
+.transfer-grid .transfer-staff_name { width: 16%; }
+.transfer-grid .transfer-item_names { width: 27%; }
+.transfer-grid .transfer-item_count { width: 60px; text-align: right; font-variant-numeric: tabular-nums; }
+.transfer-grid .transfer-empty { padding: 24px 12px; text-align: center; color: #3e4c59; }
 .rpt-foot { display: flex; justify-content: flex-end; gap: 6px; padding: 6px 10px; background: var(--face); border-top: 1px solid #c0c0c0; }
 .grid-fill { flex: 1; overflow: auto; background: #fff; }
 .grid-fill.gray { background: #8a8a8a; }

@@ -1617,7 +1617,9 @@ export function SettleDialog({
       }
       setSnap(result);
       setAmount(rupee(Number(result.due ?? 0)));
-      setPayBal("");
+      chooseMode(PAY_MODES[0].id);
+      bankValueRef.current = BANK_NAMES[0];
+      setBankName(BANK_NAMES[0]);
       setTimeout(() => { amtRef.current?.focus(); amtRef.current?.select(); }, 0);
     } catch (e) {
       showWarn(insufficientCard(e), method === "MEMBER_CARD" ? "amount" : "save");
@@ -1782,6 +1784,7 @@ export function SettleDialog({
                   className="win green num"
                   data-num="dec"
                   tabIndex={1}
+                  autoFocus
                   value={amount}
                   onChange={(e) => setAmount(numText(e.target.value))}
                   onFocus={(e) => e.currentTarget.select()}

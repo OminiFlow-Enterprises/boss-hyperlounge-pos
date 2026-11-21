@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { api, ApiError } from "./api";
+import { api } from "./api";
 import { parseRupeesInput } from "../shared/money";
 import type { NavView } from "../shared/types";
 import { AlertBox, CapBtns, ConfirmAsk, PrepareBillDialog, SettleDialog } from "./BillDialogs";
@@ -1360,13 +1360,7 @@ function amountText(value: string) {
   return clean.slice(0, dot + 1) + clean.slice(dot + 1).replace(/\./g, "");
 }
 
-function cardBalanceMessage(e: unknown) {
-  if (e instanceof ApiError && e.details && typeof e.details === "object" && e.details !== null && "available" in e.details) {
-    const available = Number((e.details as { available: number }).available) || 0;
-    return `Insufficient amount  Card balance : ${rupees(available)}`;
-  }
-  return e instanceof Error ? e.message : "Update failed";
-}
+type SettlementPart = { method: string; amount: number; account: string; remark: string };
 
 function SettlementUpdateDialog({
   paymentId,
@@ -1376,8 +1370,6 @@ function SettlementUpdateDialog({
 }: {
   paymentId: string;
   outlet: string;
-  bills: Array<{ payment_id: string; bill_no: string }>;
-  onSwitch: (id: string) => void;
   onClose: () => void;
   onChanged: () => void;
 }) {
@@ -1385,85 +1377,44 @@ function SettlementUpdateDialog({
   const [mode, setMode] = useState("CASH");
   const [amount, setAmount] = useState("");
   const [bankName, setBankName] = useState(BANK_ACCOUNTS[0]);
-  const [payCard, setPayCard] = useState("");
-  const [payBal, setPayBal] = useState("");
+  const [parts, setParts] = useState<SettlementPart[]>([]);
+  const busy = useRef(false);
   const [remark, setRemark] = useState("");
   const [warn, setWarn] = useState("");
   const [askDelete, setAskDelete] = useState(false);
-  const warnBack = useRef<"amount" | "mode" | "bank" | "card" | "save" | "remark">("amount");
+  const warnBack = useRef<"amount" | "mode" | "bank" | "save" | "remark">("amount");
   const amtRef = useRef<HTMLInputElement>(null);
   const remarkRef = useRef<HTMLInputElement>(null);
-  const modeRef = useRef<HTMLInputElement>(null);
-  const bankRef = useRef<HTMLInputElement>(null);
-  const payCardRef = useRef<HTMLInputElement>(null);
+  const modeRef = useRef<HTMLSelectElement>(null);
+  const bankRef = useRef<HTMLSelectElement>(null);
   const updateRef = useRef<HTMLButtonElement>(null);
-  const modeValueRef = useRef("CASH");
-  const bankValueRef = useRef(BANK_ACCOUNTS[0]);
   const close = useRef(onClose);
   close.current = onClose;
 
-  function focusField(where: "amount" | "mode" | "bank" | "card" | "save" | "remark") {
+  function focusField(where: "amount" | "mode" | "bank" | "save" | "remark") {
     if (where === "amount") {
       amtRef.current?.focus();
       amtRef.current?.select();
     } else if (where === "mode") modeRef.current?.focus();
     else if (where === "bank") bankRef.current?.focus();
-    else if (where === "card") {
-      payCardRef.current?.focus();
-      payCardRef.current?.select();
-    } else if (where === "remark") {
+    else if (where === "remark") {
       remarkRef.current?.focus();
       remarkRef.current?.select();
     } else updateRef.current?.focus();
   }
 
-  function showWarn(message: string, back: "amount" | "mode" | "bank" | "card" | "save" | "remark") {
+  function showWarn(message: string, back: "amount" | "mode" | "bank" | "save" | "remark") {
     warnBack.current = back;
     setWarn(message);
-  }
-
-  function chooseMode(next: string) {
-    modeValueRef.current = next;
-    setMode(next);
-    if (next === "BANK TRANSFER" && !BANK_ACCOUNTS.includes(bankValueRef.current)) {
-      bankValueRef.current = BANK_ACCOUNTS[0];
-      setBankName(BANK_ACCOUNTS[0]);
-    }
-    if (next !== "PREPAID CARD") setPayBal("");
-  }
-
-  function stepMode(dir: 1 | -1) {
-    const i = REPORT_PAY_MODES.indexOf(modeValueRef.current as (typeof REPORT_PAY_MODES)[number]);
-    const next = REPORT_PAY_MODES[Math.max(0, Math.min(REPORT_PAY_MODES.length - 1, (i < 0 ? 0 : i) + dir))];
-    if (next) chooseMode(next);
-  }
-
-  function stepBank(dir: 1 | -1) {
-    const i = Math.max(0, BANK_ACCOUNTS.indexOf(bankValueRef.current));
-    const next = BANK_ACCOUNTS[Math.max(0, Math.min(BANK_ACCOUNTS.length - 1, i + dir))];
-    if (!next || next === bankValueRef.current) return;
-    bankValueRef.current = next;
-    setBankName(next);
-  }
-
-  function afterMode() {
-    const current = modeValueRef.current;
-    if (current === "BANK TRANSFER") window.setTimeout(() => bankRef.current?.focus(), 0);
-    else if (current === "PREPAID CARD") window.setTimeout(() => { payCardRef.current?.focus(); payCardRef.current?.select(); }, 0);
-    else window.setTimeout(() => updateRef.current?.focus(), 0);
   }
 
   function applyRow(next: any) {
     const label = modeLabel(next.method);
     const bank = label === "BANK TRANSFER" && BANK_ACCOUNTS.includes(next.account) ? next.account : BANK_ACCOUNTS[0];
-    modeValueRef.current = label;
-    bankValueRef.current = bank;
     setRow(next);
     setMode(label);
     setAmount(rupees(next.amount));
     setBankName(bank);
-    setPayCard(cardNoDigits(String(next.card_number || "")));
-    setPayBal("");
     setRemark(next.remark || "");
   }
 
@@ -1478,60 +1429,43 @@ function SettlementUpdateDialog({
     return () => { gone = true; };
   }, [paymentId]);
 
-  async function cardCovers(paise: number) {
-    const q = cardNoDigits(payCard);
-    if (!cardNoReady(q)) { stayOnCard(payCardRef.current); return false; }
-    try {
-      const found = await api.get<Array<{ id: string }>>(`/api/cards?q=${encodeURIComponent(q)}`);
-      if (!found[0]?.id) { showWarn("Card not found", "card"); return false; }
-      const params = new URLSearchParams({ q });
-      if (row?.outlet_name === "THE BOSS CLUB" && row?.order_id) params.set("exceptOrderId", String(row.order_id));
-      const b = await api.get<any>(`/api/cards/balance/check?${params}`);
-      const usable = Number(b.balances?.available ?? b.balances?.usable ?? 0);
-      setPayBal(rupees(usable));
-      const originalPrepaid = row?.method === "MEMBER_CARD";
-      const need = originalPrepaid ? Math.max(0, paise - Number(row?.amount || 0)) : paise;
-      if (usable < need) {
-        showWarn(`Insufficient amount  Card balance : ${rupees(usable)}`, "amount");
-        return false;
-      }
-      return true;
-    } catch (e) {
-      showWarn(cardBalanceMessage(e), "card");
-      return false;
-    }
-  }
+  const remaining = (row?.amount ?? 0) - parts.reduce((sum, part) => sum + part.amount, 0);
+  const prepaid = row?.method === "MEMBER_CARD";
 
   async function save() {
-    if (warn || askDelete) return;
+    if (!row || busy.current || warn || askDelete) return;
     let paise = 0;
     try { paise = parseRupeesInput(amount || "0"); } catch { showWarn("Enter settle amount", "amount"); return; }
     if (paise <= 0) { showWarn("Enter settle amount", "amount"); return; }
-    const dueCap = Number(row?.bill_amount || 0) - (Number(row?.paid || 0) - Number(row?.amount || 0));
-    if (paise > dueCap) paise = dueCap;
-    if (mode === "BANK TRANSFER" && !bankName) { showWarn("Select bank name", "bank"); return; }
-    if (mode === "PREPAID CARD" && !(await cardCovers(paise))) return;
-    if (!remark.trim()) { showWarn("Enter Remark", "remark"); return; }
-    const account = mode === "BANK TRANSFER" ? bankName : mode === "CASH" ? "Cash." : "Prepaid Card";
-    try {
-      const next = await api.put<any>(`/api/reports/settlement/${paymentId}`, { method: mode, amount: paise, account, remark });
-      applyRow(next);
-      if (next.payment_id && next.payment_id !== paymentId) onSwitch(next.payment_id);
-      onChanged();
-      setTimeout(() => { amtRef.current?.focus(); amtRef.current?.select(); }, 0);
-    } catch (e) {
-      showWarn(cardBalanceMessage(e), mode === "PREPAID CARD" ? "amount" : "save");
+    if (paise > remaining) { showWarn("Amount exceeds the remaining settlement", "amount"); return; }
+    if (prepaid && paise !== remaining) { showWarn("Prepaid card settlements cannot be split", "amount"); return; }
+    const account = mode === "BANK TRANSFER" ? bankName : mode === "CASH" ? "Cash." : row.account;
+    const lines = [...parts, { method: mode, amount: paise, account, remark }];
+    if (paise < remaining) {
+      setParts(lines);
+      setAmount(rupees(remaining - paise));
+      setMode(REPORT_PAY_MODES[0]);
+      setBankName(BANK_ACCOUNTS[0]);
+      setRemark(row.remark || "");
+      window.setTimeout(() => focusField("amount"), 0);
+      return;
     }
-  }
-
-  async function acceptCard() {
-    let paise = 0;
-    try { paise = parseRupeesInput(amount || "0"); } catch { showWarn("Enter settle amount", "amount"); return; }
-    if (paise <= 0) { showWarn("Enter settle amount", "amount"); return; }
-    if (await cardCovers(paise)) window.setTimeout(() => updateRef.current?.focus(), 0);
+    busy.current = true;
+    const original = { method: row.method, amount: row.amount, account: row.account, remark: row.remark };
+    try {
+      await api.put(`/api/reports/settlement/${paymentId}`, { original, lines });
+      onChanged();
+      onClose();
+    } catch (e) {
+      showWarn(e instanceof Error ? e.message : "Could not update settlement", "save");
+    } finally {
+      busy.current = false;
+    }
   }
 
   async function remove() {
+    if (busy.current || parts.length) return;
+    busy.current = true;
     setAskDelete(false);
     try {
       await api.del(`/api/reports/settlement/${paymentId}`);
@@ -1539,29 +1473,18 @@ function SettlementUpdateDialog({
       onClose();
     } catch (e) {
       showWarn(e instanceof Error ? e.message : "Delete failed", "save");
+    } finally {
+      busy.current = false;
     }
   }
 
   useEffect(() => {
     function keys(e: globalThis.KeyboardEvent) {
       if (warn || askDelete || document.querySelector(".confirm-dlg, .alert-dlg")) return;
-      if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); close.current(); return; }
+      if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); if (!busy.current) close.current(); return; }
       if (e.key === "F2") { e.preventDefault(); e.stopImmediatePropagation(); void save(); return; }
-      if (e.key === "F4") { e.preventDefault(); e.stopImmediatePropagation(); setAskDelete(true); return; }
+      if (e.key === "F4") { e.preventDefault(); e.stopImmediatePropagation(); if (!busy.current && !parts.length) setAskDelete(true); return; }
       const active = document.activeElement;
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        const dir = e.key === "ArrowDown" ? 1 : -1;
-        if (active === modeRef.current) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          stepMode(dir);
-        } else if (active === bankRef.current) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          stepBank(dir);
-        }
-        return;
-      }
       if (e.key !== "Enter") return;
       if (active === amtRef.current) {
         e.preventDefault();
@@ -1570,15 +1493,12 @@ function SettlementUpdateDialog({
       } else if (active === modeRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        afterMode();
+        if (mode === "BANK TRANSFER") bankRef.current?.focus();
+        else updateRef.current?.focus();
       } else if (active === bankRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
         updateRef.current?.focus();
-      } else if (active === payCardRef.current) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        void acceptCard();
       } else if (active === remarkRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -1593,15 +1513,12 @@ function SettlementUpdateDialog({
     return () => window.removeEventListener("keydown", keys, true);
   });
 
-  const entered = (() => { try { return parseRupeesInput(amount || "0"); } catch { return Number(row?.amount) || 0; } })();
-  const balance = Math.max(0, Number(row?.bill_amount || 0) - (Number(row?.paid || 0) - Number(row?.amount || 0) + entered));
-
   return (
     <div className="dialog settle-dlg su-dlg">
       <div className="dialog-cap">
         <span className="cap-dot" />
         Restaurant Settlement - {outlet}
-        <CapBtns onClose={onClose} />
+        <CapBtns onClose={() => { if (!busy.current) onClose(); }} />
       </div>
       <div className="settle-body">
         <table className="st-form">
@@ -1632,10 +1549,9 @@ function SettlementUpdateDialog({
               <td><input className="win num" readOnly tabIndex={-1} value={rupees(row?.allowance)} /></td>
               <td className="lbl">Payment Mode :</td>
               <td>
-                <span className="st-drop">
-                  <input ref={modeRef} className="win" readOnly tabIndex={2} data-cycle="1" value={mode} />
-                  <span className="st-drop-btn" aria-hidden="true" />
-                </span>
+                <select ref={modeRef} className="win" tabIndex={2} value={mode} onChange={(e) => setMode(e.target.value)}>
+                  {REPORT_PAY_MODES.filter((choice) => prepaid === (choice === "PREPAID CARD")).map((choice) => <option key={choice}>{choice}</option>)}
+                </select>
               </td>
             </tr>
             {mode === "BANK TRANSFER" && (
@@ -1643,41 +1559,29 @@ function SettlementUpdateDialog({
                 <td /><td />
                 <td className="lbl">Bank Name :</td>
                 <td>
-                  <span className="st-drop">
-                    <input ref={bankRef} className="win" readOnly tabIndex={3} data-cycle="1" value={bankName} />
-                    <span className="st-drop-btn" aria-hidden="true" />
-                  </span>
-                </td>
-              </tr>
-            )}
-            {mode === "PREPAID CARD" && (
-              <tr>
-                <td /><td />
-                <td className="lbl">Card No. :</td>
-                <td>
-                  <span className="st-card">
-                    <input ref={payCardRef} className="win green" data-num="card" inputMode="numeric" maxLength={4} tabIndex={3} value={payCard} onChange={(e) => setPayCard(cardNoDigits(e.target.value))} onBlur={() => { if (payCard && !cardNoReady(payCard)) stayOnCard(payCardRef.current); }} />
-                    {payBal ? <span className="st-bal">{payBal}</span> : null}
-                  </span>
+                  <select ref={bankRef} className="win" tabIndex={3} value={bankName} onChange={(e) => setBankName(e.target.value)}>
+                    {BANK_ACCOUNTS.map((name) => <option key={name}>{name}</option>)}
+                  </select>
                 </td>
               </tr>
             )}
             <tr>
-              <td className="lbl">Settled Amount :</td>
+              <td className="lbl">Payment Amount :</td>
               <td>
                 <input
                   ref={amtRef}
                   className="win green num"
                   data-num="dec"
                   tabIndex={1}
+                  readOnly={prepaid}
                   autoFocus
                   value={amount}
                   onChange={(e) => setAmount(amountText(e.target.value))}
                   onFocus={(e) => e.currentTarget.select()}
                 />
               </td>
-              <td className="lbl">Balance Amount :</td>
-              <td><input className="win num" readOnly tabIndex={-1} value={rupees(balance)} /></td>
+              <td className="lbl">Remaining Amount :</td>
+              <td><input className="win num" readOnly tabIndex={-1} value={rupees(remaining)} /></td>
             </tr>
             <tr>
               <td className="lbl">Remark :</td>
@@ -1685,6 +1589,11 @@ function SettlementUpdateDialog({
             </tr>
           </tbody>
         </table>
+        {parts.length > 0 && (
+          <ol aria-label="Payment parts entered">
+            {parts.map((part, index) => <li key={index}>{part.method}{part.method === "BANK TRANSFER" ? ` (${part.account})` : ""} {inr(part.amount)}</li>)}
+          </ol>
+        )}
         <div className="st-foot">
           <span className="st-vno">Voucher No : {row?.voucher_no ?? ""}</span>
           <button type="button" className="fn" tabIndex={-1} onClick={() => {
@@ -1694,9 +1603,9 @@ function SettlementUpdateDialog({
               await handleBillPrintResponse(res as any);
             }).catch(() => null);
           }}>Print</button>
-          <button ref={updateRef} type="button" className="fn" tabIndex={4} onClick={() => void save()}>Update (F2)</button>
-          <button type="button" className="fn" tabIndex={-1} onClick={() => setAskDelete(true)}>Delete (F4)</button>
-          <button type="button" className="fn" tabIndex={-1} onClick={onClose}>Exit</button>
+          <button ref={updateRef} type="button" className="fn" tabIndex={4} onClick={() => void save()}>{parts.length ? "Post (F2)" : "Update (F2)"}</button>
+          <button type="button" className="fn" tabIndex={-1} disabled={parts.length > 0} onClick={() => setAskDelete(true)}>Delete (F4)</button>
+          <button type="button" className="fn" tabIndex={-1} onClick={() => { if (!busy.current) onClose(); }}>{parts.length ? "Discard" : "Exit"}</button>
         </div>
       </div>
       {warn && (
@@ -1757,8 +1666,9 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
     tr?.focus({ preventScroll: true });
   }, [data, sel]);
   useEffect(() => {
-    function keys(e: KeyboardEvent) {
+    function keys(e: globalThis.KeyboardEvent) {
       if (editId || document.querySelector(".su-dlg, .alert-dlg, .confirm-dlg")) return;
+      if (e.target instanceof HTMLSelectElement) return;
       const rows = data.rows || [];
       if (!rows.length) return;
       const idx = Math.max(0, rows.findIndex((r: any) => r.payment_id === selRef.current));
@@ -1849,6 +1759,7 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
                     const c = td ? Math.max(0, [...td.parentElement!.children].indexOf(td)) : 0;
                     setSel(r.payment_id);
                     setCol(c);
+                    setEditId(r.payment_id);
                   }}
                 >
                   {cells.map((text, c) => (
@@ -1878,8 +1789,6 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
         <SettlementUpdateDialog
           paymentId={editId}
           outlet={outletName}
-          bills={(data.rows || []).map((r: any) => ({ payment_id: r.payment_id, bill_no: r.bill_no }))}
-          onSwitch={setEditId}
           onClose={() => setEditId(null)}
           onChanged={() => { void load(); }}
         />
@@ -3185,31 +3094,79 @@ export function CardSettlementReport({ onExit }: { onExit: () => void }) {
   );
 }
 
+type TransferRow = {
+  id: string;
+  created_at: string;
+  from_table: string | null;
+  to_table: string | null;
+  item_names?: string;
+  item_count?: number;
+  staff_name: string;
+  reason: string | null;
+};
+
 function TransferReport({ kind, onExit }: { kind: "item" | "table"; onExit: () => void }) {
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
-  const [rows, setRows] = useState<any[]>([]);
+  const [rows, setRows] = useState<TransferRow[]>([]);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
   const title = kind === "item" ? "Item Transfer Report" : "Table Transfer Report";
   async function load() {
+    setLoading(true);
     setError("");
     try {
-      const data = await api.get<any[]>(`/api/reports/${kind}-transfers?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+      const data = await api.get<TransferRow[]>(`/api/reports/${kind}-transfers?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
       setRows(data);
-    } catch (e) { setError(e instanceof Error ? e.message : "Unable to load transfer report"); }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unable to load transfer report");
+    } finally {
+      setLoading(false);
+    }
   }
   useEffect(() => { load(); }, []);
-  const columns: Array<[string, string]> = kind === "item"
+  const columns: Array<[keyof TransferRow, string]> = kind === "item"
     ? [["created_at", "Date / Time"], ["from_table", "From Table"], ["to_table", "To Table"], ["item_names", "Transferred Items"], ["item_count", "Qty"], ["staff_name", "Staff"], ["reason", "Reason"]]
     : [["created_at", "Date / Time"], ["from_table", "From Table"], ["to_table", "To Table"], ["staff_name", "Staff"], ["reason", "Reason"]];
-  return <div className="rpt-page">
-    <div className="rpt-bar"><strong>{title}</strong><FilterDates from={from} to={to} setFrom={setFrom} setTo={setTo} onShow={() => load()} /></div>
-    {error && <div className="rpt-bar">{error}</div>}
-    <div className="rpt-grid transfer-grid"><table><thead><tr>{columns.map(([key, label]) => <th key={key}>{label}</th>)}</tr></thead>
-      <tbody>{rows.map((row) => <tr key={row.id}>{columns.map(([key]) => <td key={key} className={key === "created_at" || key === "item_names" || key === "reason" ? undefined : "transfer-nowrap"}>{key === "created_at" ? stampGrid(row[key]) : row[key] ?? ""}</td>)}</tr>)}
-        {!rows.length && <tr><td className="transfer-empty" colSpan={columns.length}>No transfers found for this date range.</td></tr>}</tbody>
-    </table></div>
-  </div>;
+  return (
+    <section className="rpt-page transfer-report" aria-labelledby="transfer-title">
+      <header className="transfer-heading">
+        <h1 id="transfer-title">{title}</h1>
+        <button type="button" className="fn" onClick={onExit}>Exit</button>
+      </header>
+      <div className="rpt-bar transfer-filters">
+        <FilterDates from={from} to={to} setFrom={setFrom} setTo={setTo} />
+        <button type="button" className="fn" disabled={loading} onClick={load}>Refresh</button>
+      </div>
+      <div className={`transfer-grid transfer-grid--${kind}`} tabIndex={0} role="region" aria-labelledby="transfer-title" aria-busy={loading}>
+        <table aria-labelledby="transfer-title">
+          <thead>
+            <tr>{columns.map(([key, label]) => <th key={key} scope="col" className={`transfer-${key}`}>{label}</th>)}</tr>
+          </thead>
+          <tbody>
+            {!loading && !error && rows.map((row) => (
+              <tr key={row.id}>
+                {columns.map(([key]) => (
+                  <td key={key} className={`transfer-${key}`}>
+                    {key === "created_at" ? stampGrid(row.created_at) || "—" : String(row[key] ?? "") || "—"}
+                  </td>
+                ))}
+              </tr>
+            ))}
+            {(loading || error || !rows.length) && (
+              <tr>
+                <td className="transfer-empty" colSpan={columns.length}>
+                  <span role={error ? "alert" : "status"}>
+                    {loading ? "Loading transfers…" : error || "No transfers found for this date range."}
+                  </span>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
 }
 
 export function ReportHost({ view, outlet, onExit }: { view: NavView; outlet?: string; onExit: () => void }) {
@@ -3227,8 +3184,8 @@ export function ReportHost({ view, outlet, onExit }: { view: NavView; outlet?: s
   if (view === "gst-report") return <GstReport onExit={onExit} />;
   if (view === "item-wise-sale") return <ItemWiseSale onExit={onExit} />;
   if (view === "item-wise-group") return <ItemWiseGroupSales onExit={onExit} />;
-  if (view === "item-transfer-report") return <TransferReport kind="item" onExit={onExit} />;
-  if (view === "table-transfer-report") return <TransferReport kind="table" onExit={onExit} />;
+  if (view === "item-transfer-report") return <TransferReport key={view} kind="item" onExit={onExit} />;
+  if (view === "table-transfer-report") return <TransferReport key={view} kind="table" onExit={onExit} />;
   if (view === "settlement-report") return <SettlementReport outlet={outlet} onExit={onExit} />;
   if (view === "card-settlement-report") return <CardSettlementReport onExit={onExit} />;
   if (view === "booking-report") return <BookingReport onExit={onExit} />;
