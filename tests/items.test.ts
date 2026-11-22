@@ -2,11 +2,45 @@ import { describe, expect, it } from "vitest";
 import { rupeesToPaise } from "../src/shared/money.js";
 import { createItem, deleteItem, listItemMaster, updateItem } from "../src/server/services/itemService.js";
 import { addItem, createOrder, sendKot } from "../src/server/services/orderService.js";
-import { previewBill } from "../src/server/services/billingService.js";
+import { generateInvoice, previewBill } from "../src/server/services/billingService.js";
 import { getTableByCode, openTable } from "../src/server/services/tableService.js";
 import { createTestApp } from "./helpers.js";
 
 describe("item master", () => {
+  it("defaults bill discount exclusions from Item Master and saves an unchecked override", () => {
+    const { ctx } = createTestApp();
+    const cashier = ctx("cashier");
+    const waiter = ctx("waiter");
+    const eligible = createItem(cashier, {
+      name: "DISCOUNT ALLOWED",
+      sku: "2101",
+      rates: [{ dept: "BAR", rate: 100, enabled: true, discount: true }],
+    });
+    const excluded = createItem(cashier, {
+      name: "DISCOUNT EXCLUDED",
+      sku: "2102",
+      rates: [
+        { dept: "BAR", rate: 100, enabled: true, discount: false },
+        { dept: "RESTAURANT", rate: 100, enabled: true, discount: true },
+      ],
+    });
+    const table = getTableByCode(waiter, "02");
+    openTable(waiter, { tableId: table.id, outlet: "BAR" });
+    const order = createOrder(waiter, table.id) as { id: string };
+    addItem(waiter, { orderId: order.id, productId: eligible.id, qty: 1 });
+    const line = addItem(waiter, { orderId: order.id, productId: excluded.id, qty: 1 }) as { id: string };
+
+    const preview = previewBill(cashier, order.id, { discountPct: 10 });
+    expect(preview.excludeItemIds).toEqual([line.id]);
+    expect(preview.discount).toBe(rupeesToPaise(10));
+    const invoice = generateInvoice(cashier, order.id, { discountPct: 10, excludeItemIds: [] }) as {
+      discount: number;
+      bill_details: string;
+    };
+    expect(invoice.discount).toBe(rupeesToPaise(20));
+    expect(JSON.parse(invoice.bill_details).excludeItemIds).toEqual([]);
+  });
+
   it("creates, edits, prices by department, and deletes an item", () => {
     const { ctx } = createTestApp();
     const cashier = ctx("cashier");
@@ -31,7 +65,7 @@ describe("item master", () => {
     expect(created.veg).toBe(false);
     expect(created.allowComplimentary).toBe(true);
     expect(created.rates.find((r) => r.dept === "BAR")?.rate).toBe(rupeesToPaise(450));
-    expect(created.rates.find((r) => r.dept === "CAFE")?.enabled).toBe(true);
+    expect(created.rates.some((r) => String(r.dept) === "CAFE")).toBe(false);
     expect(created.rates.find((r) => r.dept === "NC")?.enabled).toBe(false);
     expect(listItemMaster(cashier).nextCode).toBe("1208");
 

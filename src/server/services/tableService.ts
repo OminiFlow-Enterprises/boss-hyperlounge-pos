@@ -1,9 +1,11 @@
+import { isAdvanceOutlet, isBarOrderOnly } from "../../shared/userRights.js";
 import { assertPermission } from "../../shared/permissions.js";
 import { AppError } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
 import { businessDayStart, nextNumber, nowIso, uuid } from "../lib/ids.js";
 import type { SplitType, TableStatus } from "../../shared/types.js";
+import { SETTLEMENT_PENDING_TRANSFER_MESSAGE } from "../../shared/tableTransfer.js";
 import { assertOrderCardUsable, assertUsable, findCardByScan, getCard } from "./cardService.js";
 import { previewRunningBill } from "./billingService.js";
 import { dayCloseHour } from "./settingsService.js";
@@ -47,7 +49,20 @@ export function listTables(ctx: AppContext) {
        ORDER BY f.sort_order, t.code`,
     )
     .all(cutoff) as Array<Record<string, unknown>>;
-  return withNetTotals(ctx, rows);
+  if (isBarOrderOnly(ctx.actor.rights)) {
+    return rows.filter((row) => (row.outlet || "BAR") === "BAR").map((row) => ({
+      id: row.id,
+      code: row.code,
+      name: row.name,
+      outlet: "BAR",
+      status: row.status,
+      has_running_order: Number(row.running_total) > 0,
+    }));
+  }
+  const visibleRows = ctx.actor.userGroup === "ADVANCE"
+    ? rows.filter((row) => isAdvanceOutlet(row.outlet || "BAR"))
+    : rows.filter((row) => row.outlet !== "CAFE");
+  return withNetTotals(ctx, visibleRows);
 }
 
 function withNetTotals(ctx: AppContext, rows: Array<Record<string, unknown>>) {
@@ -119,6 +134,7 @@ export function createTable(
   const code = input.code.trim();
   if (!code) throw new AppError("Table code is required");
   const outlet = input.outlet?.trim() || "BAR";
+  if (outlet.toUpperCase() === "CAFE") throw new AppError("Cafe outlet is unavailable");
   const existing = findTableByCode(ctx, code, outlet);
   if (existing) return getTable(ctx, existing.id);
   const floor =
@@ -274,14 +290,20 @@ function assertSessionCardUsable(ctx: AppContext, sessionId: string | null) {
   if (session?.card_id) assertUsable(getCard(ctx, session.card_id));
 }
 
+function assertTransferSettlementComplete(fromStatus: TableStatus, toStatus: TableStatus) {
+  if (fromStatus === "PAYMENT_PENDING" || toStatus === "PAYMENT_PENDING") {
+    throw new AppError(SETTLEMENT_PENDING_TRANSFER_MESSAGE, 409);
+  }
+}
+
 export function transferTable(ctx: AppContext, fromTableId: string, toTableId: string, reason?: string) {
   if (fromTableId === toTableId) throw new AppError("Cannot transfer a table to itself");
   const why = String(reason ?? "").trim();
   if (!why) throw new AppError("Reason is mandatory");
   const from = getTable(ctx, fromTableId);
   const to = getTable(ctx, toTableId);
+  assertTransferSettlementComplete(from.status, to.status);
   if (!from.current_session_id) throw new AppError("Source table has no running order");
-  if (from.status === "PAYMENT_PENDING") throw new AppError("Printed bill table cannot be transferred");
   const sessionId = from.current_session_id;
   assertSessionCardUsable(ctx, sessionId);
   assertSessionCardUsable(ctx, to.current_session_id);
@@ -387,8 +409,9 @@ export function transferItems(
   if (!ids.length) throw new AppError("Select items to transfer");
   if (fromTableId === toTableId) throw new AppError("Cannot transfer items to the same table");
   const from = getTable(ctx, fromTableId);
-  if (!from.current_session_id) throw new AppError("Current table has no running order");
   let to = getTable(ctx, toTableId);
+  assertTransferSettlementComplete(from.status, to.status);
+  if (!from.current_session_id) throw new AppError("Current table has no running order");
   assertSessionCardUsable(ctx, from.current_session_id);
   assertSessionCardUsable(ctx, to.current_session_id);
   if (to.status === "AVAILABLE") {
@@ -443,6 +466,7 @@ export function transferItems(
 export function mergeTables(ctx: AppContext, sourceTableId: string, targetTableId: string) {
   const source = getTable(ctx, sourceTableId);
   const target = getTable(ctx, targetTableId);
+  assertTransferSettlementComplete(source.status, target.status);
   if (!source.current_session_id || !target.current_session_id) {
     throw new AppError("Both tables must have running orders to merge");
   }

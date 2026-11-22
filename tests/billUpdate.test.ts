@@ -4,6 +4,7 @@ import { expect, it } from "vitest";
 import { createApp } from "../src/server/api/app.js";
 import { blockCard, issueCard, unblockCard } from "../src/server/services/cardService.js";
 import { addItem, createOrder } from "../src/server/services/orderService.js";
+import { createStaff } from "../src/server/services/staffService.js";
 import { getTableByCode, openTable } from "../src/server/services/tableService.js";
 import { createTestApp } from "./helpers.js";
 
@@ -139,6 +140,91 @@ it("previews bill edits without saving and requires the PIN to update only the s
     expect(await next.json()).toMatchObject({ service_charge_pct: 0 });
   } finally {
     server.close();
+    db.close();
+  }
+});
+
+it("lets Cashier users edit printed and settled bills with approval while blocking master and item-price changes", async () => {
+  const { ctx, db, hardware, seeded } = createTestApp();
+  const manager = ctx("manager");
+  createStaff(manager, { username: "billcashier", password: "4242", userRole: "CASHIER" });
+  createStaff(manager, { username: "pinadmin", password: "4242", userRole: "ADMIN" });
+  const table = getTableByCode(manager, "01");
+  openTable(manager, { tableId: table.id });
+  const { id: orderId } = createOrder(manager, table.id) as { id: string };
+  const food = addItem(manager, { orderId, productId: seeded.products["FOOD-PZ"], qty: 1 }) as { id: string };
+  const drink = addItem(manager, { orderId, productId: seeded.products["BAR-WH"], qty: 1 }) as { id: string };
+
+  const server = createApp({ db, hardware }).listen(0, "127.0.0.1");
+  try {
+    await once(server, "listening");
+    const { port } = server.address() as AddressInfo;
+    function request(path: string, body?: object, method = body ? "POST" : "GET") {
+      return fetch(`http://127.0.0.1:${port}/api/${path}`, {
+        method,
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    }
+
+    const login = await request("auth/login", { username: "billcashier", password: "4242" });
+    expect(await login.json()).toMatchObject({
+      userGroup: "CASHIER",
+      rights: { "master.user": false, "master.item": false, "report.settlement": true, "fnb.nc": true },
+    });
+    expect((await request("staff", {})).status).toBe(403);
+    expect((await request("items/master")).status).toBe(403);
+    expect((await request("complimentary", { name: "Blocked account" })).status).toBe(403);
+
+    const masterPin = process.env.POS_MASTER_PIN || "0166";
+    const newPin = masterPin === "7531" ? "7532" : "7531";
+    expect((await request("settings/master-pin", { currentPin: masterPin, newPin }, "PUT")).status).toBe(403);
+    expect((await request("settings", { master_pin_hash: "invalid" }, "PUT")).status).toBe(403);
+    const discount = { orderId, discountPct: 5 };
+    expect((await request("invoices/generate", { ...discount, masterPin })).status).toBe(403);
+    expect((await request("invoices/generate", { ...discount, reason: "Approved discount" })).status).toBe(403);
+    const bill = await request("invoices/generate", { ...discount, masterPin, reason: "Approved discount" });
+    expect(bill.status).toBe(200);
+    const { id: invoiceId } = await bill.json();
+    expect((await request(`invoices/${invoiceId}/print`, {})).status).toBe(200);
+
+    const priceEdit = { orderId, invoiceId, edits: [{ kind: "price", ids: [food.id], price: 10 }] };
+    expect((await request("invoices/preview", priceEdit)).status).toBe(403);
+    expect((await request("invoices/generate", { ...priceEdit, masterPin, reason: "Price change" })).status).toBe(403);
+    expect((await request(`orders/${orderId}/bill-price`, { ids: [food.id], price: 10 })).status).toBe(403);
+
+    const correction = await request("invoices/generate", {
+      orderId, invoiceId, masterPin, reason: "Corrected quantity",
+      edits: [{ kind: "qty", ids: [food.id], qty: 2 }],
+    });
+    expect(correction.status).toBe(200);
+    const corrected = await correction.json();
+    expect((await request(`invoices/${invoiceId}/pay`, {
+      lines: [{ method: "CASH", amount: corrected.grand_total }],
+      printReceipt: false,
+    })).status).toBe(200);
+
+    const removed = await request("invoices/generate", {
+      orderId, invoiceId, masterPin, reason: "Remove incorrect item",
+      edits: [{ kind: "qty", ids: [drink.id], qty: 0 }],
+    });
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toMatchObject({ id: invoiceId, status: "PAID" });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM payments WHERE invoice_id = ?").get(invoiceId)).toEqual({ count: 1 });
+    expect(db.prepare("SELECT qty, voided FROM order_items WHERE id = ?").get(drink.id)).toEqual({ qty: 0, voided: 1 });
+
+    const adminLogin = await request("auth/login", { username: "pinadmin", password: "4242" });
+    expect(await adminLogin.json()).toMatchObject({ userGroup: "ADMIN", rights: { "master.user": true } });
+    expect((await request("settings/master-pin", { currentPin: newPin, newPin }, "PUT")).status).toBe(403);
+    expect((await request("settings/master-pin", { currentPin: masterPin, newPin }, "PUT")).status).toBe(200);
+    expect(await (await request("settings")).json()).not.toHaveProperty("master_pin_hash");
+    expect((await request("auth/login", { username: "billcashier", password: "4242" })).status).toBe(200);
+    const revisedDiscount = { orderId, invoiceId, discountPct: 8, reason: "Approved discount update" };
+    expect((await request("invoices/generate", { ...revisedDiscount, masterPin })).status).toBe(403);
+    expect((await request("invoices/generate", { ...revisedDiscount, masterPin: newPin })).status).toBe(200);
+  } finally {
+    server.close();
+    await once(server, "close");
     db.close();
   }
 });

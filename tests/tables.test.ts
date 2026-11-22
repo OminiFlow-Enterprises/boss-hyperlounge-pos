@@ -82,6 +82,30 @@ describe("tables, KOT and billing", () => {
     expect(getOrderDetail(waiter, destOrder.id).items as Array<{ id: string }>).toHaveLength(2);
   });
 
+  it("requires settlement before moving a printed bill's table or items in either direction", async () => {
+    const { seeded, ctx } = createTestApp();
+    const waiter = ctx("waiter");
+    const cashier = ctx("cashier");
+    const first = getTableByCode(waiter, "01");
+    const second = getTableByCode(waiter, "05");
+    openTable(waiter, { tableId: first.id });
+    openTable(waiter, { tableId: second.id });
+    const order = createOrder(waiter, first.id) as { id: string };
+    const item = addItem(waiter, {
+      orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1,
+    }) as { id: string };
+    await sendKot(waiter, order.id);
+    generateInvoice(cashier, order.id);
+
+    for (const [from, to] of [[first, second], [second, first]]) {
+      expect(() => transferTable(waiter, from.id, to.id, "Move table")).toThrow("Settlement pending");
+      expect(() => transferItems(waiter, from.id, to.id, [item.id])).toThrow("Settlement pending");
+      expect(() => mergeTables(waiter, from.id, to.id)).toThrow("Settlement pending");
+    }
+    expect(getTableByCode(waiter, "01").status).toBe("PAYMENT_PENDING");
+    expect(getOrderDetail(waiter, order.id).items).toHaveLength(1);
+  });
+
   it("rejects member-card settlement when the card balance is too low", async () => {
     const { seeded, ctx } = createTestApp();
     const waiter = ctx("waiter");

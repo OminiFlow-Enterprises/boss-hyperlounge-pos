@@ -15,8 +15,8 @@ export function LoginGate({
   onExit: () => void;
 }) {
   const [year, setYear] = useState("2026-2027");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
+  const [username, setUsername] = useState(window.bossWindow ? "BAR" : "");
+  const [password, setPassword] = useState(window.bossWindow ? "1234" : "");
   const [changing, setChanging] = useState(false);
   const [alertText, setAlertText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -122,7 +122,6 @@ export function LoginGate({
           <button type="button" onClick={onExit}><u>E</u>xit</button>
         </div>
         <hr className="login-rule" />
-        <div className="login-script">BOSS Billing Software</div>
       </form>
       {changing && (
         <ChangePassword

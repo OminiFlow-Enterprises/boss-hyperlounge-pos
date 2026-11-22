@@ -4,6 +4,7 @@ import cors from "cors";
 import type Database from "better-sqlite3";
 import type { Actor, BillDetails, BillLineEdit, ServiceChargeMode } from "../../shared/types.js";
 import { billApprovalFields } from "../../shared/billApproval.js";
+import { isAdminActor, isAdvanceOutlet, isBarOrderOnly, isUserRoleLabel, rightOn } from "../../shared/userRights.js";
 import { hasPermission, type Permission } from "../../shared/permissions.js";
 import { AppError } from "../lib/errors.js";
 import { createBackgroundReports } from "./backgroundReports.js";
@@ -59,12 +60,47 @@ function billToUpdate(ctx: AppContext, orderId: string, invoiceId?: string) {
   return invoice;
 }
 
+function advanceBillAdjustments(
+  ctx: AppContext,
+  orderId: string,
+  options: Request["body"],
+  edits: BillLineEdit[],
+) {
+  const existing = billToUpdate(ctx, orderId, options.invoiceId);
+  let details: Partial<BillDetails> = {};
+  try { details = JSON.parse(existing?.bill_details || "{}") ?? {}; } catch { /* Legacy bill details. */ }
+  if (["discount", "discountPct", "discountFrom", "excludeItemIds", "discountReviewedItemIds"]
+      .some((key) => options[key] != null) ||
+      options.billDetails?.discountPct != null || options.billDetails?.excludeItemIds != null) {
+    throw new AppError("Advance users cannot change discounts", 403);
+  }
+  if (edits.length ||
+      (options.otherCharges != null && options.otherCharges !== (existing?.other_charges ?? 0)) ||
+      (options.complimentary != null && options.complimentary !== Boolean(existing?.complimentary_account_id)) ||
+      (options.complimentaryAccountId != null && options.complimentaryAccountId !== existing?.complimentary_account_id)) {
+    throw new AppError("Advance users can only remove service charge from a bill", 403);
+  }
+  const currentRate = existing && (existing.service_charge_pct || !existing.service_charge)
+    ? existing.service_charge_pct : 10;
+  if ((options.serviceChargePct != null && options.serviceChargePct !== currentRate && options.serviceChargePct !== 0) ||
+      (options.serviceChargeMode != null && options.serviceChargeMode !== existing?.service_charge_mode)) {
+    throw new AppError("Advance users can only remove service charge from a bill", 403);
+  }
+  return {
+    discount: existing?.discount,
+    excludeItemIds: existing ? details?.excludeItemIds ?? [] : undefined,
+    otherCharges: existing?.other_charges,
+    serviceChargePct: options.serviceChargePct ?? currentRate,
+    serviceChargeMode: existing?.service_charge_mode,
+  };
+}
+
 function applyBillEdits(ctx: AppContext, orderId: string, edits: BillLineEdit[], allowPaid: boolean) {
   for (const edit of edits) {
     switch (edit.kind) {
       case "add":
         if (!/^bill-[0-9a-f]{32}$/.test(edit.id)) throw new AppError("Invalid bill item ID");
-        orders.addItem(ctx, { orderId, ...edit }, { id: edit.id, allowPaid });
+        orders.addItem(ctx, { orderId, productId: edit.productId, qty: edit.qty, outlet: edit.outlet }, { id: edit.id, allowPaid });
         break;
       case "product":
         orders.setBillLineProduct(ctx, orderId, edit.ids, edit.productId, edit.outlet, { allowPaid });
@@ -131,6 +167,174 @@ export function createApp(options: CreateAppOptions) {
     next();
   };
 
+  function assertBarTable(ctx: AppContext, tableId: string) {
+    const table = ctx.db.prepare(
+      "SELECT status FROM dining_tables WHERE id = ? AND COALESCE(NULLIF(outlet, ''), 'BAR') = 'BAR'",
+    ).get(tableId) as { status: string } | undefined;
+    if (!table) throw new AppError("Only Bar tables are available", 403);
+    if (table.status === "PAYMENT_PENDING") throw new AppError("Bill already printed", 409);
+  }
+
+  function assertBarOrder(ctx: AppContext, orderId: string) {
+    const order = ctx.db.prepare(
+      "SELECT o.table_id FROM orders o JOIN dining_tables t ON t.id = o.table_id AND t.current_session_id = o.session_id WHERE o.id = ? AND o.status IN ('OPEN', 'BILL_REQUESTED')",
+    ).get(orderId) as { table_id: string } | undefined;
+    if (!order) throw new AppError("Order no longer accepts items", 409);
+    assertBarTable(ctx, order.table_id);
+  }
+
+  function assertAdvanceAccess(req: Request) {
+    const route = req.path.replace(/\/$/, "");
+    const denied = () => new AppError("Permission denied for Advance users", 403, "PERMISSION_DENIED");
+    const body = req.body ?? {};
+    const outletFor = (sql: string, id: unknown) => {
+      if (typeof id !== "string") throw denied();
+      const row = req.ctx.db.prepare(sql).get(id) as { outlet?: string } | undefined;
+      if (!row || !isAdvanceOutlet(row.outlet || "BAR")) throw denied();
+    };
+    const checkTable = (id: unknown) => outletFor("SELECT outlet FROM dining_tables WHERE id = ?", id);
+    const checkOrder = (id: unknown) => outletFor(
+      "SELECT t.outlet FROM orders o JOIN dining_tables t ON t.id = o.table_id WHERE o.id = ?", id,
+    );
+    const checkInvoice = (id: unknown) => outletFor(
+      "SELECT t.outlet FROM invoices i JOIN dining_tables t ON t.id = i.table_id WHERE i.id = ?", id,
+    );
+    const checkPayment = (id: unknown) => outletFor(
+      "SELECT t.outlet FROM payments p JOIN invoices i ON i.id = p.invoice_id JOIN dining_tables t ON t.id = i.table_id WHERE p.id = ?", id,
+    );
+    const checkKot = (id: unknown) => outletFor(
+      "SELECT t.outlet FROM kots k JOIN dining_tables t ON t.id = k.table_id WHERE k.id = ?1 OR k.kot_number = ?1", id,
+    );
+    if ((body.outlet != null && !isAdvanceOutlet(body.outlet)) ||
+        (body.billDetails?.outlet != null && !isAdvanceOutlet(body.billDetails.outlet)) ||
+        (Array.isArray(body.edits) && body.edits.some((edit: BillLineEdit & { outlet?: string }) =>
+          edit?.outlet != null && !isAdvanceOutlet(edit.outlet)))) throw denied();
+
+    if (req.method === "GET") {
+      if (["/api/bootstrap", "/api/tables", "/api/session", "/api/products", "/api/invoices",
+        "/api/complimentary", "/api/cards/balance/check", "/api/cards/recharged-today",
+        "/api/reports/settlement/users"].includes(route)) return;
+      if (["/api/reports/kots", "/api/reports/bills", "/api/reports/settlement"].includes(route)) {
+        if (!isAdvanceOutlet(req.query.outlet)) throw denied();
+        return;
+      }
+      const resource = /^\/api\/(orders|invoices|tables|reports\/kots|reports\/settlement)\/([^/]+)(\/(?:items|invoice))?$/.exec(route);
+      if (!resource) throw denied();
+      const id = decodeURIComponent(resource[2]);
+      if (resource[1] === "orders") checkOrder(id);
+      if (resource[1] === "invoices") checkInvoice(id);
+      if (resource[1] === "tables") checkTable(id);
+      if (resource[1] === "reports/kots") checkKot(id);
+      if (resource[1] === "reports/settlement") checkPayment(id);
+      return;
+    }
+
+    if (req.method === "PUT") {
+      const payment = /^\/api\/reports\/settlement\/([^/]+)$/.exec(route);
+      if (!payment) throw denied();
+      checkPayment(decodeURIComponent(payment[1]));
+      return;
+    }
+
+    if (req.method !== "POST") throw denied();
+    if (["/api/auth/login", "/api/auth/logout", "/api/auth/change-password", "/api/tables"].includes(route)) return;
+    if (route === "/api/tables/transfer" || route === "/api/tables/item-transfer") {
+      checkTable(body.fromTableId);
+      checkTable(body.toTableId);
+      return;
+    }
+    if (route === "/api/orders") {
+      checkTable(body.tableId);
+      return;
+    }
+    if (route === "/api/invoices/preview" || route === "/api/invoices/generate") {
+      checkOrder(body.orderId);
+      if (body.invoiceId) checkInvoice(body.invoiceId);
+      return;
+    }
+    const resource = /^\/api\/(orders|invoices|tables|order-items|kots)\/([^/]+)\/([^/]+)$/.exec(route);
+    if (!resource) throw denied();
+    const [, kind, encodedId, action] = resource;
+    const id = decodeURIComponent(encodedId);
+    if (kind === "tables" && ["open", "card", "request-bill"].includes(action)) {
+      checkTable(id);
+      return;
+    }
+    if (kind === "orders" && ["items", "send-kot", "estimate"].includes(action)) {
+      checkOrder(id);
+      return;
+    }
+    if (kind === "invoices" && ["pay", "settle-club", "print"].includes(action)) {
+      checkInvoice(id);
+      return;
+    }
+    if (kind === "order-items" && action === "cancel") {
+      outletFor("SELECT t.outlet FROM order_items oi JOIN orders o ON o.id = oi.order_id JOIN dining_tables t ON t.id = o.table_id WHERE oi.id = ? AND oi.kot_id IS NULL", id);
+      return;
+    }
+    if (kind === "kots" && action === "reprint") {
+      checkKot(id);
+      return;
+    }
+    throw denied();
+  }
+
+  const reportRouteRights: Record<string, string[]> = {
+    gst: ["report.gst"],
+    dashboard: ["report.pos"],
+    reconciliation: ["report.pos"],
+    sales: ["report.pos"],
+    "item-wise": ["report.pos", "report.item", "report.itemDetail", "report.stock", "report.outlet", "report.time", "report.tax"],
+    kots: ["report.kot"],
+    bills: ["report.bill"],
+    settlement: ["report.settlement"],
+    "card-settlement": ["report.card", "report.booking"],
+    "item-transfers": ["report.itemTransfer"],
+    "table-transfers": ["report.tableTransfer"],
+    "kot-cancellations": ["report.kotCancellation"],
+  };
+
+  app.use((req, _res, next) => {
+    const reportRoute = /^\/api\/reports\/([^/]+)/i.exec(req.path)?.[1].toLowerCase();
+    const reportRights = reportRoute && Object.hasOwn(reportRouteRights, reportRoute) ? reportRouteRights[reportRoute] : undefined;
+    if (reportRights && !reportRights.some((right) => rightOn(req.ctx.actor.rights, right))) {
+      throw new AppError("Report permission denied", 403, "PERMISSION_DENIED");
+    }
+    if (req.ctx.actor.userGroup === "CASHIER") {
+      const route = req.path.replace(/\/+$/, "").toLowerCase();
+      const master = /^\/api\/(?:staff|items|item-groups)(?:\/|$)/.test(route) ||
+        (req.method !== "GET" && /^\/api\/(?:complimentary|bonus-rules)(?:\/|$)/.test(route));
+      if (master) throw new AppError("Cashier users cannot access Master", 403, "PERMISSION_DENIED");
+    }
+    if (req.ctx.actor.userGroup === "ADVANCE" && /^\/api(?:\/|$)/i.test(req.path)) {
+      assertAdvanceAccess(req);
+      return next();
+    }
+    if (!isBarOrderOnly(req.ctx.actor.rights) || !/^\/api(?:\/|$)/i.test(req.path)) return next();
+
+    const route = req.path.replace(/\/$/, "");
+    if (req.ctx.actor.userGroup === "OPERATOR" && req.method === "GET") {
+      if (/^\/api\/reports\/(?:kots|bills|settlement)$/.test(route) && req.query.outlet === "BAR") {
+        return next();
+      }
+      const kotDetail = /^\/api\/reports\/kots\/([^/]+)$/.exec(route);
+      if (kotDetail && req.ctx.db.prepare(
+        "SELECT 1 FROM kots k JOIN dining_tables t ON t.id = k.table_id WHERE k.id = ? AND COALESCE(NULLIF(t.outlet, ''), 'BAR') = 'BAR'",
+      ).get(decodeURIComponent(kotDetail[1]))) return next();
+    }
+    const allowedRead = req.method === "GET" && (
+      ["/api/bootstrap", "/api/tables", "/api/session"].includes(route) || /^\/api\/orders\/[^/]+$/.test(route)
+    );
+    const allowedWrite = req.method === "POST" && (
+      ["/api/auth/logout", "/api/auth/login", "/api/auth/change-password", "/api/orders"].includes(route)
+      || /^\/api\/tables\/[^/]+\/open$/.test(route)
+      || /^\/api\/orders\/[^/]+\/(items|send-kot|estimate)$/.test(route)
+      || /^\/api\/order-items\/[^/]+\/cancel$/.test(route)
+    );
+    if (allowedRead || allowedWrite) return next();
+    next(new AppError("Permission denied: Bar orders only", 403, "PERMISSION_DENIED"));
+  });
+
   app.post(
     "/api/auth/login",
     wrap((req, res) => {
@@ -172,14 +376,15 @@ export function createApp(options: CreateAppOptions) {
   });
 
   app.get("/api/bootstrap", wrap((req, res) => {
+    const barOnly = isBarOrderOnly(req.ctx.actor.rights);
     res.json({
       actor: req.ctx.actor,
-      floors: tables.listFloors(req.ctx),
+      floors: barOnly ? [] : tables.listFloors(req.ctx),
       tables: tables.listTables(req.ctx),
       products: staff.listProducts(req.ctx),
-      cardTypes: staff.listCardTypes(req.ctx),
-      staff: staff.listStaff(req.ctx),
-      settings: settings.getAllSettings(req.ctx),
+      cardTypes: barOnly ? [] : staff.listCardTypes(req.ctx),
+      staff: barOnly ? [] : staff.listStaff(req.ctx),
+      settings: barOnly ? {} : settings.getAllSettings(req.ctx),
       sync: sync.syncStatus(req.ctx),
     });
   }));
@@ -278,7 +483,11 @@ export function createApp(options: CreateAppOptions) {
   app.post("/api/tables", wrap((req, res) => res.json(tables.createTable(req.ctx, req.body ?? {}))));
   app.get("/api/tables/waiter", wrap((req, res) => res.json(tables.waiterTables(req.ctx, req.ctx.actor.staffId))));
   app.post("/api/tables/:id/open", wrap((req, res) => {
-    res.json(tables.openTable(req.ctx, { tableId: req.params.id, ...req.body }));
+    if (isBarOrderOnly(req.ctx.actor.rights)) {
+      assertBarTable(req.ctx, req.params.id);
+      return res.json(tables.openTable(req.ctx, { tableId: req.params.id }));
+    }
+    res.json(tables.openTable(req.ctx, { ...req.body, tableId: req.params.id }));
   }));
   app.post("/api/tables/:id/card", wrap((req, res) => {
     res.json(tables.attachTableCard(req.ctx, req.params.id, String(req.body?.cardNumber ?? "")));
@@ -312,17 +521,27 @@ export function createApp(options: CreateAppOptions) {
   app.delete("/api/items/:id", wrap((req, res) => res.json(items.deleteItem(req.ctx, req.params.id))));
   app.post("/api/item-groups", wrap((req, res) => res.json(items.addItemGroup(req.ctx, req.body?.name ?? ""))));
   app.get("/api/orders", wrap((req, res) => res.json(orders.listOrders(req.ctx))));
-  app.get("/api/orders/:id", wrap((req, res) => res.json(orders.getOrderDetail(req.ctx, req.params.id))));
-  app.post("/api/orders", wrap((req, res) => res.json(orders.createOrder(req.ctx, req.body.tableId))));
+  app.get("/api/orders/:id", wrap((req, res) => {
+    if (isBarOrderOnly(req.ctx.actor.rights)) assertBarOrder(req.ctx, req.params.id);
+    res.json(orders.getOrderDetail(req.ctx, req.params.id));
+  }));
+  app.post("/api/orders", wrap((req, res) => {
+    if (isBarOrderOnly(req.ctx.actor.rights)) assertBarTable(req.ctx, req.body.tableId);
+    res.json(orders.createOrder(req.ctx, req.body.tableId));
+  }));
   app.post("/api/orders/:id/estimate", wrap((req, res) => {
     const orderId = req.params.id;
-    const { items, outlet } = req.body;
+    const { items } = req.body;
+    const barOnly = isBarOrderOnly(req.ctx.actor.rights);
+    if (barOnly) assertBarOrder(req.ctx, orderId);
+    const outlet = barOnly ? "BAR" : req.body.outlet;
     if (!Array.isArray(items)) throw new AppError("Items are required");
     const rollback = new Error("Estimate complete");
     let grandTotal = 0;
     try {
       req.ctx.db.transaction(() => {
         for (const { productId, qty, notes } of items) {
+          if (barOnly && (!Number.isInteger(qty) || qty < 1)) throw new AppError("Enter a positive quantity");
           orders.addItem(req.ctx, { orderId, productId, qty, notes, outlet });
         }
         grandTotal = billing.previewRunningBill(req.ctx, orderId).grandTotal;
@@ -334,7 +553,13 @@ export function createApp(options: CreateAppOptions) {
     res.json({ grandTotal });
   }));
   app.post("/api/orders/:id/items", wrap((req, res) => {
-    res.json(orders.addItem(req.ctx, { orderId: req.params.id, ...req.body }));
+    if (isBarOrderOnly(req.ctx.actor.rights)) {
+      assertBarOrder(req.ctx, req.params.id);
+      const { productId, qty, notes } = req.body;
+      if (!Number.isInteger(qty) || qty < 1) throw new AppError("Enter a positive quantity");
+      return res.json(orders.addItem(req.ctx, { orderId: req.params.id, productId, qty, notes, outlet: "BAR" }));
+    }
+    res.json(orders.addItem(req.ctx, { ...req.body, orderId: req.params.id }));
   }));
   app.post("/api/orders/:id/bill-qty", wrap((req, res) => {
     res.json(orders.setBillLineQty(req.ctx, req.params.id, req.body.ids ?? [], Number(req.body.qty)));
@@ -346,9 +571,11 @@ export function createApp(options: CreateAppOptions) {
     res.json(orders.setBillLinePrice(req.ctx, req.params.id, req.body.ids ?? [], Math.round(Number(req.body.price))));
   }));
   app.post("/api/orders/:id/send-kot", wrap(async (req, res) => {
+    const barOnly = isBarOrderOnly(req.ctx.actor.rights);
+    if (barOnly) assertBarOrder(req.ctx, req.params.id);
     const remark = typeof req.body?.remark === "string" ? req.body.remark : undefined;
     const steward = typeof req.body?.steward === "string" ? req.body.steward : undefined;
-    const cardNumber = typeof req.body?.cardNumber === "string" ? req.body.cardNumber : undefined;
+    const cardNumber = !barOnly && typeof req.body?.cardNumber === "string" ? req.body.cardNumber : undefined;
     res.json(await orders.sendKot(req.ctx, req.params.id, { remark, steward, cardNumber }));
   }));
   app.post("/api/order-items/:id/qty", wrap((req, res) => {
@@ -358,6 +585,13 @@ export function createApp(options: CreateAppOptions) {
     res.json(orders.setItemNotes(req.ctx, req.params.id, String(req.body?.notes ?? "")));
   }));
   app.post("/api/order-items/:id/cancel", wrap((req, res) => {
+    if (isBarOrderOnly(req.ctx.actor.rights)) {
+      const draft = req.ctx.db.prepare(
+        "SELECT order_id FROM order_items WHERE id = ? AND kot_id IS NULL AND qty > 0 AND voided = 0",
+      ).get(req.params.id) as { order_id: string } | undefined;
+      if (!draft) throw new AppError("Only unsent items can be discarded", 403);
+      assertBarOrder(req.ctx, draft.order_id);
+    }
     res.json(orders.cancelItem(req.ctx, req.params.id, req.body.reason ?? "cancelled"));
   }));
 
@@ -376,6 +610,10 @@ export function createApp(options: CreateAppOptions) {
 
   app.post("/api/invoices/preview", wrap((req, res) => {
     const { orderId, invoiceId, edits = [] } = req.body;
+    if (req.ctx.actor.userGroup === "ADVANCE") {
+      res.json(billing.previewBill(req.ctx, orderId, advanceBillAdjustments(req.ctx, orderId, req.body, edits)));
+      return;
+    }
     if (!edits.length) {
       res.json(billing.previewBill(req.ctx, orderId, req.body));
       return;
@@ -397,11 +635,12 @@ export function createApp(options: CreateAppOptions) {
   }));
   app.post("/api/invoices/generate", wrap((req, res) => {
     const { orderId, invoiceId, edits = [], masterPin, ...billOptions } = req.body;
-    const expectedPin = process.env.POS_MASTER_PIN || "0166";
-    if (masterPin && masterPin !== expectedPin) {
+    if (masterPin && !settings.verifyMasterPin(req.ctx, masterPin)) {
       throw new AppError("Incorrect master PIN", 403);
     }
     const invoice = req.ctx.db.transaction(() => {
+      const advance = req.ctx.actor.userGroup === "ADVANCE";
+      const adjustments = advance ? advanceBillAdjustments(req.ctx, orderId, { ...billOptions, invoiceId }, edits) : undefined;
       const existing = billToUpdate(req.ctx, orderId, invoiceId);
       let savedDetails: Partial<BillDetails> = {};
       try { savedDetails = JSON.parse(existing?.bill_details || "{}") ?? {}; } catch { /* Legacy bill details. */ }
@@ -421,6 +660,7 @@ export function createApp(options: CreateAppOptions) {
         complimentaryAccountId: existing?.complimentary_account_id,
         otherCharges: existing?.other_charges,
         discount: existing?.discount,
+        excludeItemIds: existing ? undefined : billing.previewBill(req.ctx, orderId, {}, true).excludeItemIds,
       };
       const discountChanged = billOptions.discount != null || billOptions.discountPct != null || billOptions.discountFrom != null;
       const discountPct = discountChanged
@@ -443,10 +683,11 @@ export function createApp(options: CreateAppOptions) {
           ? (discountPct != null || billOptions.discountFrom === "percent" ? undefined : billOptions.discount)
           : existing?.discount,
         discountPct,
-        excludeItemIds: billOptions.excludeItemIds ?? billOptions.billDetails?.excludeItemIds ?? savedDetails.excludeItemIds,
+        excludeItemIds: billOptions.excludeItemIds ?? billOptions.billDetails?.excludeItemIds ??
+          savedDetails.excludeItemIds ?? (existing ? [] : undefined),
         otherCharges: billOptions.otherCharges ?? existing?.other_charges,
-        serviceChargeMode: billOptions.serviceChargeMode ?? existing?.service_charge_mode,
-        serviceChargePct: billOptions.serviceChargePct ??
+        serviceChargeMode: adjustments?.serviceChargeMode ?? billOptions.serviceChargeMode ?? existing?.service_charge_mode,
+        serviceChargePct: adjustments?.serviceChargePct ?? billOptions.serviceChargePct ??
           (existing && (existing.service_charge_pct || !existing.service_charge) ? existing.service_charge_pct : 10),
       };
       if (!finalOptions.complimentary) finalOptions.complimentaryAccountId = undefined;
@@ -454,6 +695,7 @@ export function createApp(options: CreateAppOptions) {
       const needsApproval = edits.length || billApprovalFields({
         ...savedFields,
         ...finalOptions,
+        excludeItemIds: finalOptions.excludeItemIds ?? savedFields.excludeItemIds,
       }) !== billApprovalFields(savedFields);
       if (needsApproval) {
         if (!remark) throw new AppError("Enter a remark to update this bill", 403, "BILL_REMARK_REQUIRED", "billRemark");
@@ -464,6 +706,7 @@ export function createApp(options: CreateAppOptions) {
       applyBillEdits(req.ctx, orderId, edits, existing?.status === "PAID");
       return billing.generateInvoice(req.ctx, orderId, {
         ...finalOptions,
+        ...(advance ? { discount: adjustments?.discount, discountPct: undefined } : {}),
         invoiceId: existing?.id,
       });
     }).immediate();
@@ -499,9 +742,28 @@ export function createApp(options: CreateAppOptions) {
   app.put("/api/staff/:id", wrap((req, res) => res.json(staff.updateStaff(req.ctx, req.params.id, req.body))));
   app.delete("/api/staff/:id", wrap((req, res) => res.json(staff.deleteStaff(req.ctx, req.params.id))));
 
+  app.put("/api/settings/master-pin", wrap((req, res) => {
+    if (!isAdminActor(currentActor)) throw new AppError("Only Admin users can change the master PIN", 403);
+    settings.changeMasterPin(req.ctx, req.body?.currentPin, req.body?.newPin);
+    res.json({ ok: true });
+  }));
+  app.get("/api/settings/group-reports/:group", wrap((req, res) => {
+    if (!isAdminActor(currentActor)) throw new AppError("Only Admin users can edit group report permissions", 403);
+    if (!isUserRoleLabel(req.params.group)) throw new AppError("Select a user group");
+    res.json(settings.getGroupReports(req.ctx, req.params.group));
+  }));
+  app.put("/api/settings/group-reports/:group", wrap((req, res) => {
+    if (!isAdminActor(currentActor)) throw new AppError("Only Admin users can edit group report permissions", 403);
+    if (!isUserRoleLabel(req.params.group)) throw new AppError("Select a user group");
+    res.json(settings.updateGroupReports(req.ctx, req.params.group, req.body));
+  }));
   app.get("/api/settings", wrap((req, res) => res.json(settings.getAllSettings(req.ctx))));
   app.put("/api/settings", requirePerm("SETTINGS"), wrap((req, res) => {
-    for (const [key, value] of Object.entries(req.body ?? {})) {
+    const changes = Object.entries(req.body ?? {});
+    if (changes.some(([key]) => settings.isProtectedSetting(key))) {
+      throw new AppError("Use User Master to update protected settings", 403);
+    }
+    for (const [key, value] of changes) {
       settings.setSetting(req.ctx, key, String(value));
     }
     res.json(settings.getAllSettings(req.ctx));

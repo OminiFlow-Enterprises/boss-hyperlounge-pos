@@ -1,3 +1,4 @@
+import { isAdvanceOutlet } from "../../shared/userRights.js";
 import { assertPermission } from "../../shared/permissions.js";
 import { billLineTaxes, formatINR } from "../../shared/money.js";
 import { AppError, InsufficientBalanceError } from "../lib/errors.js";
@@ -41,6 +42,7 @@ export interface BillPreview {
   }>;
   totalQty: number;
   discountPct: number;
+  excludeItemIds: string[];
   roundOff: number;
   invoiceNumber: string;
 }
@@ -55,6 +57,7 @@ export function previewBill(
     discountFrom?: "amount" | "percent";
     /** Order item ids that take no discount. */
     excludeItemIds?: string[];
+    discountReviewedItemIds?: string[];
     otherCharges?: number;
     serviceChargePct?: number;
     serviceChargeMode?: ServiceChargeMode;
@@ -68,13 +71,15 @@ export function previewBill(
   getTable(ctx, order.table_id);
   const items = ctx.db
     .prepare(
-      `SELECT oi.*, p.tax_rate AS product_tax_rate, p.sales_group AS product_sales_group
+      `SELECT oi.*, p.tax_rate AS product_tax_rate, p.sales_group AS product_sales_group,
+              r.discount AS product_discount
          FROM order_items oi
          LEFT JOIN products p ON p.id = oi.product_id
+         LEFT JOIN product_dept_rates r ON r.product_id = oi.product_id AND r.dept = ?
         WHERE oi.order_id = ? AND oi.voided = 0
         ORDER BY oi.rowid`,
     )
-    .all(orderId) as Array<{
+    .all(orderOutlet(ctx, orderId), orderId) as Array<{
     id: string;
     product_id: string;
     name: string;
@@ -84,6 +89,7 @@ export function previewBill(
     tax_rate: number;
     product_tax_rate: number | null;
     product_sales_group: string | null;
+    product_discount: number | null;
   }>;
   if (!items.length && !allowEmpty) throw new AppError("Bill has no items");
 
@@ -106,6 +112,7 @@ export function previewBill(
       amount,
       tax_rate,
       sales_group: i.product_sales_group ?? "",
+      defaultExcludeDiscount: i.product_discount === 0,
       tax: 0,
     };
   }));
@@ -113,6 +120,14 @@ export function previewBill(
   const drinksTotal = mapped.filter((i) => i.station === "BAR").reduce((s, i) => s + i.amount, 0);
   const subtotal = foodTotal + drinksTotal;
   const excluded = new Set(options.excludeItemIds ?? []);
+  if (options.excludeItemIds === undefined || options.discountReviewedItemIds) {
+    const reviewed = new Set(options.discountReviewedItemIds);
+    for (const line of mapped) {
+      if (line.defaultExcludeDiscount && !line.ids.some((id) => reviewed.has(id))) {
+        for (const id of line.ids) excluded.add(id);
+      }
+    }
+  }
   const discountable = mapped.filter((i) => !i.ids.some((id) => excluded.has(id))).reduce((s, i) => s + i.amount, 0);
   const configured = getServiceCharge(ctx);
   const pct = options.serviceChargePct ?? configured.pct;
@@ -156,6 +171,7 @@ export function previewBill(
     serviceChargeMode: mode,
     discount,
     discountPct,
+    excludeItemIds: mapped.filter((line) => line.ids.some((id) => excluded.has(id))).flatMap((line) => line.ids),
     otherCharges,
     roundOff,
     totalQty: mapped.reduce((s, i) => s + i.qty, 0),
@@ -186,7 +202,7 @@ export function previewRunningBill(ctx: AppContext, orderId: string) {
   const savedRate = invoice.service_charge_pct !== 0 || invoice.service_charge === 0;
   const bill = previewBill(ctx, orderId, {
     discount: invoice.discount,
-    excludeItemIds: details.excludeItemIds,
+    excludeItemIds: details.excludeItemIds ?? [],
     otherCharges: invoice.other_charges,
     serviceChargePct: savedRate ? invoice.service_charge_pct : undefined,
     serviceChargeMode: savedRate ? invoice.service_charge_mode : undefined,
@@ -263,6 +279,52 @@ function finishComplimentary(ctx: AppContext, orderId: string, invoiceId: string
   audit(ctx, "INVOICE_PAID", "invoice", invoiceId, "complimentary", 0, 0);
 }
 
+function reduceSettlements(ctx: AppContext, invoiceId: string, orderId: string, excess: number) {
+  const payments = ctx.db.prepare(
+    `SELECT id, method, amount, member_card_id, ledger_id FROM payments
+     WHERE invoice_id = ? AND amount > 0 ORDER BY created_at DESC, rowid DESC`,
+  ).all(invoiceId) as Array<{
+    id: string; method: string; amount: number; member_card_id: string | null; ledger_id: string | null;
+  }>;
+  const club = orderOutlet(ctx, orderId) === "THE BOSS CLUB";
+  const reason = "Bill total reduced";
+  for (const payment of payments) {
+    if (excess === 0) break;
+    const amount = Math.min(excess, payment.amount);
+    if (payment.method === "MEMBER_CARD") {
+      if (!payment.member_card_id || !payment.ledger_id) throw new AppError("Original card payment is missing");
+      const available = club ? clubChargeSoFar(ctx, orderId) : ctx.db.prepare(
+        `SELECT original.paid_amount - COALESCE(SUM(refund.paid_amount), 0) AS paid,
+                original.bonus_amount - COALESCE(SUM(refund.bonus_amount), 0) AS bonus
+         FROM card_ledger original
+         LEFT JOIN card_ledger refund ON refund.related_ledger_id = original.id AND refund.type = 'REFUND'
+         WHERE original.id = ? AND original.card_id = ? AND original.type = 'PURCHASE'
+         GROUP BY original.id`,
+      ).get(payment.ledger_id, payment.member_card_id) as { paid: number; bonus: number } | undefined;
+      if (!available || amount > available.paid + available.bonus) {
+        throw new AppError("Bill reduction exceeds the original card charge");
+      }
+      const paidBack = Math.min(available.paid, amount);
+      writeLedger(ctx, {
+        cardId: payment.member_card_id,
+        type: club ? "ADJUSTMENT" : "REFUND",
+        direction: "CREDIT",
+        paidAmount: paidBack,
+        bonusAmount: amount - paidBack,
+        paymentMode: "MEMBER_CARD",
+        relatedLedgerId: payment.ledger_id,
+        relatedInvoiceId: invoiceId,
+        referenceNumber: club ? clubChargeRef(orderId) : undefined,
+        reason,
+        idempotencyKey: idempotencyKey("bill-reduction"),
+      });
+    }
+    ctx.db.prepare("UPDATE payments SET amount = ? WHERE id = ?").run(payment.amount - amount, payment.id);
+    audit(ctx, "SETTLEMENT_UPDATE", "payment", payment.id, reason, payment.amount, payment.amount - amount);
+    excess -= amount;
+  }
+}
+
 function openInvoiceNumber(ctx: AppContext, orderId: string): string {
   const existing = ctx.db
     .prepare("SELECT invoice_number FROM invoices WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')")
@@ -280,6 +342,7 @@ export function generateInvoice(
     discountPct?: number;
     discountFrom?: "amount" | "percent";
     excludeItemIds?: string[];
+    discountReviewedItemIds?: string[];
     otherCharges?: number;
     serviceChargePct?: number;
     serviceChargeMode?: ServiceChargeMode;
@@ -298,7 +361,10 @@ export function generateInvoice(
   const isComplimentary = nc || Boolean(options.complimentary);
   const comp = isComplimentary ? requireComplimentary(ctx, options.complimentaryAccountId) : null;
   if (isComplimentary) zeroComplimentaryBill(preview);
-  if ((preview.discount ?? 0) > 0) {
+  const preservedAdvanceDiscount = ctx.actor.userGroup === "ADVANCE" && options.invoiceId &&
+    (ctx.db.prepare("SELECT discount FROM invoices WHERE id = ? AND order_id = ?").get(options.invoiceId, orderId) as
+      { discount: number } | undefined)?.discount === preview.discount;
+  if ((preview.discount ?? 0) > 0 && !preservedAdvanceDiscount) {
     if (preview.discount > preview.foodTotal + preview.drinksTotal * 0.2) {
       assertPermission(ctx.actor.role, "LARGE_DISCOUNT");
     }
@@ -318,7 +384,7 @@ export function generateInvoice(
         .get(orderId) as { id: string; status: string } | undefined;
 
   const bill = preview;
-  const billDetails = options.billDetails ? JSON.stringify(options.billDetails) : null;
+  const billDetails = JSON.stringify({ ...options.billDetails, excludeItemIds: preview.excludeItemIds });
   const order = ctx.db.prepare("SELECT * FROM orders WHERE id = ?").get(orderId) as {
     customer_id: string | null;
     card_id: string | null;
@@ -345,8 +411,17 @@ export function generateInvoice(
   }
 
   if (existing) {
-    const paid = (ctx.db.prepare("SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE invoice_id = ?").get(existing.id) as { paid: number }).paid;
     return ctx.db.transaction(() => {
+      const previous = getInvoice(ctx, existing.id);
+      const previousTotal = Number(previous.invoice.grand_total);
+      const hadSettlement = previous.invoice.status === "PAID" || previous.paid > 0;
+      let paid = previous.paid;
+      const payable = Math.max(0, bill.grandTotal);
+      if (bill.grandTotal < previousTotal && paid > payable) {
+        reduceSettlements(ctx, existing.id, orderId, paid - payable);
+        paid = payable;
+      }
+      const reopenSettlement = hadSettlement && bill.grandTotal > previousTotal && paid < payable;
       ctx.db
         .prepare(
           `UPDATE invoices SET
@@ -354,7 +429,7 @@ export function generateInvoice(
              discount = ?, tax = ?, other_charges = ?, grand_total = ?,
              complimentary_account_id = ?, complimentary_name = ?,
              customer_display_name = COALESCE(?, customer_display_name), customer_gstin = COALESCE(?, customer_gstin),
-             bill_details = COALESCE(?, bill_details)
+             bill_details = ?
            WHERE id = ?`,
         )
         .run(
@@ -379,7 +454,7 @@ export function generateInvoice(
       // Keep edits to a settled bill on the invoice already referenced by its
       // payments. Recalculate its status so the reports show the revised bill
       // total while retaining the original payment history.
-      const isPaid = bill.grandTotal > 0 && paid >= bill.grandTotal;
+      const isPaid = paid >= payable && (payable > 0 || hadSettlement);
       ctx.db
         .prepare("UPDATE invoices SET status = ?, paid_at = CASE WHEN ? = 1 THEN COALESCE(paid_at, ?) ELSE NULL END WHERE id = ?")
         .run(isPaid ? "PAID" : paid > 0 ? "PARTIAL" : "UNPAID", isPaid ? 1 : 0, nowIso(), existing.id);
@@ -389,8 +464,19 @@ export function generateInvoice(
       if (isComplimentary) {
         syncClubCardCharge(ctx, orderId, true);
         finishComplimentary(ctx, orderId, existing.id, bill.tableId);
-      } else syncClubCardCharge(ctx, orderId, true);
-      return ctx.db.prepare("SELECT * FROM invoices WHERE id = ?").get(existing.id);
+      } else {
+        syncClubCardCharge(ctx, orderId, true);
+        const table = getTable(ctx, bill.tableId);
+        if (table.current_session_id === bill.sessionId) {
+          if (isPaid) closeTable(ctx, bill.tableId);
+          else setTableStatus(ctx, bill.tableId, "PAYMENT_PENDING");
+        } else if (reopenSettlement && !table.current_session_id && table.status === "AVAILABLE") {
+          ctx.db.prepare("UPDATE table_sessions SET status = 'OPEN', closed_at = NULL WHERE id = ?").run(bill.sessionId);
+          ctx.db.prepare("UPDATE dining_tables SET current_session_id = ?, status = 'PAYMENT_PENDING' WHERE id = ?")
+            .run(bill.sessionId, bill.tableId);
+        }
+      }
+      return { ...ctx.db.prepare("SELECT * FROM invoices WHERE id = ?").get(existing.id) as Record<string, unknown>, reopenSettlement };
     })();
   }
 
@@ -431,7 +517,7 @@ export function generateInvoice(
         comp?.name ?? "",
         String(options.customerDisplayName ?? "").trim(),
         String(options.customerGstin ?? "").trim(),
-        billDetails ?? "{}",
+        billDetails,
       );
     writeItems(id);
     if (isComplimentary) {
@@ -467,15 +553,17 @@ function clubChargeRef(orderId: string) {
 function clubBillNet(ctx: AppContext, orderId: string) {
   const inv = ctx.db
     .prepare(
-      `SELECT discount, service_charge_pct, service_charge_mode, other_charges, complimentary_account_id
+      `SELECT discount, service_charge_pct, service_charge_mode, other_charges, complimentary_account_id, bill_details
          FROM invoices
         WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')
         ORDER BY created_at DESC LIMIT 1`,
     )
     .get(orderId) as
-    | { discount: number; service_charge_pct: number; service_charge_mode: string; other_charges: number; complimentary_account_id: string | null }
+    | { discount: number; service_charge_pct: number; service_charge_mode: string; other_charges: number; complimentary_account_id: string | null; bill_details: string | null }
     | undefined;
   if (inv?.complimentary_account_id) return 0;
+  let details: Partial<BillDetails> = {};
+  try { details = JSON.parse(inv?.bill_details || "{}") ?? {}; } catch { /* Legacy invoice. */ }
   try {
     const bill = previewBill(
       ctx,
@@ -484,6 +572,7 @@ function clubBillNet(ctx: AppContext, orderId: string) {
         ? {
             discount: Number(inv.discount) || 0,
             discountFrom: "amount",
+            excludeItemIds: details.excludeItemIds ?? [],
             serviceChargePct: Number(inv.service_charge_pct) || 0,
             serviceChargeMode: (inv.service_charge_mode || "EXCLUSIVE") as ServiceChargeMode,
             otherCharges: Number(inv.other_charges) || 0,
@@ -603,6 +692,7 @@ export function settleClubFromCard(ctx: AppContext, invoiceId: string) {
     status: string;
     order_id: string;
     card_id: string | null;
+    bill_details: string | null;
     discount: number;
     service_charge_pct: number;
     service_charge_mode: string;
@@ -615,9 +705,13 @@ export function settleClubFromCard(ctx: AppContext, invoiceId: string) {
   const cardId = invoice.card_id || order?.card_id;
   if (!cardId) throw new AppError("Punch the card on this table first");
   assertUsable(getCard(ctx, cardId));
+  let details: BillDetails | undefined;
+  try { details = JSON.parse(invoice.bill_details || "{}") ?? undefined; } catch { /* Legacy invoice. */ }
   generateInvoice(ctx, invoice.order_id, {
     discount: Number(invoice.discount) || 0,
     discountFrom: "amount",
+    excludeItemIds: details?.excludeItemIds ?? [],
+    billDetails: details,
     serviceChargePct: Number(invoice.service_charge_pct) || 0,
     serviceChargeMode: (invoice.service_charge_mode || "EXCLUSIVE") as ServiceChargeMode,
     otherCharges: Number(invoice.other_charges) || 0,
@@ -650,6 +744,7 @@ export function settleInvoice(
       status: string;
       order_id: string;
       table_id: string;
+      session_id: string;
       card_id: string | null;
     };
     if (invoice.status === "PAID" || invoice.status === "CANCELLED") {
@@ -739,7 +834,9 @@ export function settleInvoice(
       .prepare("UPDATE invoices SET status = 'PAID', paid_at = ? WHERE id = ?")
       .run(nowIso(), invoice.id);
     ctx.db.prepare("UPDATE orders SET status = 'PAID' WHERE id = ?").run(invoice.order_id);
-    closeTable(ctx, invoice.table_id);
+    if (getTable(ctx, invoice.table_id).current_session_id === invoice.session_id) {
+      closeTable(ctx, invoice.table_id);
+    }
     enqueueSync(ctx, "invoice", invoice.id, { invoiceId, status: "PAID" }, idempotencyKey("inv"));
     audit(ctx, "INVOICE_PAID", "invoice", invoice.id, null, invoice.grand_total, paid);
 
@@ -974,9 +1071,10 @@ export function cancelInvoice(ctx: AppContext, invoiceId: string, reason: string
 export function getOpenInvoiceByTable(ctx: AppContext, tableId: string) {
   const row = ctx.db
     .prepare(
-      `SELECT id FROM invoices
-        WHERE table_id = ? AND status IN ('UNPAID','PARTIAL')
-        ORDER BY created_at DESC LIMIT 1`,
+      `SELECT i.id FROM invoices i
+        JOIN dining_tables t ON t.id = i.table_id AND t.current_session_id = i.session_id
+        WHERE i.table_id = ? AND i.status IN ('UNPAID','PARTIAL')
+        ORDER BY i.created_at DESC LIMIT 1`,
     )
     .get(tableId) as { id: string } | undefined;
   if (!row) throw new AppError("No bill to settle", 404);
@@ -1003,7 +1101,7 @@ export function listInvoices(ctx: AppContext) {
        ORDER BY i.created_at DESC`,
     )
     .all() as Array<{ table_code: string; outlet_name: string; order_card: string | null }>;
-  return rows.map((row) => ({
+  return rows.filter((row) => ctx.actor.userGroup !== "ADVANCE" || isAdvanceOutlet(row.outlet_name)).map((row) => ({
     ...row,
     table_label: formatTableNo(row.table_code, row.order_card, row.outlet_name),
   }));

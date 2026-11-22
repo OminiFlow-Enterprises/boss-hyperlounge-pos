@@ -1,10 +1,12 @@
 import { formatUiLabel } from "./formatUiLabel";
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError } from "./api";
-import { AlertBox, ConfirmAsk } from "./BillDialogs";
+import { AlertBox, CapBtns, ConfirmAsk } from "./BillDialogs";
 import {
   RIGHTS_TREE,
   applyRight,
+  isUserRoleLabel,
+  reportsForGroup,
   billPreset,
   blankOutlets,
   flagsPreset,
@@ -39,7 +41,6 @@ function blankFlags(): UserFlags {
     hideEstimate: false,
     allowComplementary: false,
     advanceCardUpdate: false,
-    showCheckinRooms: false,
   };
 }
 
@@ -75,6 +76,7 @@ function RightRow({
   depth,
   onToggle,
   onOpen,
+  locked,
 }: {
   node: RightNode;
   rights: Record<string, boolean>;
@@ -82,6 +84,7 @@ function RightRow({
   depth: number;
   onToggle: (id: string, on: boolean) => void;
   onOpen: (id: string) => void;
+  locked: boolean;
 }) {
   const box = useRef<HTMLInputElement>(null);
   const state = nodeState(node, rights);
@@ -113,6 +116,7 @@ function RightRow({
             ref={box}
             type="checkbox"
             checked={state === "on"}
+            disabled={locked}
             onChange={(e) => onToggle(node.id, e.target.checked)}
           />
           <span>{node.label}</span>
@@ -126,6 +130,7 @@ function RightRow({
           open={open}
           depth={depth + 1}
           onToggle={onToggle}
+          locked={locked}
           onOpen={onOpen}
         />
       ))}
@@ -133,9 +138,9 @@ function RightRow({
   );
 }
 
-export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => void }) {
+export function UserMaster({ selfId, allowMasterPinChange, onExit }: { selfId: string; allowMasterPinChange: boolean; onExit: () => void }) {
   const [users, setUsers] = useState<Account[]>([]);
-  const [listSel, setListSel] = useState(0);
+  const [listSel, setListSel] = useState(-1);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [username, setUsername] = useState("");
   const [userRole, setUserRole] = useState<"" | UserRoleLabel>("");
@@ -151,6 +156,8 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
   const [outlets, setOutlets] = useState<OutletRight[]>(blankOutlets);
   const [outletSel, setOutletSel] = useState(0);
   const [alertText, setAlertText] = useState("");
+  const [changingPin, setChangingPin] = useState(false);
+  const [editingGroupReports, setEditingGroupReports] = useState(false);
   const [askDelete, setAskDelete] = useState<Account | null>(null);
   const [busy, setBusy] = useState(false);
   const userRef = useRef<HTMLInputElement>(null);
@@ -170,12 +177,13 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
   async function load() {
     const rows = await api.get<Account[]>("/api/staff");
     setUsers(rows);
-    setListSel((i) => Math.min(i, Math.max(0, rows.length - 1)));
+    setListSel((i) => Math.min(i, rows.length - 1));
     return rows;
   }
 
   function clearForm() {
     setEditingId(null);
+    setListSel(-1);
     setUsername("");
     setUserRole("");
     setPassword("");
@@ -212,7 +220,7 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
   }
 
   function changeRole(next: string) {
-    if (next !== "ADMIN" && next !== "OPERATOR") {
+    if (!isUserRoleLabel(next)) {
       setUserRole("");
       return;
     }
@@ -243,8 +251,12 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
       setAlertText("Enter username");
       return;
     }
-    if (userRole !== "ADMIN" && userRole !== "OPERATOR") {
+    if (!isUserRoleLabel(userRole)) {
       setAlertText("Select user role");
+      return;
+    }
+    if (!editingId && users.some((row) => row.username.toLowerCase() === username.trim().toLowerCase())) {
+      setAlertText("Select the existing user from the list to update their account.");
       return;
     }
     if (!editingId && !password) {
@@ -287,7 +299,7 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
       setListSel((i) => Math.min(users.length - 1, i + 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setListSel((i) => Math.max(0, i - 1));
+      setListSel((i) => users.length ? Math.max(0, i - 1) : -1);
     } else if (e.key === "Enter") {
       e.preventDefault();
       const row = users[listSel];
@@ -321,7 +333,7 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
   return (
     <div className="um-screen" ref={rootRef}>
       <fieldset className="um-form">
-        <legend>Add User Account</legend>
+        <legend>{editingId ? "Edit User Account" : "Add User Account"}</legend>
         <label className="um-field">
           <span>Username :</span>
           <input ref={userRef} className="win" value={username} onChange={(e) => setUsername(e.target.value)} onKeyDown={enterNext} />
@@ -332,6 +344,8 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
             <option value="">Select</option>
             <option value="ADMIN">Admin</option>
             <option value="OPERATOR">Operator</option>
+            <option value="ADVANCE">Advance</option>
+            <option value="CASHIER">Cashier</option>
           </select>
         </label>
         <label className="um-field">
@@ -364,13 +378,12 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
           </select>
         </label>
         <div className="um-checks">
-          <Check label="Hide Collection" checked={flags.hideCollection} onChange={(v) => setFlags({ ...flags, hideCollection: v })} />
-          <Check label="Hide Estimate" checked={flags.hideEstimate} onChange={(v) => setFlags({ ...flags, hideEstimate: v })} />
-          <Check label="Allow Complementary" checked={flags.allowComplementary} onChange={(v) => setFlags({ ...flags, allowComplementary: v })} />
-          <Check label="Advance Card Update" checked={flags.advanceCardUpdate} onChange={(v) => setFlags({ ...flags, advanceCardUpdate: v })} />
-          <Check label="Show Checkin Rooms" checked={flags.showCheckinRooms} onChange={(v) => setFlags({ ...flags, showCheckinRooms: v })} />
+          <Check disabled={userRole !== "ADMIN"} label="Hide Collection" checked={flags.hideCollection} onChange={(v) => setFlags({ ...flags, hideCollection: v })} />
+          <Check disabled={userRole !== "ADMIN"} label="Hide Estimate" checked={flags.hideEstimate} onChange={(v) => setFlags({ ...flags, hideEstimate: v })} />
+          <Check disabled={userRole !== "ADMIN"} label="Allow Complementary" checked={flags.allowComplementary} onChange={(v) => setFlags({ ...flags, allowComplementary: v })} />
+          <Check disabled={userRole !== "ADMIN"} label="Advance Card Update" checked={flags.advanceCardUpdate} onChange={(v) => setFlags({ ...flags, advanceCardUpdate: v })} />
         </div>
-        <fieldset className="um-bill">
+        <fieldset className="um-bill" disabled={userRole !== "ADMIN"}>
           <legend>Outlet Bill Update Options</legend>
           <Check label="Service Charge Update" checked={bill.serviceCharge} onChange={(v) => setBill({ ...bill, serviceCharge: v })} />
           <Check label="Discount On Update" checked={bill.discount} onChange={(v) => setBill({ ...bill, discount: v })} />
@@ -393,6 +406,7 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
               rights={rights}
               open={openNodes}
               depth={0}
+              locked={userRole !== "ADMIN" || node.id === "report"}
               onToggle={(id, on) => setRights((prev) => applyRight(prev, id, on))}
               onOpen={(id) => setOpenNodes((prev) => ({ ...prev, [id]: !prev[id] }))}
             />
@@ -421,20 +435,20 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
               <tr
                 key={row.id}
                 className={i === listSel ? "on" : ""}
-                onClick={() => setListSel(i)}
-                onDoubleClick={() => edit(row)}
+                onClick={() => edit(row)}
               >
                 <td>{row.username}</td>
                 <td>{row.userRole}</td>
                 <td>
-                  <button type="button" className="um-link" tabIndex={-1} onClick={() => edit(row)}>Edit</button>
+                  <button type="button" className="um-link" tabIndex={-1} onClick={(e) => { e.stopPropagation(); edit(row); }}>Edit</button>
                 </td>
                 <td>
                   <button
                     type="button"
                     className="um-link"
                     tabIndex={-1}
-                    onClick={() => {
+                    onClick={(e) => {
+                      e.stopPropagation();
                       if (row.id === selfId) setAlertText("Cannot delete the logged in user");
                       else setAskDelete(row);
                     }}
@@ -507,11 +521,22 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
       </div>
 
       <div className="um-actions">
-        <button type="button" className="fn" onClick={() => void save()}>Save</button>
+        {allowMasterPinChange && <button type="button" className="fn um-pin-action" onClick={() => setEditingGroupReports(true)}>Group Report Permissions</button>}
+        {allowMasterPinChange && <button type="button" className="fn um-pin-action" onClick={() => setChangingPin(true)}>Change Master PIN</button>}
+        <button type="button" className="fn" disabled={busy} onClick={() => void save()}>{editingId ? "Update" : "Save"}</button>
         <button type="button" className="fn" onClick={clearForm}>Cancel</button>
         <button type="button" className="fn" onClick={onExit}>Exit</button>
       </div>
 
+      {editingGroupReports && <GroupReportsDialog initialGroup={userRole || "OPERATOR"} onClose={() => setEditingGroupReports(false)} onSaved={() => {
+        setEditingGroupReports(false);
+        void load().catch(() => null);
+        setAlertText("Group report permissions updated. Sign in again to apply them.");
+      }} />}
+      {changingPin && <MasterPinDialog onClose={() => setChangingPin(false)} onSaved={() => {
+        setChangingPin(false);
+        setAlertText("Master PIN updated");
+      }} />}
       {askDelete && (
         <ConfirmAsk
           message="Do you want to delete this user?"
@@ -524,10 +549,128 @@ export function UserMaster({ selfId, onExit }: { selfId: string; onExit: () => v
   );
 }
 
-function Check({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+function GroupReportsDialog({ initialGroup, onClose, onSaved }: {
+  initialGroup: UserRoleLabel;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [group, setGroup] = useState(initialGroup);
+  const [permissions, setPermissions] = useState<Record<string, boolean> | null>(null);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const request = new AbortController();
+    setPermissions(null);
+    setError("");
+    api.get<Record<string, boolean>>(`/api/settings/group-reports/${group}`, request.signal)
+      .then((data) => { if (!request.signal.aborted) setPermissions(data); })
+      .catch((err) => { if (!request.signal.aborted) setError(err instanceof Error ? err.message : "Could not load group reports"); });
+    return () => request.abort();
+  }, [group]);
+
+  async function save() {
+    if (!permissions || saving) return;
+    setSaving(true);
+    setError("");
+    try {
+      await api.put(`/api/settings/group-reports/${group}`, permissions);
+      onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save group reports");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="confirm-overlay" onKeyDown={(e) => {
+      if (e.key === "Escape" && !saving) { e.stopPropagation(); onClose(); }
+    }}>
+      <div className="dialog pass-dlg" role="dialog" aria-modal="true" aria-labelledby="group-reports-title">
+        <div className="dialog-cap" id="group-reports-title">
+          Group Report Permissions
+          <CapBtns onClose={() => { if (!saving) onClose(); }} chrome={false} />
+        </div>
+        <form className="dialog-body pass-body" onSubmit={(e) => { e.preventDefault(); void save(); }}>
+          <label><span>User Group</span>
+            <select className="win" autoFocus disabled={saving} value={group} onChange={(e) => {
+              const value = e.target.value;
+              if (isUserRoleLabel(value)) { setPermissions(null); setGroup(value); }
+            }}>
+              <option value="OPERATOR">Operator</option>
+              <option value="ADVANCE">Advance</option>
+              <option value="CASHIER">Cashier</option>
+              <option value="ADMIN">Admin</option>
+            </select>
+          </label>
+          <div className="group-report-options">
+            {permissions && reportsForGroup(group).map(({ id, label }) => (
+              <Check key={id} label={label} checked={Boolean(permissions[id])} disabled={saving}
+                onChange={(checked) => setPermissions({ ...permissions, [id]: checked })} />
+            ))}
+          </div>
+          {error && <div role="alert">{error}</div>}
+          <div className="pass-actions">
+            <button className="fn" type="submit" disabled={!permissions || saving}>Save</button>
+            <button className="fn" type="button" disabled={saving} onClick={onClose}>Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function MasterPinDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const [currentPin, setCurrentPin] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    if (saving) return;
+    if (newPin !== confirmation) {
+      setError("New master PINs do not match");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.put("/api/settings/master-pin", { currentPin, newPin });
+      onSaved();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not change master PIN");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="confirm-overlay" onKeyDown={(e) => {
+      if (e.key === "Escape" && !saving) { e.stopPropagation(); onClose(); }
+    }}>
+      <div className="dialog pass-dlg" role="dialog" aria-modal="true" aria-labelledby="master-pin-title">
+        <div className="dialog-cap" id="master-pin-title">
+          Change Master PIN
+          <CapBtns onClose={() => { if (!saving) onClose(); }} chrome={false} />
+        </div>
+        <form className="dialog-body pass-body" onSubmit={(e) => { e.preventDefault(); void save(); }}>
+          <label><span>Current Master PIN</span><input className="win" type="password" autoComplete="off" autoFocus required value={currentPin} onChange={(e) => setCurrentPin(e.target.value)} /></label>
+          <label><span>New Master PIN</span><input className="win" type="password" inputMode="numeric" autoComplete="new-password" required minLength={4} maxLength={12} value={newPin} onChange={(e) => setNewPin(e.target.value)} /></label>
+          <label><span>Confirm Master PIN</span><input className="win" type="password" inputMode="numeric" autoComplete="new-password" required maxLength={12} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></label>
+          {error && <div role="alert">{error}</div>}
+          <div className="pass-actions">
+            <button className="fn" type="submit" disabled={saving}>Save</button>
+            <button className="fn" type="button" disabled={saving} onClick={onClose}>Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function Check({ label, checked, onChange, disabled }: { label: string; checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
     <label className="chk">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       {label}
     </label>
   );

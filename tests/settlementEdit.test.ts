@@ -1,9 +1,90 @@
 import { expect, it } from "vitest";
-import { generateInvoice, settleInvoice } from "../src/server/services/billingService.js";
-import { addItem, createOrder } from "../src/server/services/orderService.js";
-import { settlementDetail, settlementReport, updateSettlement } from "../src/server/services/reportService.js";
+import { generateInvoice, getInvoice, getOpenInvoiceByTable, settleInvoice } from "../src/server/services/billingService.js";
+import { balancesFromLedger } from "../src/server/services/cardService.js";
+import { addItem, createOrder, setBillLineQty } from "../src/server/services/orderService.js";
+import { saveBooking, settlementDetail, settlementReport, updateSettlement } from "../src/server/services/reportService.js";
 import { getTableByCode, openTable } from "../src/server/services/tableService.js";
 import { createTestApp } from "./helpers.js";
+
+it.each(["CASH", "CARD", "MEMBER_CARD"] as const)(
+  "reduces a %s settlement in place and reopens the table if the bill increases",
+  (method) => {
+    const { ctx, seeded } = createTestApp();
+    const cashier = ctx("cashier");
+    const table = getTableByCode(cashier, "01");
+    openTable(cashier, { tableId: table.id });
+    const order = createOrder(cashier, table.id) as { id: string };
+    addItem(cashier, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
+    const booking = saveBooking(cashier, { cardNo: "1234", advance: 200_000, mop: "CASH" }) as { card: { id: string } };
+    const cardId = booking.card.id;
+    const invoice = generateInvoice(cashier, order.id, { serviceChargePct: 10 }) as { id: string; grand_total: number };
+    settleInvoice(cashier, invoice.id, [{
+      method,
+      amount: invoice.grand_total,
+      ...(method === "MEMBER_CARD" ? { memberCardId: cardId } : {}),
+      ...(method === "CARD" ? { reference: "HDFC" } : {}),
+    }], { printReceipt: false });
+    const original = getInvoice(cashier, invoice.id);
+    const afterPayment = balancesFromLedger(cashier, cardId);
+
+    const reduced = generateInvoice(cashier, order.id, { invoiceId: invoice.id, serviceChargePct: 0 }) as {
+      grand_total: number; status: string;
+    };
+    expect(reduced.status).toBe("PAID");
+    expect(reduced.grand_total).toBeLessThan(invoice.grand_total);
+    expect(getInvoice(cashier, invoice.id).payments).toEqual([{ ...original.payments[0], amount: reduced.grand_total }]);
+    const expectedCredit = method === "MEMBER_CARD" ? invoice.grand_total - reduced.grand_total : 0;
+    expect(balancesFromLedger(cashier, cardId).usable).toBe(afterPayment.usable + expectedCredit);
+    generateInvoice(cashier, order.id, { invoiceId: invoice.id, serviceChargePct: 0 });
+    expect(balancesFromLedger(cashier, cardId).usable).toBe(afterPayment.usable + expectedCredit);
+
+    expect(generateInvoice(cashier, order.id, { invoiceId: invoice.id, serviceChargePct: 10 }))
+      .toMatchObject({ status: "PARTIAL", reopenSettlement: true });
+    expect(getTableByCode(cashier, "01").status).toBe("PAYMENT_PENDING");
+    const reopened = getOpenInvoiceByTable(cashier, table.id);
+    expect(reopened.due).toBe(invoice.grand_total - reduced.grand_total);
+    expect(settleInvoice(cashier, invoice.id, [{ method: "CASH", amount: reopened.due }], { printReceipt: false }))
+      .toMatchObject({ complete: true, due: 0 });
+    expect(getTableByCode(cashier, "01").status).toBe("AVAILABLE");
+  },
+);
+
+it("carries partial payments forward when reopening a revised table bill", () => {
+  const { ctx, seeded } = createTestApp();
+  const cashier = ctx("cashier");
+  const table = getTableByCode(cashier, "01");
+  openTable(cashier, { tableId: table.id });
+  const order = createOrder(cashier, table.id) as { id: string };
+  const item = addItem(cashier, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 2 }) as { id: string };
+  const invoice = generateInvoice(cashier, order.id, { serviceChargePct: 10 }) as { id: string; grand_total: number };
+  const payment = 10_000;
+  settleInvoice(cashier, invoice.id, [{ method: "CASH", amount: payment }], { printReceipt: false });
+
+  function revise(qty: number, serviceChargePct: number) {
+    setBillLineQty(cashier, order.id, [item.id], qty, { allowPaid: false });
+    const revised = generateInvoice(cashier, order.id, { invoiceId: invoice.id, serviceChargePct }) as {
+      id: string; grand_total: number;
+    };
+    const reopened = getOpenInvoiceByTable(cashier, table.id);
+    expect(reopened).toMatchObject({
+      invoice: { id: invoice.id, status: "PARTIAL" },
+      paid: payment,
+      due: revised.grand_total - payment,
+      payments: [{ amount: payment }],
+    });
+    return reopened;
+  }
+
+  const increased = revise(3, 10);
+  expect(increased.due).toBeGreaterThan(invoice.grand_total - payment);
+  const decreased = revise(2, 10);
+  expect(decreased.due).toBeLessThan(increased.due);
+  const withoutServiceCharge = revise(2, 0);
+  expect(withoutServiceCharge.due).toBeLessThan(decreased.due);
+  expect(settleInvoice(cashier, invoice.id, [{ method: "CASH", amount: withoutServiceCharge.due }], {
+    printReceipt: false,
+  })).toMatchObject({ complete: true, due: 0 });
+});
 
 it("replaces one settlement with four parts on its original report date", () => {
   const { ctx, seeded } = createTestApp();
@@ -41,4 +122,12 @@ it("replaces one settlement with four parts on its original report date", () => 
     account: line.account,
     status: "PAID",
   }))));
+
+  const before = cashier.db.prepare("SELECT * FROM payments WHERE id = ?").get(payment.id) as { amount: number };
+  updateSettlement(cashier, payment.id, { original: { amount: before.amount }, amount: 1000 });
+  expect(cashier.db.prepare("SELECT * FROM payments WHERE id = ?").get(payment.id)).toEqual({ ...before, amount: 1000 });
+  expect(cashier.db.prepare("SELECT COUNT(*) AS count FROM payments WHERE invoice_id = ?").get(invoice.id)).toEqual({ count: 4 });
+  const filtered = settlementReport(cashier, "2024-05-02", "2024-05-02", "BAR", { mop: "CASH" });
+  expect(filtered.rows).toHaveLength(2);
+  expect(filtered.rows.map((row) => row.status)).toEqual(["PARTIAL", "PARTIAL"]);
 });

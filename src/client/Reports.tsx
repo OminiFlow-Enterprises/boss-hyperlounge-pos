@@ -9,7 +9,9 @@ import { AlertBox, CapBtns, ConfirmAsk, PrepareBillDialog, SettleDialog } from "
 import { cardNoDigits, cardNoReady, stayOnCard } from "./formNav";
 import type { CompAccount } from "./ComplimentaryMaster";
 
-const OUTLETS = ["BAR", "CAFE", "NC", "RESTAURANT", "THE BOSS CLUB"];
+import { ADVANCE_OUTLETS } from "../shared/userRights";
+
+const OUTLETS = ["BAR", "NC", "RESTAURANT", "THE BOSS CLUB"];
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
 function useReportRequest() {
@@ -40,6 +42,69 @@ function ReportLoadStatus({ loading, error }: { loading: boolean; error: string 
   if (loading) return <div className="report-load-status" role="status">Loading report…</div>;
   if (error) return <div className="report-load-status" role="alert">{error}</div>;
   return null;
+}
+
+function useReportSelection(rows: readonly unknown[], cellSelect = false, startAtEnd = true) {
+  const body = useRef<HTMLTableSectionElement>(null);
+  const index = useRef(-1);
+  const column = useRef(0);
+  const selectedRow = useRef<HTMLTableRowElement | null>(null);
+  const selectedCell = useRef<HTMLTableCellElement | null>(null);
+  const frame = useRef<number | null>(null);
+
+  function select(nextIndex: number, nextColumn = column.current, focus = true) {
+    const rowIndex = Math.min(rows.length - 1, Math.max(0, nextIndex));
+    const row = body.current?.rows[rowIndex] ?? null;
+    const cellIndex = Math.min((row?.cells.length ?? 1) - 1, Math.max(0, nextColumn));
+    const cell = cellSelect ? row?.cells[cellIndex] ?? null : null;
+    if (selectedRow.current !== row) {
+      selectedRow.current?.classList.remove("on");
+      if (selectedRow.current) selectedRow.current.tabIndex = -1;
+      if (row) row.tabIndex = 0;
+    }
+    if (selectedCell.current !== cell) selectedCell.current?.classList.remove("cell-on");
+    if (cell) cell.classList.add("cell-on");
+    else row?.classList.add("on");
+    index.current = rowIndex;
+    column.current = cellIndex;
+    selectedRow.current = row;
+    selectedCell.current = cell;
+    if (frame.current !== null) cancelAnimationFrame(frame.current);
+    frame.current = row && focus ? requestAnimationFrame(() => {
+      frame.current = null;
+      if (!row.isConnected) return;
+      row.focus({ preventScroll: true });
+      (cell ?? row).scrollIntoView({ block: "nearest", inline: "nearest" });
+    }) : null;
+  }
+
+  useLayoutEffect(() => {
+    select(startAtEnd ? rows.length - 1 : 0, 0);
+    return () => {
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+    };
+  }, [rows, cellSelect, startAtEnd]);
+
+  function move(key: string) {
+    if (!rows.length) return false;
+    if (key === "ArrowUp") {
+      if (index.current > 0) select(index.current - 1);
+    } else if (key === "ArrowDown") {
+      if (index.current < rows.length - 1) select(index.current + 1);
+    } else if (cellSelect && key === "ArrowLeft") select(index.current, column.current - 1);
+    else if (cellSelect && key === "ArrowRight") select(index.current, column.current + 1);
+    else return false;
+    return true;
+  }
+
+  return { body, index, select, move };
+}
+
+const EMPTY_REPORT_ROWS: any[] = [];
+const REPORT_DIALOGS = ".bill-dlg, .settle-dlg, .su-dlg, .kot-view, .cs-dlg, .alert-dlg, .confirm-dlg, .confirm-overlay";
+
+function isReportDialogTarget(event: { target: EventTarget | null }) {
+  return event.target instanceof Element && Boolean(event.target.closest(REPORT_DIALOGS));
 }
 
 function pad(n: number) { return String(n).padStart(2, "0"); }
@@ -163,9 +228,9 @@ export function ItemWiseDetail({ onExit }: { onExit: () => void }) {
 export function PointOfSales({ onExit }: { onExit: () => void }) {
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
-  const [sel, setSel] = useState("CAFE");
+  const [sel, setSel] = useState("BAR");
   const [checked, setChecked] = useState<Record<string, boolean>>({
-    CAFE: true, BAR: true, "THE BOSS CLUB": true, RESTAURANT: true, NC: true,
+    BAR: true, "THE BOSS CLUB": true, RESTAURANT: true, NC: true,
   });
   return (
     <div className="rpt-page pos-page">
@@ -393,6 +458,7 @@ function advanceCashPaise(particulars: Array<{ label?: string; amount?: number }
 }
 
 export function GstReport({ onExit }: { onExit: () => void }) {
+  const request = useReportRequest();
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
   const [outletName, setOutletName] = useState("Select");
@@ -413,11 +479,9 @@ export function GstReport({ onExit }: { onExit: () => void }) {
   const [saleLines, setSaleLines] = useState<GstExtraLine[]>([]);
   const [hiddenLines, setHiddenLines] = useState<string[]>([]);
   const [editTools, setEditTools] = useState(true);
-  const [sel, setSel] = useState(-1);
-  const selRef = useRef(-1);
-  const gridWrapRef = useRef<HTMLDivElement>(null);
+  const rows = data.rows || EMPTY_REPORT_ROWS;
+  const selection = useReportSelection(view === "bills" ? rows : EMPTY_REPORT_ROWS);
   const closeRef = useRef(onExit);
-  selRef.current = sel;
   closeRef.current = onExit;
 
   function queryParams() {
@@ -430,33 +494,21 @@ export function GstReport({ onExit }: { onExit: () => void }) {
     });
   }
 
-  function focusSelRow(scrollLast = false) {
-    const wrap = gridWrapRef.current;
-    if (!wrap) return;
-    if (scrollLast) wrap.scrollTop = wrap.scrollHeight;
-    const tr = wrap.querySelector("tbody tr.on") as HTMLElement | null;
-    tr?.focus({ preventScroll: true });
-    if (!scrollLast) tr?.scrollIntoView({ block: "nearest" });
+  function loadBills() {
+    return request.load<any>(`/api/reports/gst?${queryParams()}`, (next) => {
+      setData(next);
+      setView("bills");
+    });
   }
 
-  async function loadBills() {
-    const next = await api.get<any>(`/api/reports/gst?${queryParams()}`);
-    setData(next);
-    setView("bills");
-    const rows = next.rows || [];
-    setSel(rows.length ? rows.length - 1 : -1);
-    requestAnimationFrame(() => focusSelRow(true));
-  }
-
-  async function loadTaxSummary() {
-    const next = await api.get<any>(`/api/reports/gst?mode=summary&${queryParams()}`);
-    setSummary(next);
-    setData((d: any) => ({ ...d, footer: next.footer || d.footer }));
-    setView("summary");
-    // New cash table sits under Particular — bring that bottom of the slip into view
-    requestAnimationFrame(() => {
-      const slip = document.querySelector(".gst-summery-slip") as HTMLElement | null;
-      if (slip) slip.scrollIntoView({ block: "start" });
+  function loadTaxSummary() {
+    return request.load<any>(`/api/reports/gst?mode=summary&${queryParams()}`, (next) => {
+      setSummary(next);
+      setData((d: any) => ({ ...d, footer: next.footer || d.footer }));
+      setView("summary");
+      requestAnimationFrame(() => {
+        document.querySelector(".gst-summery-slip")?.scrollIntoView({ block: "start" });
+      });
     });
   }
 
@@ -590,8 +642,9 @@ export function GstReport({ onExit }: { onExit: () => void }) {
 
   useEffect(() => {
     function keys(e: KeyboardEvent) {
-      if (document.querySelector(".alert-dlg, .confirm-dlg, .confirm-overlay")) return;
+      if (isReportDialogTarget(e)) return;
       if (e.key === "Escape") {
+        if (document.querySelector(".alert-dlg, .confirm-dlg, .confirm-overlay")) return;
         e.preventDefault();
         // Own Escape before the app-level handler so GST always exits through its
         // current callback instead of allowing competing navigation handlers.
@@ -600,20 +653,11 @@ export function GstReport({ onExit }: { onExit: () => void }) {
         return;
       }
       if (view !== "bills") return;
-      const rows = data.rows || [];
-      if (!rows.length) return;
-      const typing = (e.target as HTMLElement | null)?.closest("input, select, textarea");
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        if (typing && (e.target as HTMLElement).tagName === "SELECT") return;
+      if ((e.target as HTMLElement | null)?.closest("input, select, textarea, button")) return;
+      if (selection.move(e.key)) {
         e.preventDefault();
         e.stopPropagation();
-        (document.activeElement as HTMLElement | null)?.blur?.();
-        const idx = Math.max(0, selRef.current);
-        const next = e.key === "ArrowDown"
-          ? Math.min(rows.length - 1, idx + 1)
-          : Math.max(0, idx - 1);
-        setSel(next);
-        requestAnimationFrame(() => focusSelRow(false));
+        return;
       }
     }
     function escapeUp(e: KeyboardEvent) {
@@ -635,14 +679,6 @@ export function GstReport({ onExit }: { onExit: () => void }) {
     };
   });
 
-  useLayoutEffect(() => {
-    if (view !== "bills") return;
-    const rows = data.rows || [];
-    if (!rows.length || sel !== rows.length - 1) return;
-    focusSelRow(true);
-  }, [view, data, sel]);
-
-  const rows = data.rows || [];
   const totals = data.totals || {};
   const footer = (view === "summary" ? summary?.footer : data.footer) || {};
   const s = summary?.summary || {};
@@ -752,6 +788,7 @@ export function GstReport({ onExit }: { onExit: () => void }) {
         </div>
       </aside>
       <div className="gst-main">
+        <ReportLoadStatus loading={request.loading} error={request.error ? `Could not load the GST report. ${request.error}` : ""} />
         {view === "empty" && (
           <div className="gst-stage">
             <table className="gst-empty-grid">
@@ -766,19 +803,19 @@ export function GstReport({ onExit }: { onExit: () => void }) {
         )}
         {view === "bills" && (
           <>
-            <div className="gst-grid-wrap" ref={gridWrapRef}>
+            <div className="gst-grid-wrap">
               <table className="gst-bill-grid">
                 <thead>
                   <tr>
                     {GST_COLS.map(([k, label]) => <th key={k}>{label}</th>)}
                   </tr>
                 </thead>
-                <tbody>
+                <tbody ref={selection.body}>
                   {rows.map((r: any, i: number) => (
                     <tr
                       key={String(r.invoice_id || i)}
-                      className={i === sel ? "on" : ""}
-                      tabIndex={i === sel ? 0 : -1}
+                      tabIndex={-1}
+                      onClick={() => selection.select(i)}
                     >
                       {GST_COLS.map(([k, , money]) => (
                         <td key={k} className={money ? "num" : undefined}>
@@ -1011,7 +1048,7 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
   const [to, setTo] = useState(isoDay());
   const [sel, setSel] = useState("BAR");
   const [checked, setChecked] = useState<Record<string, boolean>>({
-    BAR: true, CAFE: true, NC: true, RESTAURANT: true, "THE BOSS CLUB": true,
+    BAR: true, NC: true, RESTAURANT: true, "THE BOSS CLUB": true,
   });
   const [rows, setRows] = useState<any[]>([]);
   const [filters, setFilters] = useState({ salesGroup: "", item: "", itemGroup: "", orderBy: "name", btc: "", waiter: "", mop: "" });
@@ -1079,7 +1116,7 @@ export function ItemWiseSale({ onExit }: { onExit: () => void }) {
       </div>
       <div className="iws-body">
         <aside className="pos-tree">
-          {["BAR", "CAFE", "NC", "RESTAURANT", "THE BOSS CLUB"].map((o) => (
+          {OUTLETS.map((o) => (
             <label key={o} className={sel === o ? "on" : ""} onClick={() => setSel(o)}>
               <input type="checkbox" checked={!!checked[o]} onChange={() => setChecked({ ...checked, [o]: !checked[o] })} />
               {formatUiLabel(o)}
@@ -1220,56 +1257,21 @@ export function GridReport({ title, endpoint, columns, onExit, onEdit, cellSelec
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
   const [rows, setRows] = useState<any[]>([]);
-  const [sel, setSel] = useState(0);
-  const [col, setCol] = useState(0);
-  const selRef = useRef(0);
-  const rowsRef = useRef(rows);
-  const onEditRef = useRef(onEdit);
-  selRef.current = sel;
-  rowsRef.current = rows;
-  onEditRef.current = onEdit;
-  useLayoutEffect(() => {
-    if (!rows.length || sel !== rows.length - 1) return;
-    const scroller = document.querySelector(".rpt-page .grid-fill") as HTMLElement | null;
-    if (!scroller) return;
-    scroller.scrollTop = scroller.scrollHeight;
-    const tr = scroller.querySelector("tbody tr:last-child") as HTMLElement | null;
-    tr?.focus({ preventScroll: true });
-  }, [rows, sel]);
+  const selection = useReportSelection(rows, cellSelect);
   useEffect(() => {
     function keys(e: KeyboardEvent) {
-      if (document.querySelector(".su-dlg, .alert-dlg, .confirm-dlg, .kot-view")) return;
+      if (isReportDialogTarget(e)) return;
       if (!rows.length) return;
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (cellSelect && (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown")) {
+      if ((e.target as HTMLElement | null)?.closest("input, select, textarea, button")) return;
+      if (selection.move(e.key)) {
         e.preventDefault();
         e.stopPropagation();
-        if (e.key === "ArrowLeft") setCol((c) => Math.max(0, c - 1));
-        if (e.key === "ArrowRight") setCol((c) => Math.min(columns.length - 1, c + 1));
-        if (e.key === "ArrowDown") setSel((i) => Math.min(rows.length - 1, i + 1));
-        if (e.key === "ArrowUp") setSel((i) => Math.max(0, i - 1));
-        requestAnimationFrame(() => document.querySelector("table.data td.cell-on")?.scrollIntoView({ block: "nearest", inline: "nearest" }));
         return;
-      }
-      if (cellSelect && e.key === "Enter") {
-        e.preventDefault();
-        e.stopPropagation();
-        const row = rowsRef.current[selRef.current];
-        if (row) onEditRef.current?.(row);
-        return;
-      }
-      if (tag === "BUTTON") return;
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        e.preventDefault();
-        setSel((i) => {
-          const next = e.key === "ArrowDown" ? Math.min(rows.length - 1, i + 1) : Math.max(0, i - 1);
-          requestAnimationFrame(() => document.querySelector("table.data tbody tr.on")?.scrollIntoView({ block: "nearest" }));
-          return next;
-        });
       }
       if (e.key === "Enter") {
         e.preventDefault();
-        const row = rows[sel];
+        e.stopPropagation();
+        const row = rows[selection.index.current];
         if (row) onEdit?.(row);
       }
     }
@@ -1281,8 +1283,6 @@ export function GridReport({ title, endpoint, columns, onExit, onEdit, cellSelec
     const data = await api.get<any>(endpoint.includes("/inventory") ? endpoint : `${endpoint}${join}from=${from}&to=${to}`);
     const next = Array.isArray(data) ? data : (data.rows ?? []);
     setRows(next);
-    setSel(Math.max(0, next.length - 1));
-    setCol(0);
   }
   useEffect(() => { load().catch(() => null); }, []);
   return (
@@ -1295,32 +1295,20 @@ export function GridReport({ title, endpoint, columns, onExit, onEdit, cellSelec
       <div className="grid-fill">
         <table className="data">
           <thead><tr>{columns.map(([k, l]) => <th key={k}>{l}</th>)}</tr></thead>
-          <tbody>
+          <tbody ref={selection.body}>
             {rows.map((r, i) => (
               <tr
                 key={i}
-                className={!cellSelect && i === sel ? "on" : ""}
-                tabIndex={0}
+                tabIndex={-1}
                 onClick={(e) => {
-                  const td = (e.target as HTMLElement).closest("td");
-                  const c = td ? Math.max(0, [...td.parentElement!.children].indexOf(td)) : 0;
-                  setSel(i);
-                  setCol(c);
+                  const td = (e.target as HTMLElement).closest<HTMLTableCellElement>("td");
+                  selection.select(i, td?.cellIndex ?? 0, Boolean(cellSelect));
                   if (!cellSelect) onEdit?.(r);
                 }}
-                onDoubleClick={() => {
-                  setSel(i);
-                  onEdit?.(r);
-                }}
-                onKeyDown={cellSelect ? undefined : (e) => {
-                  if (e.key !== "Enter") return;
-                  e.preventDefault();
-                  setSel(i);
-                  onEdit?.(r);
-                }}
+                onDoubleClick={() => onEdit?.(r)}
               >
-                {columns.map(([k], c) => (
-                  <td key={k} className={cellSelect && i === sel && c === col ? "cell-on" : ""}>
+                {columns.map(([k]) => (
+                  <td key={k}>
                     {typeof r[k] === "number" && (k.includes("total") || k === "grand_total" || k === "amount") ? inr(r[k]) : String(r[k] ?? "")}
                   </td>
                 ))}
@@ -1384,7 +1372,6 @@ function stampDialog(iso?: string) {
   return `${pad(d.getDate())}-${MONTHS[d.getMonth()]}-${d.getFullYear()} ${pad(h)}:${pad(d.getMinutes())} ${ap}`;
 }
 
-const REPORT_PAY_MODES = ["CASH", "BANK TRANSFER", "PREPAID CARD"] as const;
 
 function amountText(value: string) {
   const clean = value.replace(/[^\d.]/g, "");
@@ -1392,8 +1379,6 @@ function amountText(value: string) {
   if (dot < 0) return clean;
   return clean.slice(0, dot + 1) + clean.slice(dot + 1).replace(/\./g, "");
 }
-
-type SettlementPart = { method: string; amount: number; account: string; remark: string };
 
 function SettlementUpdateDialog({
   paymentId,
@@ -1407,136 +1392,69 @@ function SettlementUpdateDialog({
   onChanged: () => void;
 }) {
   const [row, setRow] = useState<any>(null);
-  const [mode, setMode] = useState("CASH");
   const [amount, setAmount] = useState("");
-  const [bankName, setBankName] = useState(BANK_ACCOUNTS[0]);
-  const [parts, setParts] = useState<SettlementPart[]>([]);
-  const busy = useRef(false);
-  const [remark, setRemark] = useState("");
   const [warn, setWarn] = useState("");
-  const [askDelete, setAskDelete] = useState(false);
-  const warnBack = useRef<"amount" | "mode" | "bank" | "save" | "remark">("amount");
-  const amtRef = useRef<HTMLInputElement>(null);
-  const remarkRef = useRef<HTMLInputElement>(null);
-  const modeRef = useRef<HTMLSelectElement>(null);
-  const bankRef = useRef<HTMLSelectElement>(null);
-  const updateRef = useRef<HTMLButtonElement>(null);
-  const close = useRef(onClose);
-  close.current = onClose;
-
-  function focusField(where: "amount" | "mode" | "bank" | "save" | "remark") {
-    if (where === "amount") {
-      amtRef.current?.focus();
-      amtRef.current?.select();
-    } else if (where === "mode") modeRef.current?.focus();
-    else if (where === "bank") bankRef.current?.focus();
-    else if (where === "remark") {
-      remarkRef.current?.focus();
-      remarkRef.current?.select();
-    } else updateRef.current?.focus();
-  }
-
-  function showWarn(message: string, back: "amount" | "mode" | "bank" | "save" | "remark") {
-    warnBack.current = back;
-    setWarn(message);
-  }
-
-  function applyRow(next: any) {
-    const label = modeLabel(next.method);
-    const bank = label === "BANK TRANSFER" && BANK_ACCOUNTS.includes(next.account) ? next.account : BANK_ACCOUNTS[0];
-    setRow(next);
-    setMode(label);
-    setAmount(rupees(next.amount));
-    setBankName(bank);
-    setRemark(next.remark || "");
-  }
+  const busy = useRef(false);
+  const amountRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let gone = false;
     api.get<any>(`/api/reports/settlement/${paymentId}`).then((next) => {
       if (gone) return;
-      applyRow(next);
-      setWarn("");
-      setTimeout(() => { amtRef.current?.focus(); amtRef.current?.select(); }, 0);
-    }).catch((e) => { if (!gone) showWarn(e.message, "amount"); });
+      setRow(next);
+      setAmount(rupees(next.amount));
+    }).catch((error) => { if (!gone) setWarn(error.message); });
     return () => { gone = true; };
   }, [paymentId]);
 
-  const remaining = (row?.amount ?? 0) - parts.reduce((sum, part) => sum + part.amount, 0);
-  const prepaid = row?.method === "MEMBER_CARD";
+  useEffect(() => {
+    if (!row) return;
+    amountRef.current?.focus();
+    amountRef.current?.select();
+  }, [row]);
 
   async function save() {
-    if (!row || busy.current || warn || askDelete) return;
-    let paise = 0;
-    try { paise = parseRupeesInput(amount || "0"); } catch { showWarn("Enter settle amount", "amount"); return; }
-    if (paise <= 0) { showWarn("Enter settle amount", "amount"); return; }
-    if (paise > remaining) { showWarn("Amount exceeds the remaining settlement", "amount"); return; }
-    if (prepaid && paise !== remaining) { showWarn("Prepaid card settlements cannot be split", "amount"); return; }
-    const account = mode === "BANK TRANSFER" ? bankName : mode === "CASH" ? "Cash." : row.account;
-    const lines = [...parts, { method: mode, amount: paise, account, remark }];
-    if (paise < remaining) {
-      setParts(lines);
-      setAmount(rupees(remaining - paise));
-      setMode(REPORT_PAY_MODES[0]);
-      setBankName(BANK_ACCOUNTS[0]);
-      setRemark(row.remark || "");
-      window.setTimeout(() => focusField("amount"), 0);
+    if (!row || busy.current || warn) return;
+    let paise: number;
+    try {
+      paise = parseRupeesInput(amount);
+    } catch {
+      setWarn("Enter payment amount");
       return;
     }
+    if (paise <= 0) {
+      setWarn("Enter payment amount");
+      return;
+    }
+
     busy.current = true;
-    const original = { method: row.method, amount: row.amount, account: row.account, remark: row.remark };
     try {
-      await api.put(`/api/reports/settlement/${paymentId}`, { original, lines });
+      await api.put(`/api/reports/settlement/${paymentId}`, {
+        original: { amount: row.amount },
+        amount: paise,
+      });
       onChanged();
       onClose();
-    } catch (e) {
-      showWarn(e instanceof Error ? e.message : "Could not update settlement", "save");
+    } catch (error) {
+      setWarn(error instanceof Error ? error.message : "Could not update settlement");
     } finally {
       busy.current = false;
     }
   }
 
-  async function remove() {
-    if (busy.current || parts.length) return;
-    busy.current = true;
-    setAskDelete(false);
-    try {
-      await api.del(`/api/reports/settlement/${paymentId}`);
-      onChanged();
-      onClose();
-    } catch (e) {
-      showWarn(e instanceof Error ? e.message : "Delete failed", "save");
-    } finally {
-      busy.current = false;
-    }
+  function close() {
+    if (!busy.current) onClose();
   }
 
   useEffect(() => {
     function keys(e: globalThis.KeyboardEvent) {
-      if (warn || askDelete || document.querySelector(".confirm-dlg, .alert-dlg")) return;
-      if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); if (!busy.current) close.current(); return; }
-      if (e.key === "F2") { e.preventDefault(); e.stopImmediatePropagation(); void save(); return; }
-      if (e.key === "F4") { e.preventDefault(); e.stopImmediatePropagation(); if (!busy.current && !parts.length) setAskDelete(true); return; }
-      const active = document.activeElement;
-      if (e.key !== "Enter") return;
-      if (active === amtRef.current) {
+      if (warn || document.querySelector(".alert-dlg")) return;
+      if (e.key === "Escape") {
         e.preventDefault();
         e.stopImmediatePropagation();
-        modeRef.current?.focus();
-      } else if (active === modeRef.current) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        if (mode === "BANK TRANSFER") bankRef.current?.focus();
-        else updateRef.current?.focus();
-      } else if (active === bankRef.current) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        updateRef.current?.focus();
-      } else if (active === remarkRef.current) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        updateRef.current?.focus();
-      } else if (active === updateRef.current) {
+        close();
+      }
+      if (e.key === "F2") {
         e.preventDefault();
         e.stopImmediatePropagation();
         void save();
@@ -1551,9 +1469,9 @@ function SettlementUpdateDialog({
       <div className="dialog-cap">
         <span className="cap-dot" />
         Restaurant Settlement - {formatUiLabel(outlet)}
-        <CapBtns onClose={() => { if (!busy.current) onClose(); }} />
+        <CapBtns onClose={close} />
       </div>
-      <div className="settle-body">
+      <form className="settle-body" onSubmit={(e) => { e.preventDefault(); void save(); }}>
         <table className="st-form">
           <colgroup>
             <col className="l" /><col /><col className="l" /><col />
@@ -1567,9 +1485,9 @@ function SettlementUpdateDialog({
             </tr>
             <tr>
               <td className="lbl">Guest Name :</td>
-              <td><input className="win" readOnly tabIndex={-1} value={row?.guest || ""} /></td>
+              <td><input className="win" readOnly tabIndex={-1} value={row?.guest ?? ""} /></td>
               <td className="lbl">Table No :</td>
-              <td><input className="win" readOnly tabIndex={-1} value={row?.table_no || ""} /></td>
+              <td><input className="win" readOnly tabIndex={-1} value={row?.table_no ?? ""} /></td>
             </tr>
             <tr>
               <td className="lbl">Voucher/Receipt :</td>
@@ -1581,75 +1499,51 @@ function SettlementUpdateDialog({
               <td className="lbl">Allowance :</td>
               <td><input className="win num" readOnly tabIndex={-1} value={rupees(row?.allowance)} /></td>
               <td className="lbl">Payment Mode :</td>
-              <td>
-                <select ref={modeRef} className="win" tabIndex={2} value={mode} onChange={(e) => setMode(e.target.value)}>
-                  {REPORT_PAY_MODES.filter((choice) => prepaid === (choice === "PREPAID CARD")).map((choice) => <option key={choice} value={choice}>{formatUiLabel(choice)}</option>)}
-                </select>
-              </td>
+              <td><input className="win" readOnly tabIndex={-1} value={row ? formatUiLabel(modeLabel(row.method)) : ""} /></td>
             </tr>
-            {mode === "BANK TRANSFER" && (
+            {row && modeLabel(row.method) === "BANK TRANSFER" && (
               <tr>
                 <td /><td />
                 <td className="lbl">Bank Name :</td>
-                <td>
-                  <select ref={bankRef} className="win" tabIndex={3} value={bankName} onChange={(e) => setBankName(e.target.value)}>
-                    {BANK_ACCOUNTS.map((name) => <option key={name}>{name}</option>)}
-                  </select>
-                </td>
+                <td><input className="win" readOnly tabIndex={-1} value={row.account ?? ""} /></td>
               </tr>
             )}
             <tr>
-              <td className="lbl">Payment Amount :</td>
+              <td className="lbl"><label htmlFor="settlement-edit-amount">Settled Amount :</label></td>
               <td>
                 <input
-                  ref={amtRef}
+                  id="settlement-edit-amount"
+                  ref={amountRef}
                   className="win green num"
                   data-num="dec"
-                  tabIndex={1}
-                  readOnly={prepaid}
-                  autoFocus
+                  disabled={!row}
                   value={amount}
                   onChange={(e) => setAmount(amountText(e.target.value))}
                   onFocus={(e) => e.currentTarget.select()}
                 />
               </td>
               <td className="lbl">Remaining Amount :</td>
-              <td><input className="win num" readOnly tabIndex={-1} value={rupees(remaining)} /></td>
+              <td><input className="win num" readOnly tabIndex={-1} value={rupees(row?.amount)} /></td>
             </tr>
             <tr>
               <td className="lbl">Remark :</td>
-              <td colSpan={3}><input ref={remarkRef} className="win" tabIndex={-1} value={remark} onChange={(e) => setRemark(e.target.value)} /></td>
+              <td colSpan={3}><input className="win" readOnly tabIndex={-1} value={row?.remark ?? ""} /></td>
             </tr>
           </tbody>
         </table>
-        {parts.length > 0 && (
-          <ol aria-label="Payment parts entered">
-            {parts.map((part, index) => <li key={index}>{formatUiLabel(part.method)}{part.method === "BANK TRANSFER" ? ` (${part.account})` : ""} {inr(part.amount)}</li>)}
-          </ol>
-        )}
         <div className="st-foot">
           <span className="st-vno">Voucher No : {row?.voucher_no ?? ""}</span>
           <button type="button" className="fn" tabIndex={-1} onKeyDown={ignoreRepeatedPrintKey} onClick={() => {
             if (row?.invoice_id) void printBill(row.invoice_id).catch(() => null);
           }}>Print</button>
-          <button ref={updateRef} type="button" className="fn" tabIndex={4} onClick={() => void save()}>{parts.length ? "Post (F2)" : "Update (F2)"}</button>
-          <button type="button" className="fn" tabIndex={-1} disabled={parts.length > 0} onClick={() => setAskDelete(true)}>Delete (F4)</button>
-          <button type="button" className="fn" tabIndex={-1} onClick={() => { if (!busy.current) onClose(); }}>{parts.length ? "Discard" : "Exit"}</button>
+          <button type="submit" className="fn" disabled={!row}>Update (F2)</button>
+          <button type="button" className="fn" onClick={close}>Exit</button>
         </div>
-      </div>
-      {warn && (
-        <AlertBox
-          message={warn}
-          onClose={() => {
-            const back = warnBack.current;
-            setWarn("");
-            window.setTimeout(() => focusField(back), 0);
-          }}
-        />
-      )}
-      {askDelete && (
-        <ConfirmAsk message="Delete this settlement?" onYes={() => void remove()} onNo={() => setAskDelete(false)} />
-      )}
+      </form>
+      {warn && <AlertBox message={warn} onClose={() => {
+        setWarn("");
+        amountRef.current?.focus();
+      }} />}
     </div>
   );
 }
@@ -1687,7 +1581,7 @@ const SETTLEMENT_SORT: Partial<Record<string, (a: SettlementRow, b: SettlementRo
   MOP1: compareSettlementMop,
 };
 
-export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) {
+export function SettlementReport({ outlet, advance, operator, onExit }: { outlet?: string; advance?: boolean; operator?: boolean; onExit: () => void }) {
   const request = useReportRequest();
   const usersRequest = useReportRequest();
   const [users, setUsers] = useState<string[]>([]);
@@ -1711,57 +1605,38 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
     return [...data.rows].sort((a, b) => direction * compare(a, b));
   }, [data.rows, sort]);
   const appliedPath = useRef("");
-  const [sel, setSel] = useState<string | null>(null);
-  const [col, setCol] = useState(0);
   const [editId, setEditId] = useState<string | null>(null);
-  const selRef = useRef<string | null>(null);
-  selRef.current = sel;
+  const selection = useReportSelection(rows, true);
 
-  useEffect(() => { setOutletName(outlet || "THE BOSS CLUB"); }, [outlet]);
-  useEffect(() => { void usersRequest.load("/api/reports/settlement/users", setUsers); }, []);
+  useEffect(() => {
+    const selectedOutlet = outlet || "THE BOSS CLUB";
+    setOutletName(selectedOutlet);
+    show(selectedOutlet);
+  }, [outlet]);
+  useEffect(() => { if (!operator) void usersRequest.load("/api/reports/settlement/users", setUsers); }, [operator]);
 
-  function show() {
+  function show(selectedOutlet = outletName) {
     const q = new URLSearchParams({
-      from, to, outlet: outletName, mop, bill, account, user, settled: settled ? "1" : "0",
+      from, to, outlet: selectedOutlet, mop, bill, account, user, settled: settled ? "1" : "0",
     });
     appliedPath.current = `/api/reports/settlement?${q}`;
     void request.load(appliedPath.current, setData);
   }
   useEffect(() => {
-    if (!rows.length) { setSel(null); return; }
-    setSel(rows[rows.length - 1].payment_id);
-    setCol(0);
-  }, [rows]);
-  useLayoutEffect(() => {
-    if (!rows.length || sel !== rows[rows.length - 1].payment_id) return;
-    if (document.activeElement?.matches(".set-sort")) return;
-    const scroller = document.querySelector(".set-grid-wrap") as HTMLElement | null;
-    if (!scroller) return;
-    scroller.scrollTop = scroller.scrollHeight;
-    const tr = scroller.querySelector("tbody tr:last-child") as HTMLElement | null;
-    tr?.focus({ preventScroll: true });
-  }, [rows, sel]);
-  useEffect(() => {
     function keys(e: globalThis.KeyboardEvent) {
-      if (editId || document.querySelector(".su-dlg, .alert-dlg, .confirm-dlg")) return;
+      if (editId || isReportDialogTarget(e)) return;
       if (e.target instanceof Element && e.target.closest("button, input, select")) return;
       if (!rows.length) return;
-      const idx = Math.max(0, rows.findIndex((r) => r.payment_id === selRef.current));
-      if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
+      if (selection.move(e.key)) {
         e.preventDefault();
         e.stopPropagation();
-        if (e.key === "ArrowLeft") setCol((c) => Math.max(0, c - 1));
-        if (e.key === "ArrowRight") setCol((c) => Math.min(SETTLEMENT_COLUMNS.length - 1, c + 1));
-        if (e.key === "ArrowDown") setSel(rows[Math.min(rows.length - 1, idx + 1)].payment_id);
-        if (e.key === "ArrowUp") setSel(rows[Math.max(0, idx - 1)].payment_id);
-        requestAnimationFrame(() => document.querySelector(".set-table td.cell-on")?.scrollIntoView({ block: "nearest", inline: "nearest" }));
         return;
       }
       if (e.key === "Enter") {
         e.preventDefault();
         e.stopPropagation();
-        const id = selRef.current;
-        if (id) setEditId(id);
+        const id = rows[selection.index.current]?.payment_id;
+        if (id && !operator) setEditId(id);
       }
     }
     window.addEventListener("keydown", keys, true);
@@ -1781,7 +1656,7 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
           <div className="set-title">Select Filter</div>
           <div className="set-row">
             <label>Outlet : <select className="win" value={outletName} onChange={(e) => setOutletName(e.target.value)}>
-              {OUTLETS.map((o) => <option key={o} value={o}>{formatUiLabel(o)}</option>)}
+              {(operator ? ["BAR"] : advance ? ADVANCE_OUTLETS : OUTLETS).map((o) => <option key={o} value={o}>{formatUiLabel(o)}</option>)}
             </select></label>
             <label>Date From : <input className="win" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
             <label>MOP : <select className="win" value={mop} onChange={(e) => setMop(e.target.value)}>
@@ -1804,7 +1679,7 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
           </div>
         </div>
         <div className="set-btns">
-          <button className="fn" onClick={show}>Show</button>
+          <button className="fn" onClick={() => show()}>Show</button>
           <button className="fn" onKeyDown={ignoreRepeatedPrintKey} onClick={printPage}>Print</button>
           <button className="fn" onClick={onExit}>Exit</button>
         </div>
@@ -1833,29 +1708,26 @@ export function SettlementReport({ outlet, onExit }: { outlet?: string; onExit: 
               })}
             </tr>
           </thead>
-          <tbody>
-            {rows.map((r) => {
+          <tbody ref={selection.body}>
+            {rows.map((r, i) => {
               const mode = mopCell(r.method, r.account);
               const cells = [
                 r.receipt_no ?? "", stampGrid(r.voucher_date), r.bill_no ?? "",
                 inr(r.bill_amount), r.table_no ?? "", r.waiter ?? "", inr(r.settled),
                 mode, r.username ?? "", inr(r.settled), r.status ?? "", r.outlet_name || outletName, mode,
               ];
-              const on = r.payment_id === sel;
               return (
                 <tr
                   key={r.payment_id}
-                  tabIndex={0}
+                  tabIndex={-1}
                   onClick={(e) => {
-                    const td = (e.target as HTMLElement).closest("td");
-                    const c = td ? Math.max(0, [...td.parentElement!.children].indexOf(td)) : 0;
-                    setSel(r.payment_id);
-                    setCol(c);
-                    setEditId(r.payment_id);
+                    const td = (e.target as HTMLElement).closest<HTMLTableCellElement>("td");
+                    selection.select(i, td?.cellIndex ?? 0, false);
+                    if (!operator) setEditId(r.payment_id);
                   }}
                 >
                   {cells.map((text, c) => (
-                    <td key={c} className={`${[3, 6, 9].includes(c) ? "num" : ""} ${on && c === col ? "cell-on" : ""}`.trim()}>
+                    <td key={c} className={[3, 6, 9].includes(c) ? "num" : undefined}>
                       {text}
                     </td>
                   ))}
@@ -2250,7 +2122,7 @@ function shortBillNo(raw?: string | number | null) {
   return tail.replace(/\D/g, "") || tail;
 }
 
-function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) {
+function BillReport({ outlet, advance, cashier, operator, onExit }: { outlet?: string; advance?: boolean; cashier?: boolean; operator?: boolean; onExit: () => void }) {
   const request = useReportRequest();
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
@@ -2264,7 +2136,8 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
   const [complimentaryAccounts, setComplimentaryAccounts] = useState<CompAccount[]>([]);
   const [complimentaryAccountsError, setComplimentaryAccountsError] = useState(false);
   const [data, setData] = useState<any>({ rows: [], total: 0 });
-  const [sel, setSel] = useState<string | null>(null);
+  const rows = data.rows || EMPTY_REPORT_ROWS;
+  const selection = useReportSelection(rows);
   const [billEdit, setBillEdit] = useState<{
     invoiceId: string;
     orderId: string;
@@ -2280,8 +2153,6 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
     table: { id: string; code: string; status: string; card_number?: string; outlet?: string };
     outlet: string;
   } | null>(null);
-  const selRef = useRef<string | null>(null);
-  selRef.current = sel;
 
   useEffect(() => {
     setOutletName(outlet || "BAR");
@@ -2312,11 +2183,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
       complimentary: complimentaryOnly ? "1" : "0",
       complimentaryAccountId,
     });
-    await request.load<any>(`/api/reports/bills?${q}`, (next) => {
-      setData(next);
-      const rows = next.rows || [];
-      setSel(rows.length ? String(rows[rows.length - 1].invoice_id || rows[rows.length - 1].invoice_number) : null);
-    });
+    await request.load<any>(`/api/reports/bills?${q}`, setData);
   }
 
   function onFilterEnter(e: KeyboardEvent) {
@@ -2331,6 +2198,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
   }, [outlet]);
 
   function openRestaurantBill(row: any) {
+    if (operator) return;
     const orderId = String(row?.order_id || "").trim();
     const tableId = String(row?.table_id || "").trim();
     if (!orderId || !tableId) {
@@ -2360,35 +2228,23 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
 
   useEffect(() => {
     function keys(e: KeyboardEvent) {
-      if (billEdit || settle || document.querySelector(".bill-dlg, .settle-dlg, .su-dlg, .alert-dlg, .confirm-dlg")) return;
+      if (billEdit || settle || miss || isReportDialogTarget(e)) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
         onExit();
         return;
       }
-      const typing = (e.target as HTMLElement | null)?.closest("input, select, textarea");
-      if (typing && e.key === "Enter") {
-        // Filter fields: Enter runs Show (handled on the control)
-        return;
-      }
-      const rows = data.rows || [];
-      if (!rows.length) return;
-      const idx = Math.max(0, rows.findIndex((r: any) => String(r.invoice_id || r.invoice_number) === selRef.current));
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        if (typing) return;
+      if ((e.target as HTMLElement | null)?.closest("input, select, textarea, button") || !rows.length) return;
+      if (selection.move(e.key)) {
         e.preventDefault();
         e.stopPropagation();
-        const next = e.key === "ArrowDown"
-          ? rows[Math.min(rows.length - 1, idx + 1)]
-          : rows[Math.max(0, idx - 1)];
-        setSel(String(next.invoice_id || next.invoice_number));
         return;
       }
       if (e.key === "Enter") {
         e.preventDefault();
         e.stopPropagation();
-        const row = rows[idx];
+        const row = rows[selection.index.current];
         if (row) openRestaurantBill(row);
       }
     }
@@ -2396,7 +2252,6 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
     return () => window.removeEventListener("keydown", keys, true);
   });
 
-  const rows = data.rows || [];
   const total = Number(data.total) || rows.reduce((s: number, r: any) => s + (Number(r.net_amount) || 0), 0);
 
   return (
@@ -2406,7 +2261,7 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
         <div className="set-fields">
           <div className="set-row">
             <label>Outlet Name : <select className="win" value={outletName} onChange={(e) => setOutletName(e.target.value)} onKeyDown={onFilterEnter}>
-              {OUTLETS.map((o) => <option key={o} value={o}>{formatUiLabel(o)}</option>)}
+              {(operator ? ["BAR"] : advance ? ADVANCE_OUTLETS : OUTLETS).map((o) => <option key={o} value={o}>{formatUiLabel(o)}</option>)}
             </select></label>
             <label>Bill No. : <input className="win" value={bill} onChange={(e) => setBill(e.target.value)} onKeyDown={onFilterEnter} /></label>
             <label>Table/Room No. : <input className="win" value={tableNo} onChange={(e) => setTableNo(e.target.value)} onKeyDown={onFilterEnter} /></label>
@@ -2432,11 +2287,11 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
         <div className="set-btns">
           <button type="button" className="fn" onClick={() => void load()}>Show</button>
           <button type="button" className="fn" disabled tabIndex={-1}>Mail</button>
-          <button type="button" className="fn" onClick={() => {
-            const row = rows.find((r: any) => String(r.invoice_id || r.invoice_number) === sel);
+          <button type="button" className="fn" disabled={operator} onClick={() => {
+            const row = rows[selection.index.current];
             if (row) openRestaurantBill(row);
           }}>Details</button>
-          <button type="button" className="fn" onKeyDown={ignoreRepeatedPrintKey} onClick={printPage}>Print</button>
+          <button type="button" className="fn" disabled={operator} onKeyDown={ignoreRepeatedPrintKey} onClick={printPage}>Print</button>
           <button type="button" className="fn" disabled tabIndex={-1}>Export</button>
           <button type="button" className="fn" onClick={onExit}>Exit</button>
         </div>
@@ -2450,17 +2305,15 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
               ))}
             </tr>
           </thead>
-          <tbody>
-            {rows.map((r: any) => {
+          <tbody ref={selection.body}>
+            {rows.map((r: any, i: number) => {
               const key = String(r.invoice_id || r.invoice_number);
-              const on = key === sel;
               const tableLabel = `T : ${r.table_label || r.table_code || r.table_no || ""}`;
               return (
                 <tr
                   key={key}
-                  className={on ? "on" : ""}
-                  tabIndex={0}
-                  onClick={() => setSel(key)}
+                  tabIndex={-1}
+                  onClick={() => selection.select(i)}
                   onDoubleClick={() => openRestaurantBill(r)}
                 >
                   <td>{billDateLabel(r.created_at)}</td>
@@ -2485,13 +2338,15 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
         </table>
       </div>
       <div className="bill-rpt-foot">
-        <span className="hint">Mouse double click to alter bill</span>
+        {!operator && <span className="hint">Mouse double click to alter bill</span>}
         <label>Total Amount : <input className="win" readOnly value={inr(total)} /></label>
         <span className="hint right">Mail button enable after print</span>
       </div>
       {miss && <AlertBox message={miss} onClose={() => setMiss("")} />}
       {billEdit && (
         <PrepareBillDialog
+          advance={advance}
+          cashier={cashier}
           orderId={billEdit.orderId}
           existingInvoiceId={billEdit.invoiceId}
           table={billEdit.table}
@@ -2540,9 +2395,11 @@ function BillReport({ outlet, onExit }: { outlet?: string; onExit: () => void })
 
 function KotAddTableDialog({
   kotKey,
+  viewOnly,
   onClose,
 }: {
   kotKey: string;
+  viewOnly?: boolean;
   onClose: () => void;
 }) {
   const [data, setData] = useState<any>(null);
@@ -2570,6 +2427,7 @@ function KotAddTableDialog({
   }, [kotKey]);
 
   async function reprint() {
+    if (viewOnly) return;
     const id = dataRef.current?.id;
     if (!id) { setErr("KOT still loading"); return; }
     printRef.current?.focus();
@@ -2669,6 +2527,7 @@ function KotAddTableDialog({
                     ref={printRef}
                     type="button"
                     className="fn"
+                    disabled={viewOnly}
                     onClick={() => void reprint()}
                   >Print KOT (F6)</button></td>
                   <td><button type="button" className="fn" disabled tabIndex={-1}>Update (F5)</button></td>
@@ -2720,7 +2579,7 @@ function KotAddTableDialog({
   );
 }
 
-function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) {
+function KotReport({ outlet, advance, operator, onExit }: { outlet?: string; advance?: boolean; operator?: boolean; onExit: () => void }) {
   const request = useReportRequest();
   const [from, setFrom] = useState(isoDay());
   const [to, setTo] = useState(isoDay());
@@ -2730,22 +2589,10 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
   const [billNo, setBillNo] = useState("");
   const [complementary, setComplementary] = useState("Select");
   const [data, setData] = useState<any>({ rows: [] });
-  const [sel, setSel] = useState<string | null>(null);
+  const rows = data.rows || EMPTY_REPORT_ROWS;
+  const selection = useReportSelection(rows);
   const [kotKey, setKotKey] = useState<string | null>(null);
   const [miss, setMiss] = useState("");
-  const selRef = useRef<string | null>(null);
-  const gridWrapRef = useRef<HTMLDivElement>(null);
-  selRef.current = sel;
-
-  function focusSelRow(scrollLast = false) {
-    const wrap = gridWrapRef.current;
-    if (!wrap) return;
-    if (scrollLast) wrap.scrollTop = wrap.scrollHeight;
-    const tr = wrap.querySelector("tbody tr.on") as HTMLElement | null;
-    tr?.focus({ preventScroll: true });
-    if (!scrollLast) tr?.scrollIntoView({ block: "nearest" });
-  }
-
   useEffect(() => {
     setOutletName(outlet || "BAR");
   }, [outlet]);
@@ -2760,11 +2607,7 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
       bill: billNo.trim(),
       complementary,
     });
-    await request.load<any>(`/api/reports/kots?${q}`, (next) => {
-      setData(next);
-      const rows = next.rows || [];
-      setSel(rows.length ? String(rows[rows.length - 1].id || rows[rows.length - 1].kot_number) : null);
-    });
+    await request.load<any>(`/api/reports/kots?${q}`, setData);
   }
 
   function onFilterEnter(e: KeyboardEvent) {
@@ -2778,22 +2621,14 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
     load(outlet || "BAR").catch(() => null);
   }, [outlet]);
 
-  useLayoutEffect(() => {
-    const rows = data.rows || [];
-    if (!rows.length || !sel) return;
-    const lastKey = String(rows[rows.length - 1].id || rows[rows.length - 1].kot_number);
-    // After open / Show: land on last row so Up/Down work without a click
-    if (sel === lastKey) focusSelRow(true);
-  }, [data, sel]);
-
   function openRow(row: any) {
     const key = String(row?.id || row?.kot_number || "").trim();
     if (key) setKotKey(key);
   }
 
   async function reprintSelected() {
-    const rows = data.rows || [];
-    const row = rows.find((r: any) => String(r.id || r.kot_number) === selRef.current);
+    if (operator) return;
+    const row = rows[selection.index.current];
     const id = String(row?.id || "").trim();
     if (!id) {
       setMiss("Select a KOT first");
@@ -2808,7 +2643,7 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
 
   useEffect(() => {
     function keys(e: KeyboardEvent) {
-      if (kotKey || document.querySelector(".kot-view, .bill-dlg, .su-dlg, .alert-dlg, .confirm-dlg, .confirm-overlay")) return;
+      if (kotKey || miss || isReportDialogTarget(e)) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
@@ -2821,27 +2656,16 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
         if (!e.repeat) void reprintSelected();
         return;
       }
-      const typing = (e.target as HTMLElement | null)?.closest("input, select, textarea");
-      if (typing && e.key === "Enter") return;
-      const rows = data.rows || [];
-      if (!rows.length) return;
-      const idx = Math.max(0, rows.findIndex((r: any) => String(r.id || r.kot_number) === selRef.current));
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        if (typing) return;
+      if ((e.target as HTMLElement | null)?.closest("input, select, textarea, button") || !rows.length) return;
+      if (selection.move(e.key)) {
         e.preventDefault();
         e.stopPropagation();
-        const next = e.key === "ArrowDown"
-          ? rows[Math.min(rows.length - 1, idx + 1)]
-          : rows[Math.max(0, idx - 1)];
-        setSel(String(next.id || next.kot_number));
-        requestAnimationFrame(() => focusSelRow(false));
         return;
       }
       if (e.key === "Enter") {
-        if (typing) return;
         e.preventDefault();
         e.stopPropagation();
-        const row = rows[idx];
+        const row = rows[selection.index.current];
         if (row) openRow(row);
       }
     }
@@ -2849,7 +2673,6 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
     return () => window.removeEventListener("keydown", keys, true);
   });
 
-  const rows = data.rows || [];
   const titleOutlet = outletName || outlet || "BAR";
 
   return (
@@ -2870,18 +2693,18 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
             <label>Table No. : <input className="win" value={tableNo} onChange={(e) => setTableNo(e.target.value)} onKeyDown={onFilterEnter} /></label>
             <label>Bill No : <input className="win" value={billNo} onChange={(e) => setBillNo(e.target.value)} onKeyDown={onFilterEnter} /></label>
             <label>Outlet : <select className="win" value={outletName} onChange={(e) => setOutletName(e.target.value)} onKeyDown={onFilterEnter}>
-              {OUTLETS.map((o) => <option key={o} value={o}>{formatUiLabel(o)}</option>)}
+              {(operator ? ["BAR"] : advance ? ADVANCE_OUTLETS : OUTLETS).map((o) => <option key={o} value={o}>{formatUiLabel(o)}</option>)}
             </select></label>
           </div>
         </div>
         <div className="set-btns">
           <button type="button" className="fn" onClick={() => void load()}>Show</button>
           <button type="button" className="fn" disabled tabIndex={-1}>Excel</button>
-          <button type="button" className="fn" onKeyDown={ignoreRepeatedPrintKey} onClick={printPage}>Print</button>
+          <button type="button" className="fn" disabled={operator} onKeyDown={ignoreRepeatedPrintKey} onClick={printPage}>Print</button>
           <button type="button" className="fn" onClick={onExit}>Exit</button>
         </div>
       </div>
-      <div className="set-grid-wrap" ref={gridWrapRef}>
+      <div className="set-grid-wrap">
         <table className="data set-table bill-rpt-table">
           <thead>
             <tr>
@@ -2890,19 +2713,14 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
               ))}
             </tr>
           </thead>
-          <tbody>
-            {rows.map((r: any) => {
+          <tbody ref={selection.body}>
+            {rows.map((r: any, i: number) => {
               const key = String(r.id || r.kot_number);
-              const on = key === sel;
               return (
                 <tr
                   key={key}
-                  className={on ? "on" : ""}
-                  tabIndex={on ? 0 : -1}
-                  onClick={() => {
-                    setSel(key);
-                    requestAnimationFrame(() => focusSelRow(false));
-                  }}
+                  tabIndex={-1}
+                  onClick={() => selection.select(i)}
                   onDoubleClick={() => openRow(r)}
                 >
                   <td>{r.kot_number}</td>
@@ -2928,6 +2746,7 @@ function KotReport({ outlet, onExit }: { outlet?: string; onExit: () => void }) 
       {kotKey && (
         <KotAddTableDialog
           kotKey={kotKey}
+          viewOnly={operator}
           onClose={() => setKotKey(null)}
         />
       )}
@@ -2965,15 +2784,11 @@ function CardBillDialog({
   onClose: () => void;
 }) {
   const [rows, setRows] = useState<CardBillRow[]>([]);
-  const [sel, setSel] = useState(0);
+  const selection = useReportSelection(rows, false, false);
   const [warn, setWarn] = useState("");
   const [busy, setBusy] = useState("");
   const [ready, setReady] = useState(false);
-  const rowsRef = useRef<CardBillRow[]>([]);
-  const selRef = useRef(0);
   const busyRef = useRef("");
-  rowsRef.current = rows;
-  selRef.current = sel;
 
   useEffect(() => {
     let live = true;
@@ -3015,33 +2830,20 @@ function CardBillDialog({
         onClose();
         return;
       }
-      const list = rowsRef.current;
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        if (!list.length) return;
+      if (selection.move(e.key)) {
         e.preventDefault();
         e.stopPropagation();
-        const next = e.key === "ArrowDown"
-          ? Math.min(list.length - 1, selRef.current + 1)
-          : Math.max(0, selRef.current - 1);
-        selRef.current = next;
-        setSel(next);
-        const btn = document.querySelectorAll<HTMLButtonElement>(".cs-dlg [data-invoice-id]")[next];
-        btn?.focus();
         return;
       }
       if (e.key === "Enter") {
         const el = e.target instanceof Element ? e.target : null;
         if (el?.closest("[data-cs-exit]")) return;
         const fromBtn = el?.closest("[data-invoice-id]")?.getAttribute("data-invoice-id") || "";
-        const invoiceId = fromBtn || list[selRef.current]?.invoice_id;
+        const invoiceId = fromBtn || rows[selection.index.current]?.invoice_id;
         if (!invoiceId) return;
         e.preventDefault();
         e.stopPropagation();
-        const idx = list.findIndex((r) => r.invoice_id === invoiceId);
-        if (idx >= 0) {
-          selRef.current = idx;
-          setSel(idx);
-        }
+        if (fromBtn) selection.select(rows.findIndex((r) => r.invoice_id === invoiceId));
         if (!e.repeat) void printInvoice(invoiceId);
       }
     }
@@ -3068,7 +2870,7 @@ function CardBillDialog({
                 <th />
               </tr>
             </thead>
-            <tbody>
+            <tbody ref={selection.body}>
               {!ready && (
                 <tr><td colSpan={5}>Loading…</td></tr>
               )}
@@ -3076,7 +2878,7 @@ function CardBillDialog({
                 <tr><td colSpan={5}>No bill for this card</td></tr>
               )}
               {rows.map((r, i) => (
-                <tr key={r.invoice_id} className={i === sel ? "on" : ""} onClick={() => setSel(i)}>
+                <tr key={r.invoice_id} tabIndex={-1} onClick={() => selection.select(i)}>
                   <td>{r.invoice_number}</td>
                   <td>{r.table_no}</td>
                   <td>{formatUiLabel(r.outlet)}</td>
@@ -3089,8 +2891,7 @@ function CardBillDialog({
                       disabled={busy === r.invoice_id}
                       onClick={(e) => {
                         e.stopPropagation();
-                        selRef.current = i;
-                        setSel(i);
+                        selection.select(i, 0, false);
                         void printInvoice(r.invoice_id);
                       }}
                     >
@@ -3116,16 +2917,12 @@ export function CardSettlementReport({ onExit, title = "Card Settlement Report" 
   const [to, setTo] = useState(isoDay());
   const [card, setCard] = useState("");
   const [rows, setRows] = useState<CardSettleRow[]>([]);
-  const [sel, setSel] = useState<string | null>(null);
+  const selection = useReportSelection(rows);
   const [openId, setOpenId] = useState<string | null>(null);
   const [warn, setWarn] = useState("");
   const fromRef = useRef<HTMLInputElement>(null);
   const cardRef = useRef<HTMLInputElement>(null);
-  const selRef = useRef<string | null>(null);
-  const rowsRef = useRef<CardSettleRow[]>([]);
   const loadGen = useRef(0);
-  selRef.current = sel;
-  rowsRef.current = rows;
 
   async function load() {
     const gen = ++loadGen.current;
@@ -3135,7 +2932,6 @@ export function CardSettlementReport({ onExit, title = "Card Settlement Report" 
       if (gen !== loadGen.current) return;
       const next = data.rows || [];
       setRows(next);
-      setSel(next.length ? next[next.length - 1].booking_id : null);
     } catch (e) {
       if (gen !== loadGen.current) return;
       setWarn(e instanceof Error ? e.message : "Could not load report");
@@ -3145,7 +2941,7 @@ export function CardSettlementReport({ onExit, title = "Card Settlement Report" 
   useEffect(() => { fromRef.current?.focus(); void load(); }, []);
   useEffect(() => {
     function keys(e: KeyboardEvent) {
-      if (openId || warn || document.querySelector(".cs-dlg, .alert-dlg")) return;
+      if (openId || warn || isReportDialogTarget(e)) return;
       const target = e.target as HTMLElement;
       const typing = target.tagName === "INPUT" || target.tagName === "SELECT" || target.tagName === "TEXTAREA";
       if (typing) {
@@ -3160,20 +2956,16 @@ export function CardSettlementReport({ onExit, title = "Card Settlement Report" 
         }
         return;
       }
-      const list = rowsRef.current;
-      if (!list.length) return;
-      const idx = Math.max(0, list.findIndex((r) => r.booking_id === selRef.current));
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (!rows.length || target.closest("button")) return;
+      if (selection.move(e.key)) {
         e.preventDefault();
         e.stopPropagation();
-        const next = list[e.key === "ArrowDown" ? Math.min(list.length - 1, idx + 1) : Math.max(0, idx - 1)];
-        setSel(next.booking_id);
         return;
       }
       if (e.key === "Enter") {
         e.preventDefault();
         e.stopPropagation();
-        const id = selRef.current;
+        const id = rows[selection.index.current]?.booking_id;
         if (id) setOpenId(id);
       }
     }
@@ -3213,13 +3005,12 @@ export function CardSettlementReport({ onExit, title = "Card Settlement Report" 
               <th />
             </tr>
           </thead>
-          <tbody>
-            {rows.map((r) => (
+          <tbody ref={selection.body}>
+            {rows.map((r, i) => (
               <tr
                 key={r.booking_id}
-                className={r.booking_id === sel ? "on" : ""}
-                tabIndex={r.booking_id === sel ? 0 : -1}
-                onClick={() => setSel(r.booking_id)}
+                tabIndex={-1}
+                onClick={() => selection.select(i)}
                 onDoubleClick={() => setOpenId(r.booking_id)}
               >
                 <td>{r.card_no}</td>
@@ -3412,7 +3203,7 @@ function KotCancellationReport({ onExit }: { onExit: () => void }) {
   );
 }
 
-export function ReportHost({ view, outlet, onExit }: { view: NavView; outlet?: string; onExit: () => void }) {
+export function ReportHost({ view, outlet, advance, cashier, operator, onExit }: { view: NavView; outlet?: string; advance?: boolean; cashier?: boolean; operator?: boolean; onExit: () => void }) {
   const supported = [
     "item-wise-detail", "point-of-sales", "gst-report", "item-wise-sale", "item-wise-group",
     "settlement-report", "card-settlement-report", "booking-report", "card-block",
@@ -3429,14 +3220,14 @@ export function ReportHost({ view, outlet, onExit }: { view: NavView; outlet?: s
   if (view === "item-wise-group") return <ItemWiseGroupSales onExit={onExit} />;
   if (view === "item-transfer-report") return <TransferReport key={view} kind="item" onExit={onExit} />;
   if (view === "table-transfer-report") return <TransferReport key={view} kind="table" onExit={onExit} />;
-  if (view === "settlement-report") return <SettlementReport outlet={outlet} onExit={onExit} />;
+  if (view === "settlement-report") return <SettlementReport outlet={outlet} advance={advance} operator={operator} onExit={onExit} />;
   if (view === "card-settlement-report") return <CardSettlementReport onExit={onExit} />;
   if (view === "booking-report") return <CardSettlementReport onExit={onExit} title="Booking Report" />;
   if (view === "card-block") return <CardBlock onExit={onExit} />;
   if (view === "advance-booking") return <AdvanceBooking onExit={onExit} />;
-  if (view === "kot-report") return <KotReport outlet={outlet} onExit={onExit} />;
+  if (view === "kot-report") return <KotReport outlet={outlet} advance={advance} operator={operator} onExit={onExit} />;
   if (view === "kot-cancellation-report") return <KotCancellationReport onExit={onExit} />;
-  if (view === "bill-report" || view === "history") return <BillReport outlet={outlet} onExit={onExit} />;
+  if (view === "bill-report" || view === "history") return <BillReport outlet={outlet} advance={advance} cashier={cashier} operator={operator} onExit={onExit} />;
   if (view === "reports") return <GstReport onExit={onExit} />;
   if (view === "time-sale" || view === "tax-wise") {
     return (

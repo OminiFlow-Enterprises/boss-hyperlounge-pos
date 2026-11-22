@@ -149,9 +149,8 @@ export function buildBillTotalLines(input: {
     }
   }
 
-  // 10% service charge prints as S.C. VOLUNTARY (not "Service Charge" / "Surcharge 10%")
   if (input.serviceCharge > 0) {
-    const scPct = Number(input.serviceChargePct) || 10;
+    const scPct = Math.min(Number(input.serviceChargePct) || 10, 10);
     rows.push({
       label: `S.C. VOLUNTARY ${fmtPct(scPct, scPct % 1 === 0 ? 0 : 2)} %${input.serviceChargeInclusive ? " (Incl.)" : ""}`,
       amount: input.serviceCharge,

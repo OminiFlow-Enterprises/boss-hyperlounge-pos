@@ -1,3 +1,5 @@
+import type { UserRoleLabel } from "./userRights.js";
+
 export type CardStatus = "ACTIVE" | "BLOCKED" | "LOST" | "EXPIRED" | "INACTIVE" | "REPLACED";
 
 export type CardTypeCode = "REGULAR" | "MEMBER" | "VIP" | "CORPORATE";
@@ -51,6 +53,7 @@ export interface Actor {
   terminalId: string;
   terminalName: string;
   username?: string;
+  userGroup?: UserRoleLabel;
   /** Null until this user is saved from User Master. */
   rights?: Record<string, boolean> | null;
   allowComplementary?: boolean | null;

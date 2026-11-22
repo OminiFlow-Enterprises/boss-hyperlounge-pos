@@ -1,3 +1,4 @@
+import { isBarOrderOnly } from "../../shared/userRights.js";
 import { assertPermission } from "../../shared/permissions.js";
 import { AppError } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
@@ -382,6 +383,9 @@ export async function sendKot(
       lineTaxRate: item.tax_rate,
     });
   }
+  if (isBarOrderOnly(ctx.actor.rights) && pending.some((item) => item.qty < 0)) {
+    throw new AppError("Bar orders can only add items", 403);
+  }
   const additions = pending.filter((i) => i.qty > 0);
   const reductions = pending.filter((i) => i.qty < 0);
   if (!additions.length && !reductions.length) throw new AppError("No new items to send to kitchen/bar");
@@ -739,6 +743,7 @@ export function setBillLineProduct(ctx: AppContext, orderId: string, ids: string
 
 /** Sets the billed price of a line, in paise, without printing a KOT. */
 export function setBillLinePrice(ctx: AppContext, orderId: string, ids: string[], unitPrice: number, billEdit?: { allowPaid: boolean }) {
+  if (ctx.actor.userGroup === "CASHIER") throw new AppError("Cashier users cannot change bill item prices", 403);
   assertPermission(ctx.actor.role, "CREATE_ORDER");
   assertOrderCardUsable(ctx, orderId);
   if (!Number.isInteger(unitPrice) || unitPrice < 0) throw new AppError("Enter a price");

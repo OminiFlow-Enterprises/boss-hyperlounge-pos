@@ -6,9 +6,51 @@ import * as reports from "../services/reportService.js";
 
 const entry = new URL(import.meta.url.endsWith(".ts") ? "../services/reportWorker.ts" : "../services/reportWorker.js", import.meta.url);
 const unavailable = "Could not load the report. Try again or choose a shorter date range.";
+const workerLimit = 2;
+const queueLimit = 3;
+const reportTimeout = 30_000;
 
 export function createBackgroundReports() {
   let active = 0;
+  const waiting = new Set<() => void>();
+
+  function acquire(res: Response): Promise<boolean> {
+    if (res.destroyed) return Promise.resolve(false);
+    if (active < workerLimit) {
+      active++;
+      return Promise.resolve(true);
+    }
+    if (waiting.size >= queueLimit) throw new AppError("Other reports are loading. Try again shortly.", 503);
+
+    return new Promise((resolve, reject) => {
+      function cleanup() {
+        waiting.delete(start);
+        clearTimeout(timer);
+        res.off("close", disconnected);
+      }
+      function start() {
+        cleanup();
+        active++;
+        resolve(true);
+      }
+      function disconnected() {
+        cleanup();
+        resolve(false);
+      }
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new AppError("The report queue is busy. Try again shortly.", 503));
+      }, reportTimeout);
+      waiting.add(start);
+      res.once("close", disconnected);
+    });
+  }
+
+  function release() {
+    active--;
+    waiting.values().next().value?.();
+  }
+
   return async function report<N extends ReportName>(
     req: Request,
     res: Response,
@@ -21,10 +63,20 @@ export function createBackgroundReports() {
       res.json(execute(req.ctx, ...args));
       return;
     }
-    if (active >= 2) throw new AppError("Other reports are loading. Try again shortly.", 503);
-    const worker = startDatabaseWorker(entry, { filename: db.name, actor, online, name, args });
-    active++;
-    worker.once("exit", () => { active--; });
+    if (!(await acquire(res))) return;
+    if (res.destroyed) {
+      release();
+      return;
+    }
+    let worker: ReturnType<typeof startDatabaseWorker>;
+    try {
+      worker = startDatabaseWorker(entry, { filename: db.name, actor, online, name, args });
+    } catch (error) {
+      release();
+      console.error(`Could not start report ${name}:`, error);
+      throw new AppError(unavailable, 503);
+    }
+    worker.once("exit", release);
 
     const json = await new Promise<string | undefined>((resolve, reject) => {
       function stop() {
@@ -40,7 +92,7 @@ export function createBackgroundReports() {
         stop();
         void worker.terminate();
         reject(new AppError(unavailable, 504));
-      }, 30_000);
+      }, reportTimeout);
       res.once("close", disconnected);
       worker.once("error", (error) => {
         stop();

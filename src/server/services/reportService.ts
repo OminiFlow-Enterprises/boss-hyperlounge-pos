@@ -652,7 +652,13 @@ export function settlementReport(
               COALESCE(NULLIF(t.name, ''), t.code) AS table_no,
               t.code AS table_code,
               ${INVOICE_ORDER_CARD} AS order_card,
-              p.created_at AS voucher_date, p.amount AS settled, i.status, i.discount AS allowance,
+              p.created_at AS voucher_date, p.amount AS settled,
+              CASE
+                WHEN i.status = 'CANCELLED' THEN i.status
+                WHEN i.grand_total = (SELECT SUM(amount) FROM payments WHERE invoice_id = i.id) THEN 'PAID'
+                ELSE 'PARTIAL'
+              END AS status,
+              i.discount AS allowance,
               p.method AS method, COALESCE(p.reference, '') AS account,
               s.name AS username, w.name AS waiter, cu.name AS guest,
               COALESCE(t.outlet, 'BAR') AS outlet_name
@@ -747,10 +753,25 @@ type SettlementPart = { method: string; amount: number; account: string; remark:
 export function updateSettlement(
   ctx: AppContext,
   paymentId: string,
-  input: { original?: SettlementPart; lines?: SettlementPart[] },
+  input: { original?: Partial<SettlementPart>; lines?: SettlementPart[]; amount?: number },
 ) {
   assertPermission(ctx.actor.role, "SETTLE_BILL");
   const { original } = input;
+  if (input.amount !== undefined) {
+    const amount = input.amount;
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new AppError("Enter payment amount");
+    return ctx.db.transaction(() => {
+      const row = settlementRow(ctx, paymentId);
+      if (!row) throw new AppError("Settlement not found", 404);
+      if (row.status === "CANCELLED") throw new AppError("Invoice is CANCELLED");
+      if (row.amount !== original?.amount) {
+        throw new AppError("Settlement changed. Reopen it from the report and try again.", 409);
+      }
+      ctx.db.prepare("UPDATE payments SET amount = ? WHERE id = ?").run(amount, paymentId);
+      audit(ctx, "SETTLEMENT_UPDATE", "payment", paymentId, null, row.amount, amount);
+      return settlementRow(ctx, paymentId);
+    }).immediate();
+  }
   if (!original || !Array.isArray(input.lines) || !input.lines.length) {
     throw new AppError("Enter at least one payment part");
   }

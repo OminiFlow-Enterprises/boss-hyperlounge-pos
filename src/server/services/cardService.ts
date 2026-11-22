@@ -74,8 +74,13 @@ export function findCardByScan(ctx: AppContext, cardNumber?: string, cardUid?: s
     if (byUid) return byUid;
   }
   if (cardNumber) {
-    const byNo = ctx.db.prepare(`${CARD_SELECT} WHERE c.card_number = ?`).get(cardNumber) as CardRow | undefined;
+    const byNo = ctx.db.prepare(`${CARD_SELECT} WHERE c.card_number = ?`).get(cardNumber.trim()) as CardRow | undefined;
     if (byNo) return byNo;
+    // POS terminals submit four digits, including for cards issued with the legacy HL- prefix.
+    const number = cardNumber.trim();
+    if (/^\d{4}$/.test(number)) {
+      return ctx.db.prepare(`${CARD_SELECT} WHERE c.card_number = ?`).get(`HL-${number}`) as CardRow | undefined ?? null;
+    }
   }
   return null;
 }

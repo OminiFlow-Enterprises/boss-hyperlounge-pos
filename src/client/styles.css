@@ -293,6 +293,10 @@ label.chk input { width: 13px; height: 13px; margin: 0; }
   height: 26px;
   line-height: 22px;
 }
+.bar-order-grid .igrid-row:not(.entry, .editing),
+.bar-order-grid .igrid-row:not(.entry, .editing) > div { height: 22px; }
+.bar-order-grid .igrid-row:not(.entry, .editing) > div { line-height: 18px; }
+.bar-order-grid .igrid-row:not(.entry) :is(.cell-name, .cell-qty) { font-weight: 700; }
 .igrid-row.entry .cell-name,
 .igrid-row.editing .cell-name {
   overflow: visible;
@@ -441,6 +445,8 @@ button.dept-btn:focus-visible {
   table-layout: fixed;
   font-size: 14px;
 }
+.bar-table-scroll { min-height: 0; overflow-y: auto; }
+.estimate .bar-table-scroll th { position: sticky; top: 0; z-index: 1; }
 .estimate col.c1 { width: 88px; }
 .estimate col.c1.club { width: 118px; }
 .estimate col.c2 { width: 72px; }
@@ -1112,6 +1118,7 @@ table.data tbody tr:hover td.cell-on { background: #0078d7; color: #fff; }
 .set-btns .fn { min-width: 72px; }
 .report-load-status { padding: 4px 8px; background: var(--face); }
 .report-load-status[role="alert"] { color: #a00000; }
+.set-grid-wrap, .gst-grid-wrap, .grid-fill { scroll-padding-block-start: 28px; }
 .set-grid-wrap { flex: 1; overflow: auto; background: #9a9a9a; }
 .set-table { width: 100%; background: transparent; font-size: 14px; font-weight: 700; white-space: nowrap; }
 .set-table th { font-weight: 700; }
@@ -1849,9 +1856,9 @@ button.st-drop-btn.card-drop-open {
 .login-rule { border: 0; border-top: 2px solid #000; margin: 4px 0 8px; }
 .login-script {
   text-align: center;
-  font-size: 26px;
-  font-weight: 700;
-  color: #6d3028;
+  font-size: 20px;
+  font-weight: 500;
+  color: #625a55;
   line-height: 1.1;
 }
 .pass-dlg { width: 420px; z-index: 280; background: var(--face); }
@@ -2003,3 +2010,6 @@ button.st-drop-btn.card-drop-open {
   padding: 8px 8px 10px;
 }
 .um-actions .fn { width: 84px; }
+.um-actions .um-pin-action { width: auto; }
+.group-report-options { display: grid; gap: 4px; max-height: 48vh; overflow-y: auto; }
+.pass-body .group-report-options label { display: flex; align-items: center; gap: 5px; }

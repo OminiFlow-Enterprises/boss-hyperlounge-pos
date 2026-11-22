@@ -1,6 +1,51 @@
+import { hashPin, verifyPin } from "../db/seed.js";
+import { audit } from "../lib/audit.js";
+import { AppError } from "../lib/errors.js";
 import type { AppContext } from "../lib/context.js";
+import { reportsForGroup, rightsPreset, type UserRoleLabel } from "../../shared/userRights.js";
 import type { ServiceChargeMode } from "../../shared/types.js";
 import { BILL_VENUE_DEFAULTS, type BillVenueInfo } from "../hardware/types.js";
+
+export const MASTER_PIN_SETTING = "master_pin_hash";
+const GROUP_REPORT_PREFIX = "group_report_rights.";
+
+export function isProtectedSetting(key: string): boolean {
+  return key === MASTER_PIN_SETTING || key.startsWith(GROUP_REPORT_PREFIX);
+}
+
+export function groupReportOverrides(ctx: AppContext, group: UserRoleLabel): Record<string, boolean> | undefined {
+  const value = getSetting(ctx, GROUP_REPORT_PREFIX + group);
+  if (!value) return;
+  let stored: Record<string, unknown>;
+  try { stored = JSON.parse(value) ?? {}; } catch { return undefined; }
+  const defaults = rightsPreset(group);
+  return Object.fromEntries(reportsForGroup(group).map(({ id }) => [
+    id, typeof stored[id] === "boolean" ? stored[id] : defaults[id] ?? false,
+  ]));
+}
+
+export function getGroupReports(ctx: AppContext, group: UserRoleLabel): Record<string, boolean> {
+  const defaults = rightsPreset(group);
+  return groupReportOverrides(ctx, group) ?? Object.fromEntries(
+    reportsForGroup(group).map(({ id }) => [id, defaults[id] ?? false]),
+  );
+}
+
+export function updateGroupReports(ctx: AppContext, group: UserRoleLabel, changes: unknown) {
+  if (!changes || typeof changes !== "object" || Array.isArray(changes)) throw new AppError("Select report permissions");
+  const allowed = new Set(reportsForGroup(group).map(({ id }) => id));
+  const entries = Object.entries(changes);
+  if (entries.some(([id, enabled]) => !allowed.has(id) || typeof enabled !== "boolean")) {
+    throw new AppError("Invalid report permission for this user group");
+  }
+  return ctx.db.transaction(() => {
+    const previous = getGroupReports(ctx, group);
+    const updated = { ...previous, ...Object.fromEntries(entries) };
+    setSetting(ctx, GROUP_REPORT_PREFIX + group, JSON.stringify(updated));
+    audit(ctx, "GROUP_REPORT_RIGHTS_UPDATE", "user_group", group, null, previous, updated);
+    return updated;
+  }).immediate();
+}
 
 const VENUE_KEYS: Record<keyof BillVenueInfo, string> = {
   name: "venue_name",
@@ -35,7 +80,24 @@ export function getAllSettings(ctx: AppContext): Record<string, string> {
     key: string;
     value: string;
   }>;
-  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  return Object.fromEntries(rows.filter(({ key }) => !isProtectedSetting(key)).map((r) => [r.key, r.value]));
+}
+
+export function verifyMasterPin(ctx: AppContext, pin: unknown): boolean {
+  if (typeof pin !== "string") return false;
+  const stored = getSetting(ctx, MASTER_PIN_SETTING);
+  return stored ? verifyPin(pin, stored) : pin === (process.env.POS_MASTER_PIN || "0166");
+}
+
+export function changeMasterPin(ctx: AppContext, currentPin: unknown, newPin: unknown): void {
+  if (typeof newPin !== "string" || !/^\d{4,12}$/.test(newPin)) {
+    throw new AppError("Enter a new master PIN with 4 to 12 digits");
+  }
+  ctx.db.transaction(() => {
+    if (!verifyMasterPin(ctx, currentPin)) throw new AppError("Incorrect current master PIN", 403);
+    setSetting(ctx, MASTER_PIN_SETTING, hashPin(newPin));
+    audit(ctx, "MASTER_PIN_CHANGE", "settings", null, null, null, null);
+  }).immediate();
 }
 
 /** Fill missing venue keys once; do not overwrite values the site already set. */

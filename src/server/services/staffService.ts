@@ -11,12 +11,14 @@ import {
   flagsPreset,
   mergeOutlets,
   rightsPreset,
+  isUserRoleLabel,
   roleLabel,
   type BillFlags,
   type OutletRight,
   type UserFlags,
   type UserRoleLabel,
 } from "../../shared/userRights.js";
+import { groupReportOverrides } from "./settingsService.js";
 import { deptRatesByProduct } from "./itemService.js";
 
 type StaffRow = {
@@ -70,10 +72,14 @@ function bit(value: number | null): boolean | null {
   return Number(value) === 1;
 }
 
-function mapStaff(row: StaffRow) {
+function mapStaff(ctx: AppContext, row: StaffRow) {
   const userRole = roleLabel(row.role, row.user_role);
+  const fixedGroup = isUserRoleLabel(row.user_role) && row.user_role !== "ADMIN";
   const flagsConfigured = row.hide_collection != null;
   const bill = parseJson<BillFlags>(row.bill_flags);
+  const baseRights = fixedGroup ? rightsPreset(userRole) : parseJson<Record<string, boolean>>(row.rights_json);
+  const reports = isUserRoleLabel(row.user_role) ? groupReportOverrides(ctx, userRole) : undefined;
+  const rights = reports ? { ...(baseRights ?? rightsPreset(userRole)), ...reports, report: Object.values(reports).some(Boolean) } : baseRights;
   return {
     id: row.id,
     name: row.name,
@@ -85,23 +91,22 @@ function mapStaff(row: StaffRow) {
     discount: row.discount_pct == null ? "0.00" : Number(row.discount_pct).toFixed(2),
     oldDateRecord: row.old_date_record == null ? 1 : Number(row.old_date_record),
     misReport: row.mis_report || "Full",
-    flags: flagsConfigured
+    flags: fixedGroup ? flagsPreset(userRole) : flagsConfigured
       ? {
           hideCollection: bit(row.hide_collection) === true,
           hideEstimate: bit(row.hide_estimate) === true,
           allowComplementary: bit(row.allow_complementary) === true,
           advanceCardUpdate: bit(row.advance_card_update) === true,
-          showCheckinRooms: bit(row.show_checkin_rooms) === true,
         }
       : null,
-    bill,
-    rights: parseJson<Record<string, boolean>>(row.rights_json),
+    bill: fixedGroup ? billPreset(userRole) : bill,
+    rights,
     outlets: parseJson<OutletRight[]>(row.outlet_rights),
   };
 }
 
-function actorFrom(staff: StaffRow, terminal: { id: string; name: string }): Actor {
-  const mapped = mapStaff(staff);
+function actorFrom(ctx: AppContext, staff: StaffRow, terminal: { id: string; name: string }): Actor {
+  const mapped = mapStaff(ctx, staff);
   return {
     staffId: staff.id,
     staffName: staff.name,
@@ -109,6 +114,7 @@ function actorFrom(staff: StaffRow, terminal: { id: string; name: string }): Act
     terminalId: terminal.id,
     terminalName: terminal.name,
     username: staff.username,
+    userGroup: isUserRoleLabel(staff.user_role) ? staff.user_role : undefined,
     rights: mapped.rights,
     allowComplementary: mapped.flags ? mapped.flags.allowComplementary : null,
     tableTransfer: mapped.bill ? mapped.bill.tableTransfer : null,
@@ -126,6 +132,7 @@ function assertCanManageUsers(ctx: AppContext) {
   const row = ctx.db
     .prepare("SELECT rights_json FROM staff WHERE id = ?")
     .get(ctx.actor.staffId) as { rights_json: string | null } | undefined;
+  if (ctx.actor.userGroup && ctx.actor.userGroup !== "ADMIN") throw new AppError("Permission denied", 403);
   if (!row || row.rights_json == null || row.rights_json === "") return;
   const rights = parseJson<Record<string, boolean>>(row.rights_json);
   if (rights && (rights["master.user"] || rights.master)) return;
@@ -133,21 +140,21 @@ function assertCanManageUsers(ctx: AppContext) {
 }
 
 function userRoleOf(input: StaffInput): UserRoleLabel {
-  if (input.userRole === "ADMIN" || input.userRole === "OPERATOR") return input.userRole;
+  if (isUserRoleLabel(input.userRole)) return input.userRole;
   if (input.role === "OWNER" || input.role === "MANAGER" || input.role === "ADMIN") return "ADMIN";
   if (input.role) return "OPERATOR";
   throw new AppError("Select user role");
 }
 
 function profileOf(input: StaffInput, userRole: UserRoleLabel) {
-  const flags = input.flags ?? flagsPreset(userRole);
-  const bill = input.bill ?? billPreset(userRole);
-  const rights = input.rights ?? rightsPreset(userRole);
+  const flags = userRole === "ADMIN" && input.flags ? input.flags : flagsPreset(userRole);
+  const bill = userRole === "ADMIN" && input.bill ? input.bill : billPreset(userRole);
+  const rights = userRole === "ADMIN" && input.rights ? input.rights : rightsPreset(userRole);
   const discount = Number(input.discount ?? 0);
   const oldDate = Math.round(Number(input.oldDateRecord ?? 1));
   const mis = input.misReport === "User" || input.misReport === "None" ? input.misReport : "Full";
   return {
-    role: userRole === "ADMIN" ? "OWNER" : "CASHIER",
+    role: userRole === "ADMIN" || userRole === "CASHIER" ? "OWNER" : "CASHIER",
     userRole,
     discount: Number.isFinite(discount) && discount > 0 ? discount : 0,
     oldDate: Number.isFinite(oldDate) && oldDate > 0 ? oldDate : 1,
@@ -173,7 +180,7 @@ function profileArgs(profile: ReturnType<typeof profileOf>) {
     profile.flags.hideEstimate ? 1 : 0,
     profile.flags.allowComplementary ? 1 : 0,
     profile.flags.advanceCardUpdate ? 1 : 0,
-    profile.flags.showCheckinRooms ? 1 : 0,
+    0,
     JSON.stringify(profile.bill),
     JSON.stringify(profile.rights),
     JSON.stringify(profile.outlets),
@@ -192,7 +199,7 @@ export function login(ctx: AppContext, username: string, pin: string, terminalId
   ctx.db
     .prepare("INSERT INTO sessions (id, staff_id, terminal_id, started_at) VALUES (?, ?, ?, ?)")
     .run(uuid(), staff.id, terminal.id, nowIso());
-  return actorFrom(staff, terminal);
+  return actorFrom(ctx, staff, terminal);
 }
 
 export function changePassword(ctx: AppContext, username: string, oldPassword: string, newPassword: string) {
@@ -212,7 +219,7 @@ export function listStaff(ctx: AppContext) {
   const rows = ctx.db
     .prepare("SELECT * FROM staff WHERE active = 1 ORDER BY username COLLATE NOCASE")
     .all() as StaffRow[];
-  return rows.map(mapStaff);
+  return rows.map((row) => mapStaff(ctx, row));
 }
 
 export function createStaff(ctx: AppContext, input: StaffInput) {
@@ -237,7 +244,7 @@ export function createStaff(ctx: AppContext, input: StaffInput) {
     )
     .run(id, username, username, hashPin(password), profile.role, nowIso(), ...profileArgs(profile));
   audit(ctx, "STAFF_CREATE", "staff", id, null, null, { username, userRole });
-  return mapStaff(ctx.db.prepare("SELECT * FROM staff WHERE id = ?").get(id) as StaffRow);
+  return mapStaff(ctx, ctx.db.prepare("SELECT * FROM staff WHERE id = ?").get(id) as StaffRow);
 }
 
 export function updateStaff(ctx: AppContext, id: string, input: StaffInput) {
@@ -247,10 +254,12 @@ export function updateStaff(ctx: AppContext, id: string, input: StaffInput) {
   const username = String(input.username ?? existing.username).trim();
   if (!username) throw new AppError("Enter username");
   const userRole = userRoleOf({ ...input, userRole: input.userRole ?? roleLabel(existing.role, existing.user_role) });
-  const taken = ctx.db
-    .prepare("SELECT id FROM staff WHERE lower(username) = lower(?) AND active = 1 AND id <> ?")
-    .get(username, id) as { id: string } | undefined;
-  if (taken) throw new AppError("Username already exists");
+  if (username !== existing.username) {
+    const taken = ctx.db
+      .prepare("SELECT id FROM staff WHERE lower(username) = lower(?) AND active = 1 AND id <> ?")
+      .get(username, id);
+    if (taken) throw new AppError("Username already exists");
+  }
   const password = String(input.password ?? input.pin ?? "");
   const profile = profileOf(input, userRole);
   ctx.db
@@ -262,7 +271,7 @@ export function updateStaff(ctx: AppContext, id: string, input: StaffInput) {
     ctx.db.prepare("UPDATE staff SET pin_hash = ? WHERE id = ?").run(hashPin(password), id);
   }
   audit(ctx, "STAFF_UPDATE", "staff", id, null, null, { username, userRole });
-  return mapStaff(ctx.db.prepare("SELECT * FROM staff WHERE id = ?").get(id) as StaffRow);
+  return mapStaff(ctx, ctx.db.prepare("SELECT * FROM staff WHERE id = ?").get(id) as StaffRow);
 }
 
 export function deleteStaff(ctx: AppContext, id: string) {

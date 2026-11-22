@@ -19,6 +19,20 @@ import { InsufficientBalanceError } from "../src/server/lib/errors.js";
 import { createTestApp } from "./helpers.js";
 
 describe("member cards", () => {
+  it("finds a previously issued HL-prefixed card using the four-digit POS input", () => {
+    const { ctx, db } = createTestApp();
+    const cashier = ctx("cashier");
+    const card = issueCard(cashier, {
+      customer: { name: "Returning Guest", mobile: "9000000010" },
+      cardNumber: "HL-2010",
+      cardTypeCode: "REGULAR",
+    });
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString();
+    db.prepare("UPDATE member_cards SET created_at = ? WHERE id = ?").run(yesterday, card.id);
+
+    expect(checkBalance(cashier, "2010", true).card.id).toBe(card.id);
+  });
+
   it("never updates a balance without a ledger row", () => {
     const { ctx } = createTestApp();
     const cashier = ctx("cashier");

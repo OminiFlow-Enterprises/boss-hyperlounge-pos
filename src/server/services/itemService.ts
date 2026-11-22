@@ -4,7 +4,9 @@ import type { AppContext } from "../lib/context.js";
 import { uuid } from "../lib/ids.js";
 import { rupeesToPaise } from "../../shared/money.js";
 
-export const ITEM_DEPTS = ["CAFE", "BAR", "THE BOSS CLUB", "RESTAURANT", "NC"] as const;
+import { USER_OUTLETS } from "../../shared/userRights.js";
+
+export const ITEM_DEPTS = USER_OUTLETS;
 
 export const SALES_GROUPS: Array<{ name: string; tax: number }> = [
   { name: "FOOD @ 18% - FOOD@ 18%", tax: 18 },

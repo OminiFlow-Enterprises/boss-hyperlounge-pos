@@ -1,11 +1,19 @@
-export type UserRoleLabel = "ADMIN" | "OPERATOR";
+export type UserRoleLabel = "ADMIN" | "OPERATOR" | "ADVANCE" | "CASHIER";
+
+export function isUserRoleLabel(value: unknown): value is UserRoleLabel {
+  return value === "ADMIN" || value === "OPERATOR" || value === "ADVANCE" || value === "CASHIER";
+}
+
+export function isAdminActor(actor: { role: string; userGroup?: UserRoleLabel } | null | undefined): boolean {
+  if (!actor) return false;
+  return actor.userGroup ? actor.userGroup === "ADMIN" : actor.role === "OWNER" || actor.role === "MANAGER";
+}
 
 export type UserFlags = {
   hideCollection: boolean;
   hideEstimate: boolean;
   allowComplementary: boolean;
   advanceCardUpdate: boolean;
-  showCheckinRooms: boolean;
 };
 
 export type BillFlags = {
@@ -29,7 +37,39 @@ export type RightNode = {
   children?: RightNode[];
 };
 
-export const USER_OUTLETS = ["CAFE", "BAR", "THE BOSS CLUB", "RESTAURANT", "NC"] as const;
+export const USER_OUTLETS = ["BAR", "THE BOSS CLUB", "RESTAURANT", "NC"] as const;
+export const ADVANCE_OUTLETS = USER_OUTLETS.filter((outlet) => outlet !== "NC");
+
+export function isAdvanceOutlet(outlet: unknown): outlet is (typeof ADVANCE_OUTLETS)[number] {
+  return ADVANCE_OUTLETS.some((allowed) => allowed === outlet);
+}
+
+const OUTLET_REPORTS: RightNode[] = [
+  { id: "report.kot", label: "KOT Report" },
+  { id: "report.bill", label: "Bill Report" },
+  { id: "report.settlement", label: "Settlement Report" },
+];
+
+const REPORT_RIGHTS: RightNode[] = [
+  ...OUTLET_REPORTS,
+  { id: "report.gst", label: "GST Report" },
+  { id: "report.pos", label: "Point Of Sales" },
+  { id: "report.item", label: "Item Wise Sales" },
+  { id: "report.itemDetail", label: "Item Wise Sales Detail" },
+  { id: "report.stock", label: "Item Combine Stock Report" },
+  { id: "report.outlet", label: "Outlet Wise Stock Report" },
+  { id: "report.time", label: "Time Sale Report" },
+  { id: "report.tax", label: "Tax Wise Report" },
+  { id: "report.card", label: "Card Settlement Report" },
+  { id: "report.booking", label: "Booking Report" },
+  { id: "report.itemTransfer", label: "Item Transfer Report" },
+  { id: "report.tableTransfer", label: "Table Transfer Report" },
+  { id: "report.kotCancellation", label: "KOT Cancellation Report" },
+];
+
+export function reportsForGroup(group: UserRoleLabel): RightNode[] {
+  return group === "OPERATOR" || group === "ADVANCE" ? OUTLET_REPORTS : REPORT_RIGHTS;
+}
 
 export const RIGHTS_TREE: RightNode[] = [
   {
@@ -40,7 +80,6 @@ export const RIGHTS_TREE: RightNode[] = [
       { id: "master.item", label: "Item" },
     ],
   },
-  { id: "front", label: "Front Office" },
   {
     id: "fnb",
     label: "F n B",
@@ -52,34 +91,13 @@ export const RIGHTS_TREE: RightNode[] = [
       { id: "fnb.advance", label: "Advance Booking" },
     ],
   },
-  { id: "special", label: "Special Services" },
-  { id: "account", label: "Account" },
-  { id: "store", label: "Store" },
-  { id: "house", label: "House Keeping" },
-  { id: "cms", label: "CMS" },
   {
     id: "report",
     label: "Report",
-    children: [
-      { id: "report.gst", label: "GST Report" },
-      { id: "report.pos", label: "Point Of Sales" },
-      { id: "report.item", label: "Item Wise Sales" },
-      { id: "report.itemDetail", label: "Item Wise Sales Detail" },
-      { id: "report.stock", label: "Item Combine Stock Report" },
-      { id: "report.outlet", label: "Outlet Wise Stock Report" },
-      { id: "report.time", label: "Time Sale Report" },
-      { id: "report.tax", label: "Tax Wise Report" },
-      { id: "report.settlement", label: "Settlement Report" },
-      { id: "report.card", label: "Card Settlement Report" },
-      { id: "report.itemTransfer", label: "Item Transfer Report" },
-      { id: "report.tableTransfer", label: "Table Transfer Report" },
-      { id: "report.kotCancellation", label: "KOT Cancellation Report" },
-    ],
+    children: REPORT_RIGHTS,
   },
   { id: "setting", label: "Setting" },
-  { id: "spa", label: "SpaSaloon" },
   { id: "logout", label: "Logout" },
-  { id: "notification", label: "Notification" },
 ];
 
 export function blankOutlets(): OutletRight[] {
@@ -99,34 +117,40 @@ export function allRightIds(): string[] {
 export function rightsPreset(role: UserRoleLabel): Record<string, boolean> {
   const ids = allRightIds();
   if (role === "ADMIN") return Object.fromEntries(ids.map((id) => [id, true]));
-  const on = new Set([
-    "fnb", "fnb.bar", "fnb.nc", "fnb.restaurant", "fnb.club", "fnb.advance",
-    "report", "report.gst", "report.pos", "report.item", "report.itemDetail",
-    "report.stock", "report.outlet", "report.time", "report.tax", "report.settlement", "report.card", "report.itemTransfer", "report.tableTransfer", "report.kotCancellation",
-    "logout",
-  ]);
+  if (role === "CASHIER") return Object.fromEntries(ids.map((id) => [id, id !== "master" && !id.startsWith("master.")]));
+  if (role === "OPERATOR") return barOrderRights();
+  const on = new Set(["fnb", ...ADVANCE_OUTLETS.map(outletRight), ...OUTLET_REPORTS.map((report) => report.id), "report", "logout"]);
   return Object.fromEntries(ids.map((id) => [id, on.has(id)]));
+}
+
+export function barOrderRights(): Record<string, boolean> {
+  return Object.fromEntries(allRightIds().map((id) => [id, ["fnb", "fnb.bar", "logout"].includes(id)]));
+}
+
+export function isBarOrderOnly(rights: Record<string, boolean> | null | undefined): boolean {
+  return rights?.["fnb.bar"] === true && USER_OUTLETS.every(
+    (outlet) => outlet === "BAR" || rights[outletRight(outlet)] !== true,
+  );
 }
 
 export function flagsPreset(role: UserRoleLabel): UserFlags {
   return {
     hideCollection: false,
-    hideEstimate: false,
-    allowComplementary: true,
-    advanceCardUpdate: role === "ADMIN",
-    showCheckinRooms: false,
+    hideEstimate: role === "ADVANCE",
+    allowComplementary: role === "ADMIN" || role === "CASHIER",
+    advanceCardUpdate: role === "ADMIN" || role === "CASHIER",
   };
 }
 
 export function billPreset(role: UserRoleLabel): BillFlags {
   const admin = role === "ADMIN";
   return {
-    serviceCharge: admin,
-    discount: true,
-    itemQty: true,
+    serviceCharge: role !== "OPERATOR",
+    discount: admin || role === "CASHIER",
+    itemQty: admin || role === "CASHIER",
     itemRate: admin,
-    tableTransfer: true,
-    itemTransfer: true,
+    tableTransfer: role !== "OPERATOR",
+    itemTransfer: role !== "OPERATOR",
   };
 }
 
@@ -173,7 +197,6 @@ export function outletRight(outlet: string): string {
   if (outlet === "THE BOSS CLUB") return "fnb.club";
   if (outlet === "RESTAURANT") return "fnb.restaurant";
   if (outlet === "NC") return "fnb.nc";
-  if (outlet === "CAFE") return "fnb.cafe";
   return "fnb.bar";
 }
 
@@ -190,17 +213,19 @@ export function viewRight(view: string, outlet?: string): string | null {
   if (view === "tax-wise") return "report.tax";
   if (view === "card-settlement-report") return "report.card";
   if (view === "kot-cancellation-report") return "report.kotCancellation";
-  if (view === "booking-report" || view === "advance-booking" || view === "card-block") return "fnb.advance";
-  if (view === "billing" || view === "kot-report" || view === "bill-report" || view === "history" || view === "settlement-report") {
-    if (outlet) return outletRight(outlet);
-    if (view === "settlement-report") return "report.settlement";
-    return "fnb";
-  }
+  if (view === "item-transfer-report") return "report.itemTransfer";
+  if (view === "table-transfer-report") return "report.tableTransfer";
+  if (view === "kot-report") return "report.kot";
+  if (view === "bill-report" || view === "history") return "report.bill";
+  if (view === "settlement-report") return "report.settlement";
+  if (view === "booking-report") return "report.booking";
+  if (view === "advance-booking" || view === "card-block") return "fnb.advance";
+  if (view === "billing") return outlet ? outletRight(outlet) : "fnb";
   return null;
 }
 
 export function roleLabel(role: string, userRole?: string | null): UserRoleLabel {
-  if (userRole === "ADMIN" || userRole === "OPERATOR") return userRole;
+  if (isUserRoleLabel(userRole)) return userRole;
   if (role === "OWNER" || role === "MANAGER") return "ADMIN";
   return "OPERATOR";
 }

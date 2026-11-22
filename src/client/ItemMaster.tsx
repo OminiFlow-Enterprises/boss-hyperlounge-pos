@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import { AlertBox, CapBtns, ConfirmAsk } from "./BillDialogs";
 
-const DEPTS = ["CAFE", "BAR", "THE BOSS CLUB", "RESTAURANT", "NC"] as const;
+import { USER_OUTLETS as DEPTS } from "../shared/userRights";
 
 type Rate = {
   dept: string;
