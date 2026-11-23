@@ -482,6 +482,18 @@ CREATE INDEX IF NOT EXISTS idx_invoices_created ON invoices(created_at);
 CREATE INDEX IF NOT EXISTS idx_invoices_order_created ON invoices(order_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_kots_created ON kots(created_at);
 CREATE INDEX IF NOT EXISTS idx_kot_items_kot ON kot_items(kot_id);
+
+CREATE TABLE IF NOT EXISTS kot_print_jobs (
+  id TEXT PRIMARY KEY,
+  kot_id TEXT NOT NULL REFERENCES kots(id) ON DELETE CASCADE,
+  destination TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'QUEUED' CHECK (status IN ('QUEUED', 'PRINTING', 'PRINTED', 'FAILED')),
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kot_print_jobs_pending ON kot_print_jobs(status, destination, created_at);
 CREATE INDEX IF NOT EXISTS idx_payments_invoice ON payments(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at);
 CREATE INDEX IF NOT EXISTS idx_payments_member_card ON payments(member_card_id, created_at);

@@ -1,4 +1,4 @@
-import { isAdvanceOutlet, isBarOrderOnly } from "../../shared/userRights.js";
+import { ADVANCE_OUTLETS, isBarOrderOnly } from "../../shared/userRights.js";
 import { assertPermission } from "../../shared/permissions.js";
 import { AppError } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
@@ -14,8 +14,7 @@ export function listFloors(ctx: AppContext) {
   return ctx.db.prepare("SELECT * FROM floors ORDER BY sort_order, name").all();
 }
 
-export function closeStaleDaySessions(ctx: AppContext) {
-  const cutoff = businessDayStart(new Date(), dayCloseHour(ctx)).toISOString();
+export function closeStaleDaySessions(ctx: AppContext, cutoff = businessDayStart(new Date(), dayCloseHour(ctx)).toISOString()) {
   const stale = ctx.db
     .prepare(
       `SELECT t.id FROM dining_tables t
@@ -28,8 +27,13 @@ export function closeStaleDaySessions(ctx: AppContext) {
 }
 
 export function listTables(ctx: AppContext) {
-  closeStaleDaySessions(ctx);
   const cutoff = businessDayStart(new Date(), dayCloseHour(ctx)).toISOString();
+  closeStaleDaySessions(ctx, cutoff);
+  const barOnly = isBarOrderOnly(ctx.actor.rights);
+  const outlets = barOnly ? ["BAR"] : ctx.actor.userGroup === "ADVANCE" ? ADVANCE_OUTLETS : null;
+  const outletFilter = outlets
+    ? `COALESCE(NULLIF(t.outlet, ''), 'BAR') IN (${outlets.map(() => "?").join(", ")})`
+    : "COALESCE(t.outlet, '') <> 'CAFE'";
   const rows = ctx.db
     .prepare(
       `SELECT t.*, f.name AS floor_name, s.customer_id, s.card_id, s.waiter_id, s.id AS session_id,
@@ -46,23 +50,23 @@ export function listTables(ctx: AppContext) {
        LEFT JOIN customers cu ON cu.id = s.customer_id
        LEFT JOIN member_cards c ON c.id = s.card_id
        LEFT JOIN staff st ON st.id = s.waiter_id
+       WHERE ${outletFilter}
        ORDER BY f.sort_order, t.code`,
     )
-    .all(cutoff) as Array<Record<string, unknown>>;
-  if (isBarOrderOnly(ctx.actor.rights)) {
-    return rows.filter((row) => (row.outlet || "BAR") === "BAR").map((row) => ({
+    .all(cutoff, ...(outlets ?? [])) as Array<Record<string, unknown>>;
+  if (barOnly) {
+    return withNetTotals(ctx, rows).map((row) => ({
       id: row.id,
       code: row.code,
       name: row.name,
       outlet: "BAR",
       status: row.status,
+      session_opened_at: row.session_opened_at,
       has_running_order: Number(row.running_total) > 0,
+      net_total: row.net_total,
     }));
   }
-  const visibleRows = ctx.actor.userGroup === "ADVANCE"
-    ? rows.filter((row) => isAdvanceOutlet(row.outlet || "BAR"))
-    : rows.filter((row) => row.outlet !== "CAFE");
-  return withNetTotals(ctx, visibleRows);
+  return withNetTotals(ctx, rows);
 }
 
 function withNetTotals(ctx: AppContext, rows: Array<Record<string, unknown>>) {
@@ -131,7 +135,7 @@ export function createTable(
   input: { code: string; name?: string; floorId?: string; capacity?: number; outlet?: string },
 ) {
   assertPermission(ctx.actor.role, "CREATE_ORDER");
-  const code = input.code.trim();
+  const code = typeof input.code === "string" ? input.code.trim() : "";
   if (!code) throw new AppError("Table code is required");
   const outlet = input.outlet?.trim() || "BAR";
   if (outlet.toUpperCase() === "CAFE") throw new AppError("Cafe outlet is unavailable");
@@ -340,23 +344,51 @@ export function transferTable(ctx: AppContext, fromTableId: string, toTableId: s
     .run(from.id);
 
   const transferId = uuid();
+  const transferredAt = nowIso();
   ctx.db
     .prepare(
       `INSERT INTO table_transfers (id, from_table_id, to_table_id, session_id, staff_id, reason, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(transferId, from.id, to.id, sessionId, ctx.actor.staffId, why, nowIso());
+    .run(transferId, from.id, to.id, sessionId, ctx.actor.staffId, why, transferredAt);
   audit(ctx, "TABLE_TRANSFER", "dining_table", from.id, why, from.code, {
     to: to.code,
     fromOutlet: from.outlet || "BAR",
     toOutlet: destOutlet,
   });
-  return { transferId, from: getTable(ctx, from.id), to: getTable(ctx, to.id), sessionId };
+  return { transferId, from: getTable(ctx, from.id), to: getTable(ctx, to.id), sessionId, transferredAt };
+}
+
+export async function transferTableAndPrint(ctx: AppContext, fromTableId: string, toTableId: string, reason?: string) {
+  const transfer = ctx.db.transaction(() => transferTable(ctx, fromTableId, toTableId, reason))();
+  const { transferId, from, to, sessionId, transferredAt } = transfer;
+  let printError: string | undefined;
+  try {
+    const steward = ctx.db.prepare(`SELECT st.name FROM table_sessions s
+      JOIN staff st ON st.id = s.waiter_id WHERE s.id = ?`).pluck().get(sessionId) as string | undefined;
+    const result = await ctx.hardware.kitchen.printKOT({
+      kotNumber: transferId,
+      tableCode: to.code,
+      station: "KITCHEN",
+      tableTransfer: { outlet: to.outlet || "BAR", fromTable: from.code, toTable: to.code },
+      operatorName: ctx.actor.staffName,
+      waiter: steward,
+      reprint: false,
+      items: [],
+      createdAt: transferredAt,
+    });
+    if (!result.ok) printError = result.error || "Print failed";
+  } catch (error) {
+    printError = error instanceof Error ? error.message : "Print failed";
+  }
+  return { ...transfer, printError };
 }
 
 export function listTableItems(ctx: AppContext, tableId: string) {
-  getTable(ctx, tableId);
-  return ctx.db
+  const table = getTable(ctx, tableId);
+  const barOnly = isBarOrderOnly(ctx.actor.rights);
+  if (barOnly && (table.outlet || "BAR") !== "BAR") throw new AppError("Only Bar tables are available", 403);
+  const items = ctx.db
     .prepare(
       `SELECT oi.id, oi.name, oi.qty, oi.unit_price, COALESCE(p.sku, '') AS sku,
               COALESCE(k.kot_number, '') AS kot_number
@@ -364,10 +396,10 @@ export function listTableItems(ctx: AppContext, tableId: string) {
          JOIN orders o ON o.id = oi.order_id
          LEFT JOIN products p ON p.id = oi.product_id
          LEFT JOIN kots k ON k.id = oi.kot_id
-        WHERE o.table_id = ? AND o.status IN ('OPEN','BILL_REQUESTED','SETTLING') AND oi.voided = 0
+        WHERE o.table_id = ? AND o.session_id = ? AND o.status IN ('OPEN','BILL_REQUESTED','SETTLING') AND oi.voided = 0
         ORDER BY oi.rowid`,
     )
-    .all(tableId) as Array<{
+    .all(tableId, table.current_session_id) as Array<{
     id: string;
     name: string;
     qty: number;
@@ -375,6 +407,7 @@ export function listTableItems(ctx: AppContext, tableId: string) {
     sku: string;
     kot_number: string;
   }>;
+  return barOnly ? items.map(({ id, name, qty, sku, kot_number }) => ({ id, name, qty, sku, kot_number })) : items;
 }
 
 function openOrderOnTable(ctx: AppContext, tableId: string) {

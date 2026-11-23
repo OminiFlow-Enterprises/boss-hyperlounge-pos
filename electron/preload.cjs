@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("bossPrint", {
   printHtml: (html, deviceName = "bill") =>
-    ipcRenderer.invoke("pos:print-html", { html, deviceName: deviceName || "bill" }),
+    ipcRenderer.invoke("pos:print-html", { html, deviceName }),
   exportPdf: (opts) => ipcRenderer.invoke("pos:export-pdf", opts || {}),
 });
 

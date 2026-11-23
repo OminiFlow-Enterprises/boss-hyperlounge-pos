@@ -5,12 +5,12 @@ BOSS Hyperlounge POS is an offline Windows Electron desktop app for lounge order
 ## Set up one server PC and multiple client PCs
 
 1. Connect the server PC and client PCs to the same trusted local network. Ethernet or Wi-Fi can work without internet service. Give the server a stable LAN address, for example through a DHCP reservation on the router.
-2. On the server PC, install and open THE BOSS POS. For a source checkout, use `npm run desktop` after installing dependencies. Keep the Electron app open and the server PC awake during service. Closing the app stops its server.
+2. On the server PC, install and open THE BOSS POS once under the Windows account used for service. The installed server starts automatically at that account's Windows sign-in. Keep the app open and the server PC awake during service. Closing the app stops its server. For a source checkout, use `npm run desktop` after installing dependencies.
 3. On the server PC, run `ipconfig` and find the IPv4 address of the active Ethernet or Wi-Fi adapter. The app starts at port `8787` and tries the next available port if that port is in use. If needed, confirm the actual port in the Electron user data directory under `logs/pos-debug.log`.
-4. On each client PC, open `http://<server-ip>:<port>/` in a browser, for example `http://192.168.1.50:8787/`. Sign in with the staff account for that station. If connections are blocked, allow the POS port through Windows Firewall for the private network and restrict access to the local subnet.
+4. On each client PC, install THE BOSS POS Client or open `http://<server-ip>:<port>/` in a browser. The desktop client asks for the server IP on first launch and remembers the address after connecting. An IP without a port uses `8787`. If the address changes, the client asks again after a connection failure. To open the setup prompt directly, launch with `--change-server`. Sign in with the staff account for that station. If connections are blocked, allow the POS port through Windows Firewall for the private network and restrict access to the local subnet.
 5. To verify the setup, disconnect the site from the internet while keeping the LAN active. Sign in on both PCs. On test data, open a table on one PC, reload the floor view on the other, and confirm both show the same table. Then test a KOT, a bill, and settlement with the intended printer setup.
 
-The current Electron launcher always starts its own local server and opens that server. Use Electron on the designated server and a browser on the other PCs. Starting Electron independently on each PC creates separate local databases. Clients need a working connection to the server for orders and payments. The LAN uses HTTP, so keep the POS on a trusted private network and avoid forwarding its port to the internet.
+The server installer hosts the local database. The desktop client and browser clients connect to that server over the LAN for orders and payments. The LAN uses HTTP, so keep the POS on a trusted private network and avoid forwarding its port to the internet.
 
 ## Functional guide
 
@@ -66,12 +66,29 @@ The Electron main process starts the Express backend under Electron's Node runti
 
 - The server is the source of truth for tables, orders, KOTs, invoices, payments, staff, and card balances. Billing uses integer paise and calculates totals server-side. Card operations record ledger entries with paid and bonus balances tracked separately.
 - Source Electron uses `data/hyperlounge.sqlite` in the checkout. Installed Electron uses `<Electron userData>/data/hyperlounge.sqlite`. On first launch it copies the bundled database into that location if the destination is absent. The Windows installer bundles the checkout's database, so verify that the packaged data is appropriate before distributing it.
+- Keep the server installer identity and installed database location stable across releases. Updates must reuse the existing SQLite database. Preserve it during uninstall as well. The bundled database is for initial setup only.
+- Use numbered, transactional migrations for database changes. Append a new step in `database.ts` and keep released steps and `schema.sql` unchanged. Builds without database changes leave the schema version alone. Before upgrading an existing database, the server saves a consistent snapshot in the `migration-backups` folder beside it, then applies only pending migrations. A database with a newer schema version requires a compatible server build.
 - SQLite uses write-ahead logging. For a simple file backup, close the POS server cleanly before copying the database. Keep the backup off the server PC and reopen the POS after copying. Each client accesses data through the API, so there is no need to share the database file over the network.
 - The sync queue currently uses an in-memory sink by default. It is useful for exercising the sync workflow in tests. Live deployment and backups depend on the server database.
 
 ### Printing
 
-The backend uses local-network ESC/POS printers. The current hardware adapter routes receipt, kitchen, and bar printing to the configured bill printer. Check the active routing in [hardware/index.ts](src/server/hardware/index.ts) before changing printers. Electron also exposes desktop print and PDF operations through preload IPC. Test printing from the actual server and browser stations because their print capabilities differ. For backend testing without sending jobs to a real printer, set `POS_MEMORY_PRINTERS=1`.
+KOT routing uses the product's item group. `FOOD` and `EV FOOD` go to Kitchen. `BAR` goes to Bar. `BEVERAGE`, `EV CAFE`, and `CAFE` go to Cafe Bar. `SPL` is saved from any terminal and prints only when sent or reprinted from the Office PC, using its local `bill` queue in the Windows POS Client. The Office PC is `192.168.1.21` by default. Set `POS_OFFICE_TERMINAL_IP` on the server if the Office PC changes address. `SPL1` goes to the terminal that sends or reprints the ticket, using its Windows default printer in Electron or the browser print dialog. Mixed KOTs send only the relevant items to each destination. Other groups use their assigned Kitchen or Bar station. For backend testing without sending jobs to a real printer, set `POS_MEMORY_PRINTERS=1`.
+
+#### Planned KOT routing
+
+Earlier requirements saved for reference. The outlet-specific client copies below are a future setup.
+
+| Sending outlet | Item group | Destination and copies |
+| --- | --- | --- |
+| BAR | Kitchen Food | Kitchen printer, 1 copy |
+| BAR | Bar | Bar printer, 1 copy |
+| BAR | Cafe | Cafe printer, 1 copy |
+| BAR | SPL | SPL Office printer, 1 copy |
+| RESTAURANT and THE BOSS CLUB | Food items | Kitchen printer, 1 copy, and the sending terminal's connected printer, 1 copy |
+| RESTAURANT and THE BOSS CLUB | All other items | Sending terminal's connected printer, 2 copies labeled Customer Copy and Original Copy |
+
+For mixed orders, route each item by its item group. Each destination receives the items assigned to it under these rules.
 
 ## Working on the app with Codex
 

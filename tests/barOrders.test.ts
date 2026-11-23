@@ -8,7 +8,37 @@ import { createComplimentary } from "../src/server/services/complimentaryService
 import { generateInvoice } from "../src/server/services/billingService.js";
 import { createStaff, listStaff, updateStaff } from "../src/server/services/staffService.js";
 import { getTableByCode, openTable } from "../src/server/services/tableService.js";
-import { createTestApp } from "./helpers.js";
+import { createApiClient, createTestApp } from "./helpers.js";
+
+it("asks office cashiers to sign in again when the punching session is missing", async () => {
+  const { db, hardware, ctx, seeded } = createTestApp();
+  db.prepare("UPDATE staff SET username = 'archived-cashier' WHERE username = 'cashier'").run();
+  const cashier = createStaff(ctx("manager"), { username: "office-test", password: "4242", userRole: "CASHIER" });
+  const table = getTableByCode(ctx("manager"), "01");
+  const server = createApp({ db, hardware }).listen(0, "127.0.0.1");
+  try {
+    await once(server, "listening");
+    const request = createApiClient((server.address() as AddressInfo).port);
+    const open = () => request(`tables/${table.id}/open`, {});
+    const expired = await open();
+    expect(expired.status).toBe(401);
+    expect(await expired.json()).toMatchObject({ code: "SESSION_REQUIRED" });
+    expect(getTableByCode(ctx("manager"), "01").status).toBe("AVAILABLE");
+
+    expect((await request("auth/login", { username: "office-test", password: "4242" })).status).toBe(200);
+    expect((await open()).status).toBe(200);
+    const order = await request("orders", { tableId: table.id });
+    expect(order.status).toBe(200);
+    const { id, waiter_id } = await order.json();
+    expect(waiter_id).toBe(cashier.id);
+    expect((await request(`orders/${id}/items`, { productId: seeded.products["FOOD-PZ"], qty: 1 })).status).toBe(200);
+    expect((await request(`orders/${id}/send-kot`, {})).status).toBe(200);
+  } finally {
+    server.close();
+    await once(server, "close");
+    db.close();
+  }
+});
 
 it("limits Bar operators to adding items and sending KOTs before billing", async () => {
   const { db, hardware, ctx, seeded } = createTestApp();
@@ -34,13 +64,14 @@ it("limits Bar operators to adding items and sending KOTs before billing", async
   try {
     await once(server, "listening");
     const { port } = server.address() as AddressInfo;
-    const request = (path: string, body?: object) => fetch(`http://127.0.0.1:${port}/api/${path}`, body && {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    const request = createApiClient(port);
 
     expect((await request("auth/login", { username: "baroperator", password: "4242" })).status).toBe(200);
+    const otherTerminal = createApiClient(port);
+    expect((await otherTerminal("auth/login", { username: "cashier", password: "2222" })).status).toBe(200);
+    expect(await (await request("session")).json()).toMatchObject({ actor: { username: "baroperator" } });
+    expect((await otherTerminal("auth/logout", {})).status).toBe(200);
+    expect(await (await request("session")).json()).toMatchObject({ actor: { username: "baroperator" } });
     const { tables } = await (await request("bootstrap")).json();
     expect(tables).toContainEqual(expect.objectContaining({ id: bar.id, outlet: "BAR", has_running_order: false }));
     expect(tables.every((table: { id: string; running_total?: number }) =>
@@ -48,6 +79,14 @@ it("limits Bar operators to adding items and sending KOTs before billing", async
     )).toBe(true);
 
     expect((await request(`tables/${other.id}/open`, {})).status).toBe(403);
+    expect((await request("tables", { code: "New-Bar", outlet: "RESTAURANT" })).status).toBe(403);
+    const newTable = await request("tables", { code: "New-Bar", outlet: "BAR" });
+    expect(newTable.status).toBe(200);
+    const created = await newTable.json();
+    expect(created).toMatchObject({ code: "New-Bar", outlet: "BAR" });
+    expect(await (await request("tables", { code: "new-bar" })).json()).toMatchObject({ id: created.id });
+    expect((await request(`tables/${created.id}/open`, {})).status).toBe(200);
+    expect((await request("orders", { tableId: created.id })).status).toBe(200);
     expect((await request(`tables/${bar.id}/open`, {})).status).toBe(200);
     const order = await request("orders", { tableId: bar.id });
     expect(order.status).toBe(200);
@@ -62,6 +101,7 @@ it("limits Bar operators to adding items and sending KOTs before billing", async
     expect(await (await request("tables")).json()).toContainEqual(expect.objectContaining({
       id: bar.id,
       has_running_order: true,
+      net_total: expect.any(Number),
     }));
     expect((await request("reports/kots")).status).toBe(403);
     expect((await request("tables/transfer", {})).status).toBe(403);
@@ -73,11 +113,19 @@ it("limits Bar operators to adding items and sending KOTs before billing", async
       .toEqual({ count: 2 });
     expect((await request("invoices/generate", { orderId: id })).status).toBe(403);
 
-    const invoice = generateInvoice(manager, id) as { id: string };
+    const invoice = generateInvoice(manager, id) as { id: string; grand_total: number };
     expect(await (await request("tables")).json()).toContainEqual(expect.objectContaining({
       id: bar.id,
       status: "PAYMENT_PENDING",
+      net_total: invoice.grand_total,
     }));
+    const sidebarItems = await request(`tables/${bar.id}/items`);
+    expect(sidebarItems.status).toBe(200);
+    const sidebarRows = await sidebarItems.json();
+    expect(sidebarRows).toHaveLength(2);
+    expect(sidebarRows[0]).toMatchObject({ sku: "BAR-WH", qty: 1 });
+    expect(sidebarRows[0]).not.toHaveProperty("unit_price");
+    expect((await request(`tables/${other.id}/items`)).status).toBe(403);
     expect((await request(`tables/${bar.id}/invoice`)).status).toBe(403);
     expect((await request(`invoices/${invoice.id}/pay`, {})).status).toBe(403);
     expect((await request(`tables/${bar.id}/open`, {})).status).toBe(409);
@@ -128,12 +176,7 @@ it("lets Advance staff punch, transfer, bill and settle outside NC", async () =>
   try {
     await once(server, "listening");
     const { port } = server.address() as AddressInfo;
-    const request = (path: string, body?: object, method = body ? "POST" : "GET") =>
-      fetch(`http://127.0.0.1:${port}/api/${path}`, {
-        method,
-        headers: body ? { "Content-Type": "application/json" } : undefined,
-        body: body ? JSON.stringify(body) : undefined,
-      });
+    const request = createApiClient(port);
     const login = await request("auth/login", { username: "advance", password: "4242" });
     expect(await login.json()).toMatchObject({ userGroup: "ADVANCE", tableTransfer: true, itemTransfer: true });
     const tables = await (await request("tables")).json();
@@ -147,7 +190,20 @@ it("lets Advance staff punch, transfer, bill and settle outside NC", async () =>
     const item = await request(`orders/${order.id}/items`, { productId: seeded.products["FOOD-PZ"], qty: 1, outlet: "RESTAURANT" });
     expect(item.status).toBe(200);
     const { id: itemId } = await item.json();
-    expect((await request(`orders/${order.id}/send-kot`, {})).status).toBe(200);
+    const sent = await request(`orders/${order.id}/send-kot`, {});
+    expect(sent.status).toBe(200);
+    const [kot] = await sent.json();
+    const report = await request("reports/kots?outlet=RESTAURANT");
+    expect(report.status).toBe(200);
+    expect((await report.json()).rows).toContainEqual(expect.objectContaining({ id: kot.id }));
+    for (const key of [kot.id, kot.kot_number]) {
+      const detail = await request(`reports/kots/${encodeURIComponent(key)}`);
+      expect(detail.status).toBe(200);
+      expect(await detail.json()).toMatchObject({
+        kot_number: kot.kot_number,
+        items: [{ qty: 1, code: "FOOD-PZ" }],
+      });
+    }
     expect((await request("tables/transfer", { fromTableId: restaurant.id, toTableId: nc.id })).status).toBe(403);
     expect((await request("tables/transfer", { fromTableId: restaurant.id, toTableId: bar.id, reason: "Move to Bar" })).status).toBe(200);
     expect((await request("tables/item-transfer", { fromTableId: bar.id, toTableId: restaurant.id, itemIds: [itemId] })).status).toBe(200);
@@ -221,14 +277,11 @@ it("applies Admin report checkboxes to the group and lets Cashiers use existing 
   try {
     await once(server, "listening");
     const { port } = server.address() as AddressInfo;
-    const request = (route: string, body?: object, method = body ? "POST" : "GET") =>
-      fetch(`http://127.0.0.1:${port}/api/${route}`, {
-        method,
-        headers: body ? { "Content-Type": "application/json" } : undefined,
-        body: body ? JSON.stringify(body) : undefined,
-      });
+    const request = createApiClient(port);
+    const adminTerminal = createApiClient(port);
     const login = (username: string) => request("auth/login", { username, password: "4242" });
     expect((await login("reportadmin")).status).toBe(200);
+    expect((await adminTerminal("auth/login", { username: "reportadmin", password: "4242" })).status).toBe(200);
     const options = await (await request("settings/group-reports/OPERATOR")).json();
     expect(options).toMatchObject({ "report.kot": false, "report.bill": false, "report.settlement": false });
     expect((await request("settings/group-reports/OPERATOR", { "report.bill": true }, "PUT")).status).toBe(200);
@@ -250,6 +303,8 @@ it("applies Admin report checkboxes to the group and lets Cashiers use existing 
     const cashier = await login("compcashier");
     expect(await cashier.json()).toMatchObject({ allowComplementary: true, rights: { "report.gst": false } });
     expect((await request("reports/gst")).status).toBe(403);
+    expect((await adminTerminal("reports/gst")).status).toBe(200);
+    expect((await adminTerminal("reports/kots?outlet=RESTAURANT")).status).toBe(200);
     expect((await request("settings/group-reports/CASHIER", { "report.gst": true }, "PUT")).status).toBe(403);
     expect((await request("complimentary", { name: "New master account" })).status).toBe(403);
     const invoice = await request("invoices/generate", {
@@ -261,6 +316,8 @@ it("applies Admin report checkboxes to the group and lets Cashiers use existing 
     });
     expect(invoice.status).toBe(200);
     expect(await invoice.json()).toMatchObject({ complimentary_account_id: account.id, grand_total: 0 });
+    expect((await request("auth/logout", {})).status).toBe(200);
+    expect((await adminTerminal("reports/gst")).status).toBe(200);
   } finally {
     server.close();
     await once(server, "close");

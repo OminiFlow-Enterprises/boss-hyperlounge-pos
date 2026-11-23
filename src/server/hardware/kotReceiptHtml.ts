@@ -1,6 +1,7 @@
 import type { KotPrintPayload } from "./types.js";
 
 interface KotTicket {
+  tableTransfer?: KotPrintPayload["tableTransfer"];
   department: KotPrintPayload["station"];
   kotNo: string | number;
   tableNo: string | number;
@@ -8,7 +9,7 @@ interface KotTicket {
   time: string;
   steward: string;
   orderType: "NEW ORDER" | "RUNNING ORDER";
-  copyType: "Original Copy" | "Duplicate Copy";
+  copyType: "Original Copy" | "Duplicate Copy" | "Customer Copy" | "Customer Copy (Reprint)";
   items: KotPrintPayload["items"];
   printTime: string;
   operatorName: string;
@@ -32,6 +33,7 @@ export function formatKotHtml(payload: KotPrintPayload, printedAt = new Date()):
   const createdAt = new Date(payload.createdAt);
   const validDate = Number.isFinite(createdAt.getTime());
   return renderKotTicket({
+    tableTransfer: payload.tableTransfer,
     department: payload.station,
     kotNo: payload.kotNumber.replace(/^KOT-/i, ""),
     tableNo: payload.tableCode,
@@ -41,7 +43,9 @@ export function formatKotHtml(payload: KotPrintPayload, printedAt = new Date()):
     time: validDate ? clockTime(createdAt) : "",
     steward: Array.from(payload.waiter?.trim() ?? "")[0]?.toUpperCase() ?? "",
     orderType: payload.orderBanner ?? "RUNNING ORDER",
-    copyType: payload.reprint ? "Duplicate Copy" : "Original Copy",
+    copyType: payload.customerCopy
+      ? payload.reprint ? "Customer Copy (Reprint)" : "Customer Copy"
+      : payload.reprint ? "Duplicate Copy" : "Original Copy",
     items: payload.items,
     printTime: clockTime(printedAt),
     operatorName: payload.operatorName ?? "",
@@ -113,9 +117,27 @@ export function renderKotTicket(ticket: KotTicket): string {
   .end { margin: 6px 0; text-align: center; }
   .operator { display: flex; justify-content: space-between; gap: 2mm; font-size: 7.5pt; }
   .operator span:last-child { text-align: right; overflow-wrap: anywhere; }
+  .transfer { padding-bottom: 6mm; }
+  .transfer h1 { font-size: 14pt; }
+  .transfer-tables { display: grid; grid-template-columns: 1fr 1fr; gap: 2mm; text-align: center; border-top: 1px solid; padding-top: 2mm; }
+  .transfer-tables strong { display: block; margin-bottom: 1mm; }
+  .transfer-details { border-bottom: 1px solid; padding-bottom: 2mm; }
 </style>
 </head>
 <body>
+  ${ticket.tableTransfer ? `<section class="transfer">
+    <h1>TABLE TRANSFER</h1>
+    <p class="subtitle">${esc(ticket.tableTransfer.outlet)}</p>
+    <div class="transfer-tables">
+      <div><strong>OLD TABLE</strong>${esc(ticket.tableTransfer.fromTable)}</div>
+      <div><strong>NEW TABLE</strong>${esc(ticket.tableTransfer.toTable)}</div>
+    </div>
+    <div class="transfer-details">
+      <div>Steward: ${esc(ticket.steward)}</div>
+      <div>Transfer By: ${esc(ticket.operatorName.toUpperCase())}</div>
+      <div>Date Time: ${esc(dateTime)}</div>
+    </div>
+  </section>` : `
   <h1>${esc(ticket.department)}</h1>
   <p class="subtitle">Restaurant KOT</p>
   <dl class="meta">
@@ -132,7 +154,7 @@ export function renderKotTicket(ticket: KotTicket): string {
   <footer>
     <p class="end">--- END ---</p>
     <div class="operator"><time>${esc(ticket.printTime)}</time><span>${esc(ticket.operatorName.toUpperCase())}</span></div>
-  </footer>
+  </footer>`}
 </body>
 </html>`;
 }

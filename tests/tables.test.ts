@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { rupeesToPaise } from "../src/shared/money.js";
-import { openTable, transferTable, mergeTables, getTableByCode, splitTable, createTable, transferItems, listTables } from "../src/server/services/tableService.js";
+import { openTable, transferTable, transferTableAndPrint, mergeTables, getTableByCode, splitTable, createTable, transferItems, listTables } from "../src/server/services/tableService.js";
+import { formatKotHtml } from "../src/server/hardware/kotReceiptHtml.js";
+import type { KotPrintPayload } from "../src/server/hardware/types.js";
 import { addItem, createOrder, sendKot, getOrderDetail, reprintKot, setBillLineQty, setBillLineProduct, setBillLinePrice } from "../src/server/services/orderService.js";
 import { generateInvoice, settleInvoice, previewBill, cardSpendable, settleClubFromCard } from "../src/server/services/billingService.js";
 import { issueCard, rechargeCard, checkBalance } from "../src/server/services/cardService.js";
@@ -11,7 +13,7 @@ import { createTestApp } from "./helpers.js";
 
 describe("tables, KOT and billing", () => {
   it("transfers a running order and its KOTs", async () => {
-    const { seeded, ctx } = createTestApp();
+    const { seeded, ctx, hardware } = createTestApp();
     const waiter = ctx("waiter");
     const from = getTableByCode(waiter, "01");
     const to = getTableByCode(waiter, "08");
@@ -19,7 +21,11 @@ describe("tables, KOT and billing", () => {
     const order = createOrder(waiter, from.id) as { id: string };
     addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
     await sendKot(waiter, order.id);
-    transferTable(waiter, from.id, to.id, "Guest moved");
+    const transfer = await transferTableAndPrint(waiter, from.id, to.id, "Guest moved");
+    expect(transfer.printError).toBeUndefined();
+    const slip = hardware.kitchen.logs.at(-1)?.payload as KotPrintPayload;
+    expect(slip.tableTransfer).toEqual({ outlet: to.outlet || "BAR", fromTable: "01", toTable: "08" });
+    expect(formatKotHtml(slip)).toMatch(/TABLE TRANSFER[\s\S]*OLD TABLE[\s\S]*01[\s\S]*NEW TABLE[\s\S]*08/);
     expect(getTableByCode(waiter, "01").status).toBe("AVAILABLE");
     expect(getTableByCode(waiter, "08").status).toBe("OCCUPIED");
     const moved = getOrderDetail(waiter, order.id);

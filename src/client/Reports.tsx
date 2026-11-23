@@ -3,10 +3,11 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEve
 import { ignoreRepeatedPrintKey, printBill, printPage, reprintKot } from "./printActions";
 import { createPortal } from "react-dom";
 import { api } from "./api";
-import { parseRupeesInput } from "../shared/money";
+import { parseRupeesInput, rupeesToPaise } from "../shared/money";
+import { businessDate, businessDateRange } from "../shared/businessDate";
 import type { NavView } from "../shared/types";
 import { AlertBox, CapBtns, ConfirmAsk, PrepareBillDialog, SettleDialog } from "./BillDialogs";
-import { cardNoDigits, cardNoReady, stayOnCard } from "./formNav";
+import { cardNoDigits, cardNoReady, selectByFirstLetter, stayOnCard } from "./formNav";
 import type { CompAccount } from "./ComplimentaryMaster";
 
 import { ADVANCE_OUTLETS } from "../shared/userRights";
@@ -111,9 +112,6 @@ function pad(n: number) { return String(n).padStart(2, "0"); }
 function dmy(d = new Date()) {
   return `${pad(d.getDate())}-${MONTHS[d.getMonth()]}-${d.getFullYear()}`;
 }
-function isoDay(d = new Date()) {
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
 function rupees(paise?: number) {
   return ((paise || 0) / 100).toFixed(2);
 }
@@ -162,8 +160,8 @@ function FilterDates({ from, to, setFrom, setTo, onShow }: {
 }
 
 export function ItemWiseDetail({ onExit }: { onExit: () => void }) {
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
+  const [from, setFrom] = useState(businessDate());
+  const [to, setTo] = useState(businessDate());
   const [data, setData] = useState<any>({ rows: [] });
   const [shown, setShown] = useState(true);
   async function load() {
@@ -226,8 +224,8 @@ export function ItemWiseDetail({ onExit }: { onExit: () => void }) {
 }
 
 export function PointOfSales({ onExit }: { onExit: () => void }) {
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
+  const [from, setFrom] = useState(businessDate());
+  const [to, setTo] = useState(businessDate());
   const [sel, setSel] = useState("BAR");
   const [checked, setChecked] = useState<Record<string, boolean>>({
     BAR: true, "THE BOSS CLUB": true, RESTAURANT: true, NC: true,
@@ -459,8 +457,8 @@ function advanceCashPaise(particulars: Array<{ label?: string; amount?: number }
 
 export function GstReport({ onExit }: { onExit: () => void }) {
   const request = useReportRequest();
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
+  const [from, setFrom] = useState(businessDate());
+  const [to, setTo] = useState(businessDate());
   const [outletName, setOutletName] = useState("Select");
   const [billNo, setBillNo] = useState("");
   const [wise, setWise] = useState<"bill" | "date" | "month">("bill");
@@ -1044,8 +1042,8 @@ export function GstReport({ onExit }: { onExit: () => void }) {
 }
 
 export function ItemWiseSale({ onExit }: { onExit: () => void }) {
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
+  const [from, setFrom] = useState(businessDate());
+  const [to, setTo] = useState(businessDate());
   const [sel, setSel] = useState("BAR");
   const [checked, setChecked] = useState<Record<string, boolean>>({
     BAR: true, NC: true, RESTAURANT: true, "THE BOSS CLUB": true,
@@ -1177,10 +1175,10 @@ function liquorBaseName(value: unknown) {
 }
 
 export function ItemWiseGroupSales({ onExit }: { onExit: () => void }) {
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
+  const [from, setFrom] = useState(businessDate());
+  const [to, setTo] = useState(businessDate());
   const [period, setPeriod] = useState<"dates" | "month">("dates");
-  const [month, setMonth] = useState(isoDay().slice(0, 7));
+  const [month, setMonth] = useState(businessDate().slice(0, 7));
   const [startHour, setStartHour] = useState("10");
   const [startMinute, setStartMinute] = useState("00");
   const [startPeriod, setStartPeriod] = useState("AM");
@@ -1254,8 +1252,8 @@ export function GridReport({ title, endpoint, columns, onExit, onEdit, cellSelec
   onEdit?: (row: any) => void;
   cellSelect?: boolean;
 }) {
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
+  const [from, setFrom] = useState(businessDate());
+  const [to, setTo] = useState(businessDate());
   const [rows, setRows] = useState<any[]>([]);
   const selection = useReportSelection(rows, cellSelect);
   useEffect(() => {
@@ -1380,6 +1378,10 @@ function amountText(value: string) {
   return clean.slice(0, dot + 1) + clean.slice(dot + 1).replace(/\./g, "");
 }
 
+const REPORT_PAY_MODES = ["CASH", "BANK TRANSFER", "PREPAID CARD"] as const;
+
+type SettlementPart = { method: string; amount: number; account: string; remark: string };
+
 function SettlementUpdateDialog({
   paymentId,
   outlet,
@@ -1392,69 +1394,130 @@ function SettlementUpdateDialog({
   onChanged: () => void;
 }) {
   const [row, setRow] = useState<any>(null);
+  const [mode, setMode] = useState("CASH");
   const [amount, setAmount] = useState("");
-  const [warn, setWarn] = useState("");
+  const [bankName, setBankName] = useState(BANK_ACCOUNTS[0]);
+  const [parts, setParts] = useState<SettlementPart[]>([]);
   const busy = useRef(false);
-  const amountRef = useRef<HTMLInputElement>(null);
+  const [remark, setRemark] = useState("");
+  const [warn, setWarn] = useState("");
+  const warnBack = useRef<"amount" | "mode" | "bank" | "save" | "remark">("amount");
+  const amtRef = useRef<HTMLInputElement>(null);
+  const remarkRef = useRef<HTMLInputElement>(null);
+  const modeRef = useRef<HTMLSelectElement>(null);
+  const bankRef = useRef<HTMLSelectElement>(null);
+  const updateRef = useRef<HTMLButtonElement>(null);
+  const close = useRef(onClose);
+  close.current = onClose;
+
+  function focusField(where: "amount" | "mode" | "bank" | "save" | "remark") {
+    if (where === "amount") {
+      amtRef.current?.focus();
+      amtRef.current?.select();
+    } else if (where === "mode") modeRef.current?.focus();
+    else if (where === "bank") bankRef.current?.focus();
+    else if (where === "remark") {
+      remarkRef.current?.focus();
+      remarkRef.current?.select();
+    } else updateRef.current?.focus();
+  }
+
+  function showWarn(message: string, back: "amount" | "mode" | "bank" | "save" | "remark") {
+    warnBack.current = back;
+    setWarn(message);
+  }
+
+  function applyRow(next: any) {
+    const label = modeLabel(next.method);
+    const bank = label === "BANK TRANSFER" && BANK_ACCOUNTS.includes(next.account) ? next.account : BANK_ACCOUNTS[0];
+    setRow(next);
+    setMode(label);
+    setAmount(rupees(next.amount));
+    setBankName(bank);
+    setRemark(next.remark || "");
+  }
 
   useEffect(() => {
     let gone = false;
     api.get<any>(`/api/reports/settlement/${paymentId}`).then((next) => {
       if (gone) return;
-      setRow(next);
-      setAmount(rupees(next.amount));
-    }).catch((error) => { if (!gone) setWarn(error.message); });
+      applyRow(next);
+      setWarn("");
+    }).catch((e) => { if (!gone) showWarn(e.message, "amount"); });
     return () => { gone = true; };
   }, [paymentId]);
 
-  useEffect(() => {
-    if (!row) return;
-    amountRef.current?.focus();
-    amountRef.current?.select();
-  }, [row]);
+  useLayoutEffect(() => {
+    amtRef.current?.focus();
+    amtRef.current?.select();
+  }, [row, parts.length]);
+
+  const remaining = (row?.amount ?? 0) - parts.reduce((sum, part) => sum + part.amount, 0);
+  const remainingAfterAmount = Math.max(0, remaining - rupeesToPaise(Number(amount) || 0));
+  const prepaid = row?.method === "MEMBER_CARD";
 
   async function save() {
     if (!row || busy.current || warn) return;
-    let paise: number;
-    try {
-      paise = parseRupeesInput(amount);
-    } catch {
-      setWarn("Enter payment amount");
+    let paise = 0;
+    try { paise = parseRupeesInput(amount || "0"); } catch { showWarn("Enter settle amount", "amount"); return; }
+    if (paise <= 0) { showWarn("Enter settle amount", "amount"); return; }
+    if (paise > remaining) { showWarn("Amount exceeds the remaining settlement", "amount"); return; }
+    if (prepaid && paise !== remaining) { showWarn("Prepaid card settlements cannot be split", "amount"); return; }
+    const account = mode === "BANK TRANSFER" ? bankName : mode === "CASH" ? "Cash." : row.account;
+    const lines = [...parts, { method: mode, amount: paise, account, remark }];
+    if (paise < remaining) {
+      setParts(lines);
+      setAmount(rupees(remaining - paise));
+      setMode(REPORT_PAY_MODES[0]);
+      setBankName(BANK_ACCOUNTS[0]);
+      setRemark(row.remark || "");
       return;
     }
-    if (paise <= 0) {
-      setWarn("Enter payment amount");
-      return;
-    }
-
     busy.current = true;
+    const original = { method: row.method, amount: row.amount, account: row.account, remark: row.remark };
     try {
-      await api.put(`/api/reports/settlement/${paymentId}`, {
-        original: { amount: row.amount },
-        amount: paise,
-      });
+      await api.put(`/api/reports/settlement/${paymentId}`, { original, lines });
       onChanged();
       onClose();
-    } catch (error) {
-      setWarn(error instanceof Error ? error.message : "Could not update settlement");
+    } catch (e) {
+      showWarn(e instanceof Error ? e.message : "Could not update settlement", "save");
     } finally {
       busy.current = false;
     }
   }
 
-  function close() {
-    if (!busy.current) onClose();
-  }
-
   useEffect(() => {
     function keys(e: globalThis.KeyboardEvent) {
-      if (warn || document.querySelector(".alert-dlg")) return;
-      if (e.key === "Escape") {
+      if (warn || document.querySelector(".confirm-dlg, .alert-dlg")) return;
+      if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); if (!busy.current) close.current(); return; }
+      if (e.key === "F2") { e.preventDefault(); e.stopImmediatePropagation(); void save(); return; }
+      const active = document.activeElement;
+      if (active === modeRef.current && /^[a-z]$/i.test(e.key)) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        close();
+        const option = Array.from(modeRef.current.options).find((choice) => choice.text.toLowerCase().startsWith(e.key.toLowerCase()));
+        if (option) setMode(option.value);
+        return;
       }
-      if (e.key === "F2") {
+      if (e.key !== "Enter") return;
+      if (active === amtRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        modeRef.current?.focus();
+      } else if (active === modeRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (mode === "BANK TRANSFER") bankRef.current?.focus();
+        else updateRef.current?.focus();
+      } else if (active === bankRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        updateRef.current?.focus();
+      } else if (active === remarkRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        updateRef.current?.focus();
+      } else if (active === updateRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
         void save();
@@ -1469,9 +1532,9 @@ function SettlementUpdateDialog({
       <div className="dialog-cap">
         <span className="cap-dot" />
         Restaurant Settlement - {formatUiLabel(outlet)}
-        <CapBtns onClose={close} />
+        <CapBtns onClose={() => { if (!busy.current) onClose(); }} />
       </div>
-      <form className="settle-body" onSubmit={(e) => { e.preventDefault(); void save(); }}>
+      <div className="settle-body">
         <table className="st-form">
           <colgroup>
             <col className="l" /><col /><col className="l" /><col />
@@ -1485,9 +1548,9 @@ function SettlementUpdateDialog({
             </tr>
             <tr>
               <td className="lbl">Guest Name :</td>
-              <td><input className="win" readOnly tabIndex={-1} value={row?.guest ?? ""} /></td>
+              <td><input className="win" readOnly tabIndex={-1} value={row?.guest || ""} /></td>
               <td className="lbl">Table No :</td>
-              <td><input className="win" readOnly tabIndex={-1} value={row?.table_no ?? ""} /></td>
+              <td><input className="win" readOnly tabIndex={-1} value={row?.table_no || ""} /></td>
             </tr>
             <tr>
               <td className="lbl">Voucher/Receipt :</td>
@@ -1499,51 +1562,72 @@ function SettlementUpdateDialog({
               <td className="lbl">Allowance :</td>
               <td><input className="win num" readOnly tabIndex={-1} value={rupees(row?.allowance)} /></td>
               <td className="lbl">Payment Mode :</td>
-              <td><input className="win" readOnly tabIndex={-1} value={row ? formatUiLabel(modeLabel(row.method)) : ""} /></td>
+              <td>
+                <select ref={modeRef} className="win" tabIndex={2} value={mode} onChange={(e) => setMode(e.target.value)}>
+                  {REPORT_PAY_MODES.filter((choice) => prepaid === (choice === "PREPAID CARD")).map((choice) => <option key={choice} value={choice}>{formatUiLabel(choice)}</option>)}
+                </select>
+              </td>
             </tr>
-            {row && modeLabel(row.method) === "BANK TRANSFER" && (
+            {mode === "BANK TRANSFER" && (
               <tr>
                 <td /><td />
                 <td className="lbl">Bank Name :</td>
-                <td><input className="win" readOnly tabIndex={-1} value={row.account ?? ""} /></td>
+                <td>
+                  <select ref={bankRef} className="win" aria-label="Bank Name" tabIndex={3} value={bankName}
+                    onChange={(e) => setBankName(e.target.value)}
+                    onKeyDown={(e) => selectByFirstLetter(e, setBankName)}>
+                    {BANK_ACCOUNTS.map((name) => <option key={name}>{name}</option>)}
+                  </select>
+                </td>
               </tr>
             )}
             <tr>
-              <td className="lbl"><label htmlFor="settlement-edit-amount">Settled Amount :</label></td>
+              <td className="lbl">Payment Amount :</td>
               <td>
                 <input
-                  id="settlement-edit-amount"
-                  ref={amountRef}
+                  ref={amtRef}
                   className="win green num"
                   data-num="dec"
-                  disabled={!row}
+                  tabIndex={1}
+                  readOnly={prepaid}
                   value={amount}
                   onChange={(e) => setAmount(amountText(e.target.value))}
                   onFocus={(e) => e.currentTarget.select()}
                 />
               </td>
               <td className="lbl">Remaining Amount :</td>
-              <td><input className="win num" readOnly tabIndex={-1} value={rupees(row?.amount)} /></td>
+              <td><input className="win num" readOnly tabIndex={-1} value={rupees(remainingAfterAmount)} /></td>
             </tr>
             <tr>
               <td className="lbl">Remark :</td>
-              <td colSpan={3}><input className="win" readOnly tabIndex={-1} value={row?.remark ?? ""} /></td>
+              <td colSpan={3}><input ref={remarkRef} className="win" tabIndex={-1} value={remark} onChange={(e) => setRemark(e.target.value)} /></td>
             </tr>
           </tbody>
         </table>
+        {parts.length > 0 && (
+          <ol aria-label="Payment parts entered">
+            {parts.map((part, index) => <li key={index}>{formatUiLabel(part.method)}{part.method === "BANK TRANSFER" ? ` (${part.account})` : ""} {inr(part.amount)}</li>)}
+          </ol>
+        )}
         <div className="st-foot">
           <span className="st-vno">Voucher No : {row?.voucher_no ?? ""}</span>
           <button type="button" className="fn" tabIndex={-1} onKeyDown={ignoreRepeatedPrintKey} onClick={() => {
             if (row?.invoice_id) void printBill(row.invoice_id).catch(() => null);
           }}>Print</button>
-          <button type="submit" className="fn" disabled={!row}>Update (F2)</button>
-          <button type="button" className="fn" onClick={close}>Exit</button>
+          <button ref={updateRef} type="button" className="fn" tabIndex={4} onClick={() => void save()}>{parts.length ? "Post (F2)" : "Update (F2)"}</button>
+          <button type="button" className="fn" tabIndex={-1} onClick={() => { if (!busy.current) onClose(); }}>{parts.length ? "Discard" : "Exit"}</button>
         </div>
-      </form>
-      {warn && <AlertBox message={warn} onClose={() => {
-        setWarn("");
-        amountRef.current?.focus();
-      }} />}
+      </div>
+      {warn && (
+        <AlertBox
+          message={warn}
+          onClose={() => {
+            const back = warnBack.current;
+            setWarn("");
+            window.setTimeout(() => focusField(back), 0);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1585,8 +1669,8 @@ export function SettlementReport({ outlet, advance, operator, onExit }: { outlet
   const request = useReportRequest();
   const usersRequest = useReportRequest();
   const [users, setUsers] = useState<string[]>([]);
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
+  const [from, setFrom] = useState(businessDate);
+  const [to, setTo] = useState(businessDate);
   const [outletName, setOutletName] = useState(outlet || "THE BOSS CLUB");
   const [mop, setMop] = useState("Select");
   const [bill, setBill] = useState("");
@@ -1666,7 +1750,8 @@ export function SettlementReport({ outlet, advance, operator, onExit }: { outlet
           <div className="set-row">
             <label>Bill No. : <input className="win" value={bill} onChange={(e) => setBill(e.target.value)} /></label>
             <label>To Date : <input className="win" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
-            <label>Accounts : <select className="win" value={account} onChange={(e) => setAccount(e.target.value)}>
+            <label>Accounts : <select className="win" value={account} onChange={(e) => setAccount(e.target.value)}
+              onKeyDown={(e) => selectByFirstLetter(e, setAccount)}>
               {SETTLE_ACCOUNTS.map((a) => <option key={a}>{a}</option>)}
             </select></label>
           </div>
@@ -1862,7 +1947,7 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
   const [bankName, setBankName] = useState(BANK_ACCOUNTS[0]);
   const [no, setNo] = useState(430);
   const [bookings, setBookings] = useState<AdvanceBookingRow[]>([]);
-  const [today, setToday] = useState(() => isoDay());
+  const [today, setToday] = useState(() => businessDate());
   const [msg, setMsg] = useState("");
   const [ok, setOk] = useState(false);
   const [askExit, setAskExit] = useState(false);
@@ -1870,7 +1955,7 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
   const cardRef = useRef<HTMLInputElement>(null);
   const advanceRef = useRef<HTMLInputElement>(null);
   const mopRef = useRef<HTMLInputElement>(null);
-  const bankRef = useRef<HTMLInputElement>(null);
+  const bankRef = useRef<HTMLSelectElement>(null);
   const saveRef = useRef<HTMLButtonElement>(null);
   const mopValueRef = useRef("CASH");
   const bankValueRef = useRef(BANK_ACCOUNTS[0]);
@@ -1879,9 +1964,9 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
     function refreshDay() {
       window.clearTimeout(timer);
       const now = new Date();
-      setToday(isoDay(now));
-      const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-      timer = window.setTimeout(refreshDay, midnight.getTime() - now.getTime());
+      setToday(businessDate(now));
+      const end = businessDateRange(businessDate(now)).to;
+      timer = window.setTimeout(refreshDay, Date.parse(end) + 1 - now.getTime());
     }
     let timer: number | undefined;
     refreshDay();
@@ -1962,12 +2047,9 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
     if (next && next !== mopValueRef.current) chooseMop(next);
   }
 
-  function stepBank(dir: 1 | -1) {
-    const i = Math.max(0, BANK_ACCOUNTS.indexOf(bankValueRef.current));
-    const next = BANK_ACCOUNTS[Math.max(0, Math.min(BANK_ACCOUNTS.length - 1, i + dir))];
-    if (!next || next === bankValueRef.current) return;
-    bankValueRef.current = next;
-    setBankName(next);
+  function chooseBank(name: string) {
+    bankValueRef.current = name;
+    setBankName(name);
   }
 
   function afterMop() {
@@ -2045,10 +2127,6 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
           e.preventDefault();
           e.stopImmediatePropagation();
           stepMop(dir);
-        } else if (active === bankRef.current) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          stepBank(dir);
         }
         return;
       }
@@ -2072,7 +2150,7 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
     <div className="adv-page">
       <aside className="adv-side" aria-label="Saved reservations">
         <ul>
-          {bookings.filter((booking) => isoDay(new Date(booking.created_at)) === today).map((booking) => (
+          {bookings.filter((booking) => businessDate(new Date(booking.created_at)) === today).map((booking) => (
             <li key={booking.id}>{booking.card_no} / {booking.guest_name}</li>
           ))}
         </ul>
@@ -2087,7 +2165,11 @@ export function AdvanceBooking({ onExit }: { onExit: () => void }) {
         <label>Advance <input ref={advanceRef} className="win" data-num="dec" tabIndex={3} inputMode="decimal" value={form.advance} onChange={(e) => setAdvance(e.target.value)} onFocus={(e) => e.target.select()} onBlur={() => setForm((f) => ({ ...f, advance: formatAdvance(f.advance) }))} onKeyDown={onEnter(() => { const okAmt = checkAdvance(); if (okAmt) setForm((f) => ({ ...f, advance: formatAdvance(f.advance) })); return okAmt; }, () => mopRef.current?.focus())} /></label>
         <label>MOP <span className="st-drop"><input ref={mopRef} className="win" readOnly tabIndex={4} data-cycle="1" value={formatUiLabel(form.mop)} /><span className="st-drop-btn" aria-hidden="true" /></span></label>
         {form.mop === "BANK TRANSFER" && (
-          <label>Bank Name <span className="st-drop"><input ref={bankRef} className="win" readOnly tabIndex={5} data-cycle="1" value={bankName} /><span className="st-drop-btn" aria-hidden="true" /></span></label>
+          <label>Bank Name <select ref={bankRef} className="win" tabIndex={5} value={bankName}
+            onChange={(e) => chooseBank(e.target.value)}
+            onKeyDown={(e) => selectByFirstLetter(e, chooseBank)}>
+            {BANK_ACCOUNTS.map((name) => <option key={name}>{name}</option>)}
+          </select></label>
         )}
         <button ref={saveRef} className="fn adv-save" tabIndex={6} onClick={() => void save()} onKeyDown={onEnter(() => true, () => void save())}>Save</button>
         {msg && <p className={ok ? "ok" : "flash"}>{msg}</p>}
@@ -2124,8 +2206,8 @@ function shortBillNo(raw?: string | number | null) {
 
 function BillReport({ outlet, advance, cashier, operator, onExit }: { outlet?: string; advance?: boolean; cashier?: boolean; operator?: boolean; onExit: () => void }) {
   const request = useReportRequest();
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
+  const [from, setFrom] = useState(businessDate());
+  const [to, setTo] = useState(businessDate());
   const [outletName, setOutletName] = useState(outlet || "BAR");
   const [bill, setBill] = useState("");
   const [tableNo, setTableNo] = useState("");
@@ -2300,7 +2382,7 @@ function BillReport({ outlet, advance, cashier, operator, onExit }: { outlet?: s
         <table className="data set-table bill-rpt-table">
           <thead>
             <tr>
-              {["Bill Date", "Bill No.", "Table No.", "Net Amount", "Service Charge", "Complimentary A/C", "Remark", "Username", "Cash", "Card", "BTC", "Wallet", "Room Transfer", "Other MOD", "Allowance"].map((h) => (
+              {["Bill Date", "Bill No.", "Table No.", "Net Amount", "Service Charge", "Complimentary A/C", "Remark", "Username"].map((h) => (
                 <th key={h}>{h}</th>
               ))}
             </tr>
@@ -2324,13 +2406,6 @@ function BillReport({ outlet, advance, cashier, operator, onExit }: { outlet?: s
                   <td>{r.complimentary_account || (r.is_complimentary ? "Complimentary" : "")}</td>
                   <td>{r.remark || ""}</td>
                   <td>{r.username || ""}</td>
-                  <td className="num">{Number(r.cash) ? inr(r.cash) : ""}</td>
-                  <td className="num">{Number(r.card) ? inr(r.card) : ""}</td>
-                  <td className="num">{Number(r.btc) ? inr(r.btc) : ""}</td>
-                  <td className="num">{Number(r.wallet) ? inr(r.wallet) : ""}</td>
-                  <td className="num">{Number(r.room_transfer) ? inr(r.room_transfer) : ""}</td>
-                  <td className="num">{Number(r.other_mod) ? inr(r.other_mod) : ""}</td>
-                  <td className="num">{Number(r.allowance) ? inr(r.allowance) : ""}</td>
                 </tr>
               );
             })}
@@ -2395,16 +2470,19 @@ function BillReport({ outlet, advance, cashier, operator, onExit }: { outlet?: s
 
 function KotAddTableDialog({
   kotKey,
+  kotNumber,
   viewOnly,
   onClose,
 }: {
   kotKey: string;
+  kotNumber: string;
   viewOnly?: boolean;
   onClose: () => void;
 }) {
   const [data, setData] = useState<any>(null);
   const [sel, setSel] = useState(0);
   const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
   const dataRef = useRef<any>(null);
   const printRef = useRef<HTMLButtonElement>(null);
   const reprintRef = useRef<() => void>(() => {});
@@ -2416,13 +2494,15 @@ function KotAddTableDialog({
     let gone = false;
     setData(null);
     setErr("");
+    setLoading(true);
     api.get<any>(`/api/reports/kots/${encodeURIComponent(kotKey)}`).then((next) => {
       if (gone) return;
       setData(next);
       setSel(0);
       setErr("");
       setTimeout(() => printRef.current?.focus(), 0);
-    }).catch((e) => { if (!gone) setErr(e instanceof Error ? e.message : "KOT not found"); });
+    }).catch((e) => { if (!gone) setErr(e instanceof Error ? e.message : "KOT not found"); })
+      .finally(() => { if (!gone) setLoading(false); });
     return () => { gone = true; };
   }, [kotKey]);
 
@@ -2466,6 +2546,7 @@ function KotAddTableDialog({
   const items: Array<{ id: string; name: string; qty: number; remark: string; rate: number; code: string }> = data?.items || [];
   const tableItems: Array<{ code: string; name: string; qty: number }> = data?.table_items || [];
   const qtyTxt = (n: number) => Number(n || 0).toFixed(2);
+  const isCancellationSlip = data?.type === "CANCEL";
   const remark = String(data?.notes || "");
 
   return createPortal(
@@ -2479,7 +2560,7 @@ function KotAddTableDialog({
         <div className="kot-add-main">
           <div className="kot-add-hdr">
             <label className="pair"><span className="lbl">Date</span><input className="win" readOnly tabIndex={-1} value={data?.date_label || ""} /></label>
-            <label className="pair"><span className="lbl">KOT</span><span className="kot-text">{data?.kot_number || kotKey}</span></label>
+            <label className="pair"><span className="lbl">KOT</span><span className="kot-text">{kotNumber || String(data?.kot_number ?? "").replace(/^KOT-/i, "")}</span></label>
             <label className="pair"><span>Table No</span>
               <select className="win green" disabled tabIndex={-1} value={data?.table_no || ""}>
                 {data?.table_no ? <option value={data.table_no}>{data.table_no}</option> : <option value=""> </option>}
@@ -2504,13 +2585,13 @@ function KotAddTableDialog({
                   <div>{i + 1}</div>
                   <div className="name">{it.name}</div>
                   <div className="num">{rupees(it.rate)}</div>
-                  <div className="num">{qtyTxt(it.qty)}</div>
+                  <div className="num">{qtyTxt(isCancellationSlip ? -Math.abs(it.qty) : it.qty)}</div>
                   <div className="remark-cell">{it.remark || ""}</div>
                 </div>
               ))}
               {!items.length && (
                 <div className="kot-add-row empty">
-                  <div /><div>{data ? "No items" : "Loading…"}</div>
+                  <div /><div>{loading ? "Loading…" : data ? "No items" : "Could not load KOT items"}</div>
                 </div>
               )}
             </div>
@@ -2581,8 +2662,8 @@ function KotAddTableDialog({
 
 function KotReport({ outlet, advance, operator, onExit }: { outlet?: string; advance?: boolean; operator?: boolean; onExit: () => void }) {
   const request = useReportRequest();
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
+  const [from, setFrom] = useState(businessDate());
+  const [to, setTo] = useState(businessDate());
   const [outletName, setOutletName] = useState(outlet || "BAR");
   const [kotNo, setKotNo] = useState("");
   const [tableNo, setTableNo] = useState("");
@@ -2591,7 +2672,7 @@ function KotReport({ outlet, advance, operator, onExit }: { outlet?: string; adv
   const [data, setData] = useState<any>({ rows: [] });
   const rows = data.rows || EMPTY_REPORT_ROWS;
   const selection = useReportSelection(rows);
-  const [kotKey, setKotKey] = useState<string | null>(null);
+  const [selectedKot, setSelectedKot] = useState<{ key: string; number: string } | null>(null);
   const [miss, setMiss] = useState("");
   useEffect(() => {
     setOutletName(outlet || "BAR");
@@ -2623,7 +2704,7 @@ function KotReport({ outlet, advance, operator, onExit }: { outlet?: string; adv
 
   function openRow(row: any) {
     const key = String(row?.id || row?.kot_number || "").trim();
-    if (key) setKotKey(key);
+    if (key) setSelectedKot({ key, number: String(row.kot_number ?? "") });
   }
 
   async function reprintSelected() {
@@ -2643,7 +2724,7 @@ function KotReport({ outlet, advance, operator, onExit }: { outlet?: string; adv
 
   useEffect(() => {
     function keys(e: KeyboardEvent) {
-      if (kotKey || miss || isReportDialogTarget(e)) return;
+      if (selectedKot || miss || isReportDialogTarget(e)) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
@@ -2743,11 +2824,12 @@ function KotReport({ outlet, advance, operator, onExit }: { outlet?: string; adv
         <span className="hint">F1 : KOT Reprint</span>
       </div>
       {miss && <AlertBox message={miss} onClose={() => setMiss("")} />}
-      {kotKey && (
+      {selectedKot && (
         <KotAddTableDialog
-          kotKey={kotKey}
+          kotKey={selectedKot.key}
+          kotNumber={selectedKot.number}
           viewOnly={operator}
-          onClose={() => setKotKey(null)}
+          onClose={() => setSelectedKot(null)}
         />
       )}
     </div>
@@ -2913,8 +2995,8 @@ function CardBillDialog({
 }
 
 export function CardSettlementReport({ onExit, title = "Card Settlement Report" }: { onExit: () => void; title?: string }) {
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
+  const [from, setFrom] = useState(businessDate());
+  const [to, setTo] = useState(businessDate());
   const [card, setCard] = useState("");
   const [rows, setRows] = useState<CardSettleRow[]>([]);
   const selection = useReportSelection(rows);
@@ -3053,8 +3135,8 @@ type TransferRow = {
 };
 
 function TransferReport({ kind, onExit }: { kind: "item" | "table"; onExit: () => void }) {
-  const [from, setFrom] = useState(isoDay());
-  const [to, setTo] = useState(isoDay());
+  const [from, setFrom] = useState(businessDate());
+  const [to, setTo] = useState(businessDate());
   const [rows, setRows] = useState<TransferRow[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -3130,17 +3212,18 @@ type KotCancellationPage = {
 };
 
 function KotCancellationReport({ onExit }: { onExit: () => void }) {
-  const today = isoDay();
-  const [filters, setFilters] = useState({ from: `${today}T00:00`, to: `${today}T23:59`, username: "", tableNo: "" });
+  const [filters, setFilters] = useState(() => {
+    const day = businessDateRange();
+    return { from: `${day.start}T06:00`, to: `${day.to.slice(0, 10)}T05:59`, username: "", tableNo: "" };
+  });
   const [applied, setApplied] = useState(filters);
   const [page, setPage] = useState(1);
   const [data, setData] = useState<KotCancellationPage>({ rows: [], hasNext: false });
   const request = useReportRequest();
 
   function load(nextFilters: typeof filters, nextPage: number) {
-    const from = new Date(nextFilters.from);
-    const to = new Date(nextFilters.to);
-    to.setSeconds(59, 999);
+    const from = new Date(`${nextFilters.from}:00.000+05:30`);
+    const to = new Date(`${nextFilters.to}:59.999+05:30`);
     const query = new URLSearchParams({
       ...nextFilters, from: from.toISOString(), to: to.toISOString(), page: String(nextPage),
     });

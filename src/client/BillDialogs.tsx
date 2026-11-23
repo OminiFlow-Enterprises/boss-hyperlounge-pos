@@ -9,7 +9,7 @@ import { formatTableNo } from "../shared/tableLabel";
 import { SETTLEMENT_PENDING_TRANSFER_MESSAGE } from "../shared/tableTransfer";
 import { itemMatchScore } from "../shared/itemSearch";
 import type { BillDetails, BillLineEdit, PaymentMode } from "../shared/types";
-import { cardNoDigits, cardNoReady, stayOnCard } from "./formNav";
+import { cardNoDigits, cardNoReady, selectByFirstLetter, stayOnCard } from "./formNav";
 import { ComplimentaryMasterDialog, type CompAccount } from "./ComplimentaryMaster";
 
 type Table = { id: string; code: string; status: string; customer_name?: string; card_number?: string; running_total?: number; outlet?: string };
@@ -110,41 +110,61 @@ export function PrepareTablePick({
   onClose: () => void;
 }) {
   const [pick, setPick] = useState(0);
-  const box = useRef<HTMLDivElement>(null);
-  useEffect(() => { box.current?.focus(); }, []);
+  const [query, setQuery] = useState("");
+  const filterRef = useRef<HTMLInputElement>(null);
+  const selectedRef = useRef<HTMLDivElement>(null);
+  const search = query.trim().toLowerCase();
+  const matches = tables.filter((table) =>
+    table.code.toLowerCase().includes(search) || shownTableNo(table).toLowerCase().includes(search));
+  const selected = Math.min(pick, Math.max(0, matches.length - 1));
+
+  useEffect(() => { filterRef.current?.focus(); }, []);
+  useEffect(() => { selectedRef.current?.scrollIntoView({ block: "nearest" }); }, [selected, search]);
+
   useEffect(() => {
     function keys(e: KeyboardEvent) {
       const f11 = e.key === "F11" || e.code === "F11" || e.keyCode === 122;
-      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onClose(); }
-      if (e.key === "ArrowDown") { e.preventDefault(); setPick((p) => Math.min(tables.length - 1, p + 1)); }
-      if (e.key === "ArrowUp") { e.preventDefault(); setPick((p) => Math.max(0, p - 1)); }
-      if (e.key === "Enter" || f11) {
+      if (e.key === "Escape") {
         e.preventDefault();
-        e.stopPropagation();
-        const t = tables[pick];
-        if (t) onPick(t);
+        e.stopImmediatePropagation();
+        onClose();
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setPick(Math.max(0, Math.min(matches.length - 1, selected + (e.key === "ArrowDown" ? 1 : -1))));
+      } else if (e.key === "Enter" || (f11 && title === "Settlement")) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const table = matches[selected];
+        if (table && !e.repeat) onPick(table);
       }
     }
     window.addEventListener("keydown", keys, true);
     return () => window.removeEventListener("keydown", keys, true);
-  }, [pick, tables, onPick, onClose]);
+  });
 
   return (
-    <div className="prep-pick" role="listbox" ref={box} tabIndex={-1}>
+    <div className="prep-pick">
       <div className="prep-pick-cap">
         {title}
         <CapClose onClose={onClose} />
       </div>
-      {tables.map((t, i) => (
-        <div
-          key={t.id}
-          className={`prep-pick-row ${i === pick ? "on" : ""}`}
-          onMouseEnter={() => setPick(i)}
-          onClick={() => onPick(t)}
-        >
-          {shownTableNo(t)}
-        </div>
-      ))}
+      <input ref={filterRef} className="win prep-pick-filter" aria-label="Filter tables"
+        placeholder="Filter tables" data-cycle="ud" value={query} onChange={(e) => {
+          setQuery(e.target.value);
+          setPick(0);
+        }} />
+      <div className="prep-pick-list" role="listbox" aria-label={`${title} tables`}>
+        {matches.map((table, index) => (
+          <div key={table.id} ref={index === selected ? selectedRef : undefined}
+            role="option" aria-selected={index === selected}
+            className={`prep-pick-row ${index === selected ? "on" : ""}`}
+            onMouseEnter={() => setPick(index)} onClick={() => onPick(table)}>
+            {shownTableNo(table)}
+          </div>
+        ))}
+        {!matches.length && <div className="prep-pick-row" role="status">No matching tables</div>}
+      </div>
     </div>
   );
 }
@@ -1617,12 +1637,11 @@ export function SettleDialog({
   const warnBack = useRef<"amount" | "mode" | "bank" | "card" | "save">("amount");
   const amtRef = useRef<HTMLInputElement>(null);
   const payCardRef = useRef<HTMLInputElement>(null);
-  const bankRef = useRef<HTMLInputElement>(null);
-  const modeRef = useRef<HTMLInputElement>(null);
+  const bankRef = useRef<HTMLSelectElement>(null);
+  const modeRef = useRef<HTMLSelectElement>(null);
   const saveBtnRef = useRef<HTMLButtonElement>(null);
   const cardDropRef = useRef<HTMLDivElement>(null);
   const methodRef = useRef<PaymentMode>("CASH");
-  const bankValueRef = useRef(BANK_NAMES[0]);
   const busy = useRef(false);
   const cardListOpenRef = useRef(false);
   const cardPickRef = useRef(0);
@@ -1665,25 +1684,7 @@ export function SettleDialog({
   function chooseMode(next: PaymentMode) {
     methodRef.current = next;
     setMethod(next);
-    if (next === "CARD" && !BANK_NAMES.includes(bankValueRef.current)) {
-      bankValueRef.current = BANK_NAMES[0];
-      setBankName(BANK_NAMES[0]);
-    }
     if (next !== "MEMBER_CARD") setPayBal("");
-  }
-
-  function stepMode(dir: 1 | -1) {
-    const i = PAY_MODES.findIndex((m) => m.id === methodRef.current);
-    const next = PAY_MODES[Math.max(0, Math.min(PAY_MODES.length - 1, (i < 0 ? 0 : i) + dir))];
-    if (next) chooseMode(next.id);
-  }
-
-  function stepBank(dir: 1 | -1) {
-    const i = Math.max(0, BANK_NAMES.indexOf(bankValueRef.current));
-    const next = BANK_NAMES[Math.max(0, Math.min(BANK_NAMES.length - 1, i + dir))];
-    if (!next || next === bankValueRef.current) return;
-    bankValueRef.current = next;
-    setBankName(next);
   }
 
   function afterMode() {
@@ -1705,11 +1706,15 @@ export function SettleDialog({
     const data = await api.get<any>(`/api/invoices/${invoiceId}`);
     setSnap(data);
     setAmount(rupee(dueOf(data)));
-    setTimeout(() => { amtRef.current?.focus(); amtRef.current?.select(); }, 0);
     return data;
   }
 
   useEffect(() => { load().catch((e) => onMessage(e.message)); }, [invoiceId]);
+
+  useLayoutEffect(() => {
+    amtRef.current?.focus();
+    amtRef.current?.select();
+  }, [snap]);
 
   const holdExcept = outlet === "THE BOSS CLUB" ? String(snap?.invoice?.order_id || "") : "";
 
@@ -1797,20 +1802,19 @@ export function SettleDialog({
       if (e.key === "F2") { e.preventDefault(); e.stopImmediatePropagation(); void save(); return; }
       if (e.key === "F4") { e.preventDefault(); e.stopImmediatePropagation(); onClose(); return; }
       const active = document.activeElement;
+      if (active === modeRef.current && /^[a-z]$/i.test(e.key)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const choice = PAY_MODES.find((mode) => mode.label.toLowerCase().startsWith(e.key.toLowerCase()));
+        if (choice) chooseMode(choice.id);
+        return;
+      }
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         const dir = e.key === "ArrowDown" ? 1 : -1;
         if (active === payCardRef.current && cardMatchesRef.current.length) {
           e.preventDefault();
           e.stopImmediatePropagation();
           moveCardPick(dir);
-        } else if (active === modeRef.current) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          stepMode(dir);
-        } else if (active === bankRef.current) {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          stepBank(dir);
         }
         return;
       }
@@ -1911,9 +1915,7 @@ export function SettleDialog({
       setSnap(result);
       setAmount(rupee(dueOf(result)));
       chooseMode(PAY_MODES[0].id);
-      bankValueRef.current = BANK_NAMES[0];
       setBankName(BANK_NAMES[0]);
-      setTimeout(() => { amtRef.current?.focus(); amtRef.current?.select(); }, 0);
     } catch (e) {
       showWarn(insufficientCard(e), method === "MEMBER_CARD" ? "amount" : "save");
     } finally {
@@ -1971,17 +1973,10 @@ export function SettleDialog({
               <td><input className="win num" readOnly tabIndex={-1} value={rupee(inv?.discount ?? 0)} /></td>
               <td className="lbl">Payment Mode :</td>
               <td>
-                <span className="st-drop">
-                  <input
-                    ref={modeRef}
-                    className="win"
-                    readOnly
-                    tabIndex={2}
-                    data-cycle="1"
-                    value={PAY_MODES.find((m) => m.id === method)?.label ?? "Cash"}
-                  />
-                  <span className="st-drop-btn" aria-hidden="true" />
-                </span>
+                <select ref={modeRef} className="win" tabIndex={2} value={method}
+                  onChange={(e) => chooseMode(e.target.value as PaymentMode)}>
+                  {PAY_MODES.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
+                </select>
               </td>
             </tr>
             {method === "CARD" && (
@@ -1989,17 +1984,11 @@ export function SettleDialog({
                 <td /><td />
                 <td className="lbl">Bank Name :</td>
                 <td>
-                  <span className="st-drop">
-                    <input
-                      ref={bankRef}
-                      className="win"
-                      readOnly
-                      tabIndex={3}
-                      data-cycle="1"
-                      value={bankName}
-                    />
-                    <span className="st-drop-btn" aria-hidden="true" />
-                  </span>
+                  <select ref={bankRef} className="win" aria-label="Bank Name" tabIndex={3} value={bankName}
+                    onChange={(e) => setBankName(e.target.value)}
+                    onKeyDown={(e) => selectByFirstLetter(e, setBankName)}>
+                    {BANK_NAMES.map((name) => <option key={name}>{name}</option>)}
+                  </select>
                 </td>
               </tr>
             )}
@@ -2083,7 +2072,6 @@ export function SettleDialog({
                   className="win green num"
                   data-num="dec"
                   tabIndex={1}
-                  autoFocus
                   value={amount}
                   onChange={(e) => setAmount(numText(e.target.value))}
                   onFocus={(e) => e.currentTarget.select()}
@@ -2372,7 +2360,7 @@ export function TransferDialog({
   outlet: string;
   currentCode: string;
   onClose: () => void;
-  onDone: (fromCode: string, to: Table) => void;
+  onDone: (fromCode: string, to: Table, printError?: string) => void;
   onMessage: (m: string) => void;
 }) {
   /** Destination outlet (New Table). Source table is found across all outlets. */
@@ -2559,8 +2547,8 @@ export function TransferDialog({
         onMessage("Cannot transfer a table to itself");
         return;
       }
-      await api.post("/api/tables/transfer", { fromTableId: from.id, toTableId: to.id, reason: why });
-      onDone(from.code, to);
+      const result = await api.post<{ printError?: string }>("/api/tables/transfer", { fromTableId: from.id, toTableId: to.id, reason: why });
+      onDone(from.code, to, result.printError);
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Transfer failed");
     }

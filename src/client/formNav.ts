@@ -1,3 +1,25 @@
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+
+const lastSelectInitial = new WeakMap<HTMLSelectElement, string>();
+
+export function selectByFirstLetter(e: ReactKeyboardEvent<HTMLSelectElement>, onSelect: (value: string) => void) {
+  if (e.altKey || e.ctrlKey || e.metaKey || !/^[a-z]$/i.test(e.key)) return;
+  e.preventDefault();
+  if (e.repeat) return;
+  const select = e.currentTarget;
+  const initial = e.key.toLowerCase();
+  const previous = lastSelectInitial.get(select);
+  if (previous === undefined) {
+    select.addEventListener("blur", () => { lastSelectInitial.delete(select); }, { once: true });
+  }
+  lastSelectInitial.set(select, initial);
+  const matches = Array.from(select.options).filter((item) =>
+    !item.disabled && item.text.trim().toLowerCase().startsWith(initial));
+  if (!matches.length) return;
+  const current = previous === initial ? matches.findIndex((item) => item.selected) : -1;
+  onSelect(matches[(current + 1) % matches.length].value);
+}
+
 type ArrowDir = "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown";
 
 const FORM_ROOT = ".dialog, .xfer-dlg, .item-xfer-dlg, .im-dlg, .su-dlg, .kot-add-dlg, .adv-form, .set-filter, .rpt-bar, .login-dlg, .login-box, .um-screen";

@@ -60,6 +60,7 @@ export async function printHtmlToQueue(
       cwd: root,
       env: { ...env, POS_PRINT_HTML: "1" },
       windowsHide: true,
+      timeout: 35_000,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let out = "";
@@ -77,14 +78,14 @@ export async function printHtmlToQueue(
       }
       resolve({ ok: false, error: err.message });
     });
-    child.on("exit", (code) => {
+    child.on("close", (code, signal) => {
       try {
         fs.unlinkSync(tmp);
       } catch {
         /* ignore */
       }
       if (code === 0) resolve({ ok: true });
-      else resolve({ ok: false, error: out.trim() || `print exit ${code}` });
+      else resolve({ ok: false, error: out.trim() || (signal ? "Printing stopped before confirmation" : `print exit ${code}`) });
     });
   });
 }

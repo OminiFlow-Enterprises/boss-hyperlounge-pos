@@ -1,4 +1,5 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
 import cors from "cors";
 import type Database from "better-sqlite3";
@@ -10,6 +11,7 @@ import { AppError } from "../lib/errors.js";
 import { createBackgroundReports } from "./backgroundReports.js";
 import type { AppContext } from "../lib/context.js";
 import { createHardware, type HardwareBus } from "../hardware/index.js";
+import { getKotPrintJob } from "../services/kotPrintQueue.js";
 import * as cards from "../services/cardService.js";
 import * as tables from "../services/tableService.js";
 import * as orders from "../services/orderService.js";
@@ -34,6 +36,7 @@ export interface CreateAppOptions {
   db: Database.Database;
   hardware?: HardwareBus;
   online?: boolean;
+  queuePrinting?: boolean;
 }
 
 function billToUpdate(ctx: AppContext, orderId: string, invoiceId?: string) {
@@ -124,8 +127,29 @@ export function createApp(options: CreateAppOptions) {
   app.use(express.json({ limit: "1mb" }));
 
   const hardware = options.hardware ?? createHardware();
-  let currentActor: Actor | null = null;
+  const sessionCookie = "boss_pos_session";
+  const sessionIdleMs = 24 * 60 * 60 * 1000;
+  const sessions = new Map<string, { actor: Actor; expiresAt: number }>();
+  const cookieOptions = { httpOnly: true, sameSite: "lax" as const, path: "/api" };
   let online = options.online ?? true;
+
+  function sessionId(req: Request) {
+    return req.headers.cookie?.split(";").map((part) => part.trim())
+      .find((part) => part.startsWith(`${sessionCookie}=`))?.slice(sessionCookie.length + 1) ?? "";
+  }
+
+  function sessionActor(req: Request) {
+    const id = sessionId(req);
+    const session = sessions.get(id);
+    if (!session) return undefined;
+    const now = Date.now();
+    if (session.expiresAt <= now) {
+      sessions.delete(id);
+      return undefined;
+    }
+    session.expiresAt = now + sessionIdleMs;
+    return session.actor;
+  }
 
   const guestActor = (): Actor => {
     const first = options.db.prepare("SELECT * FROM staff WHERE username='cashier'").get() as
@@ -141,12 +165,14 @@ export function createApp(options: CreateAppOptions) {
     };
   };
 
-  app.use((req, _res, next) => {
+  app.use((req, res, next) => {
+    if (req.path.startsWith("/api/")) res.set("Cache-Control", "no-store");
     req.ctx = {
       db: options.db,
-      actor: currentActor ?? guestActor(),
+      actor: sessionActor(req) ?? guestActor(),
       hardware,
       online,
+      officeTerminal: req.socket.remoteAddress?.replace(/^::ffff:/i, "") === (process.env.POS_OFFICE_TERMINAL_IP?.trim() || "192.168.1.21"),
     };
     next();
   });
@@ -187,9 +213,9 @@ export function createApp(options: CreateAppOptions) {
     const route = req.path.replace(/\/$/, "");
     const denied = () => new AppError("Permission denied for Advance users", 403, "PERMISSION_DENIED");
     const body = req.body ?? {};
-    const outletFor = (sql: string, id: unknown) => {
+    const outletFor = (sql: string, id: unknown, ...additionalParams: string[]) => {
       if (typeof id !== "string") throw denied();
-      const row = req.ctx.db.prepare(sql).get(id) as { outlet?: string } | undefined;
+      const row = req.ctx.db.prepare(sql).get(id, ...additionalParams) as { outlet?: string } | undefined;
       if (!row || !isAdvanceOutlet(row.outlet || "BAR")) throw denied();
     };
     const checkTable = (id: unknown) => outletFor("SELECT outlet FROM dining_tables WHERE id = ?", id);
@@ -202,8 +228,8 @@ export function createApp(options: CreateAppOptions) {
     const checkPayment = (id: unknown) => outletFor(
       "SELECT t.outlet FROM payments p JOIN invoices i ON i.id = p.invoice_id JOIN dining_tables t ON t.id = i.table_id WHERE p.id = ?", id,
     );
-    const checkKot = (id: unknown) => outletFor(
-      "SELECT t.outlet FROM kots k JOIN dining_tables t ON t.id = k.table_id WHERE k.id = ?1 OR k.kot_number = ?1", id,
+    const checkKot = (id: string) => outletFor(
+      "SELECT t.outlet FROM kots k JOIN dining_tables t ON t.id = k.table_id WHERE k.id = ? OR k.kot_number = ?", id, id,
     );
     if ((body.outlet != null && !isAdvanceOutlet(body.outlet)) ||
         (body.billDetails?.outlet != null && !isAdvanceOutlet(body.billDetails.outlet)) ||
@@ -295,6 +321,10 @@ export function createApp(options: CreateAppOptions) {
   };
 
   app.use((req, _res, next) => {
+    if (req.ctx.actor.staffId === "anonymous" && req.method === "POST" &&
+        /^\/api\/(?:tables|orders|order-items|invoices)(?:\/|$)/i.test(req.path)) {
+      throw new AppError("Please sign in again before punching items or billing.", 401, "SESSION_REQUIRED");
+    }
     const reportRoute = /^\/api\/reports\/([^/]+)/i.exec(req.path)?.[1].toLowerCase();
     const reportRights = reportRoute && Object.hasOwn(reportRouteRights, reportRoute) ? reportRouteRights[reportRoute] : undefined;
     if (reportRights && !reportRights.some((right) => rightOn(req.ctx.actor.rights, right))) {
@@ -306,6 +336,8 @@ export function createApp(options: CreateAppOptions) {
         (req.method !== "GET" && /^\/api\/(?:complimentary|bonus-rules)(?:\/|$)/.test(route));
       if (master) throw new AppError("Cashier users cannot access Master", 403, "PERMISSION_DENIED");
     }
+    // Only the originating terminal receives the randomly generated print job ID.
+    if (req.method === "POST" && /^\/api\/kot-print-jobs\/[0-9a-f-]{36}\/?$/i.test(req.path)) return next();
     if (req.ctx.actor.userGroup === "ADVANCE" && /^\/api(?:\/|$)/i.test(req.path)) {
       assertAdvanceAccess(req);
       return next();
@@ -323,10 +355,11 @@ export function createApp(options: CreateAppOptions) {
       ).get(decodeURIComponent(kotDetail[1]))) return next();
     }
     const allowedRead = req.method === "GET" && (
-      ["/api/bootstrap", "/api/tables", "/api/session"].includes(route) || /^\/api\/orders\/[^/]+$/.test(route)
+      ["/api/bootstrap", "/api/tables", "/api/session"].includes(route) ||
+      /^\/api\/orders\/[^/]+$/.test(route) || /^\/api\/tables\/[^/]+\/items$/.test(route)
     );
     const allowedWrite = req.method === "POST" && (
-      ["/api/auth/logout", "/api/auth/login", "/api/auth/change-password", "/api/orders"].includes(route)
+      ["/api/auth/logout", "/api/auth/login", "/api/auth/change-password", "/api/orders", "/api/tables"].includes(route)
       || /^\/api\/tables\/[^/]+\/open$/.test(route)
       || /^\/api\/orders\/[^/]+\/(items|send-kot|estimate)$/.test(route)
       || /^\/api\/order-items\/[^/]+\/cancel$/.test(route)
@@ -344,13 +377,21 @@ export function createApp(options: CreateAppOptions) {
         req.body.password ?? req.body.pin,
         req.body.terminalId ?? req.ctx.actor.terminalId,
       );
-      currentActor = actor;
+      const now = Date.now();
+      for (const [id, session] of sessions) {
+        if (session.expiresAt <= now) sessions.delete(id);
+      }
+      sessions.delete(sessionId(req));
+      const id = randomUUID();
+      sessions.set(id, { actor, expiresAt: now + sessionIdleMs });
+      res.cookie(sessionCookie, id, { ...cookieOptions, secure: req.secure });
       res.json(actor);
     }),
   );
 
-  app.post("/api/auth/logout", (_req, res) => {
-    currentActor = null;
+  app.post("/api/auth/logout", (req, res) => {
+    sessions.delete(sessionId(req));
+    res.clearCookie(sessionCookie, { ...cookieOptions, secure: req.secure });
     res.json({ ok: true });
   });
 
@@ -480,7 +521,12 @@ export function createApp(options: CreateAppOptions) {
 
   app.get("/api/floors", wrap((req, res) => res.json(tables.listFloors(req.ctx))));
   app.get("/api/tables", wrap((req, res) => res.json(tables.listTables(req.ctx))));
-  app.post("/api/tables", wrap((req, res) => res.json(tables.createTable(req.ctx, req.body ?? {}))));
+  app.post("/api/tables", wrap((req, res) => {
+    const body = req.body ?? {};
+    if (!isBarOrderOnly(req.ctx.actor.rights)) return res.json(tables.createTable(req.ctx, body));
+    if (body.outlet != null && body.outlet !== "BAR") throw new AppError("Permission denied: Bar orders only", 403);
+    return res.json(tables.createTable(req.ctx, { code: body.code, outlet: "BAR" }));
+  }));
   app.get("/api/tables/waiter", wrap((req, res) => res.json(tables.waiterTables(req.ctx, req.ctx.actor.staffId))));
   app.post("/api/tables/:id/open", wrap((req, res) => {
     if (isBarOrderOnly(req.ctx.actor.rights)) {
@@ -496,8 +542,8 @@ export function createApp(options: CreateAppOptions) {
     res.json(tables.checkIn(req.ctx, { tableId: req.params.id, ...req.body }));
   }));
   app.post("/api/tables/:id/request-bill", wrap((req, res) => res.json(tables.requestBill(req.ctx, req.params.id))));
-  app.post("/api/tables/transfer", wrap((req, res) => {
-    res.json(tables.transferTable(req.ctx, req.body.fromTableId, req.body.toTableId, req.body.reason));
+  app.post("/api/tables/transfer", wrap(async (req, res) => {
+    res.json(await tables.transferTableAndPrint(req.ctx, req.body.fromTableId, req.body.toTableId, req.body.reason));
   }));
   app.get("/api/tables/:id/items", wrap((req, res) => res.json(tables.listTableItems(req.ctx, req.params.id))));
   app.post("/api/tables/item-transfer", wrap((req, res) => {
@@ -576,7 +622,13 @@ export function createApp(options: CreateAppOptions) {
     const remark = typeof req.body?.remark === "string" ? req.body.remark : undefined;
     const steward = typeof req.body?.steward === "string" ? req.body.steward : undefined;
     const cardNumber = !barOnly && typeof req.body?.cardNumber === "string" ? req.body.cardNumber : undefined;
-    res.json(await orders.sendKot(req.ctx, req.params.id, { remark, steward, cardNumber }));
+    res.json(await orders.sendKot(req.ctx, req.params.id, {
+      remark, steward, cardNumber, queuePrinting: options.queuePrinting !== false,
+    }));
+  }));
+  app.post("/api/kot-print-jobs/:id", wrap((req, res) => {
+    if (options.queuePrinting === false) throw new AppError("Print job not found", 404);
+    res.json(getKotPrintJob(req.ctx.db, req.params.id, req.body?.action, req.body?.error, req.ctx.officeTerminal));
   }));
   app.post("/api/order-items/:id/qty", wrap((req, res) => {
     res.json(orders.modifyItemQty(req.ctx, req.params.id, Number(req.body.qty)));
@@ -743,17 +795,17 @@ export function createApp(options: CreateAppOptions) {
   app.delete("/api/staff/:id", wrap((req, res) => res.json(staff.deleteStaff(req.ctx, req.params.id))));
 
   app.put("/api/settings/master-pin", wrap((req, res) => {
-    if (!isAdminActor(currentActor)) throw new AppError("Only Admin users can change the master PIN", 403);
+    if (!isAdminActor(sessionActor(req))) throw new AppError("Only Admin users can change the master PIN", 403);
     settings.changeMasterPin(req.ctx, req.body?.currentPin, req.body?.newPin);
     res.json({ ok: true });
   }));
   app.get("/api/settings/group-reports/:group", wrap((req, res) => {
-    if (!isAdminActor(currentActor)) throw new AppError("Only Admin users can edit group report permissions", 403);
+    if (!isAdminActor(sessionActor(req))) throw new AppError("Only Admin users can edit group report permissions", 403);
     if (!isUserRoleLabel(req.params.group)) throw new AppError("Select a user group");
     res.json(settings.getGroupReports(req.ctx, req.params.group));
   }));
   app.put("/api/settings/group-reports/:group", wrap((req, res) => {
-    if (!isAdminActor(currentActor)) throw new AppError("Only Admin users can edit group report permissions", 403);
+    if (!isAdminActor(sessionActor(req))) throw new AppError("Only Admin users can edit group report permissions", 403);
     if (!isUserRoleLabel(req.params.group)) throw new AppError("Select a user group");
     res.json(settings.updateGroupReports(req.ctx, req.params.group, req.body));
   }));

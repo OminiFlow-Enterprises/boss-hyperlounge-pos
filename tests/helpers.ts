@@ -4,6 +4,21 @@ import { createHardware } from "../src/server/hardware/index.js";
 import type { AppContext } from "../src/server/lib/context.js";
 import type { Actor, StaffRole } from "../src/shared/types.js";
 
+export function createApiClient(port: number) {
+  let cookie = "";
+  return async (route: string, body?: object, method = body ? "POST" : "GET") => {
+    const headers = new Headers();
+    if (body) headers.set("Content-Type", "application/json");
+    if (cookie) headers.set("Cookie", cookie);
+    const response = await fetch(`http://127.0.0.1:${port}/api/${route}`, {
+      method, headers, body: body ? JSON.stringify(body) : undefined,
+    });
+    const session = response.headers.get("Set-Cookie");
+    if (session) cookie = session.split(";", 1)[0];
+    return response;
+  };
+}
+
 export function createTestApp() {
   const db = openDatabase({ memory: true });
   const seeded = seedFresh(db);

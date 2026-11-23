@@ -127,6 +127,8 @@ export interface HardwareBus {
   receipt: IPrinter;
   kitchen: IPrinter;
   bar: IPrinter;
+  cafeBar: IPrinter;
+  office?: IPrinter;
   drawer: ICashDrawer;
   display: ICustomerDisplay;
 }
@@ -140,24 +142,25 @@ export function createHardware(options?: { memory?: boolean }): HardwareBus {
       receipt: new MemoryPrinter("RECEIPT"),
       kitchen: new MemoryPrinter("KITCHEN"),
       bar: new MemoryPrinter("BAR"),
+      cafeBar: new MemoryPrinter("CAFE BAR"),
+      office: new MemoryPrinter("OFFICE"),
       drawer: new MemoryCashDrawer(),
       display: new MemoryCustomerDisplay(),
     };
   }
-  // Testing lock: all KOT + receipt go to bill (192.168.1.56) until user asks to update.
-  const bill = new TcpEscPosPrinter(POS_PRINTERS.bill.name, POS_PRINTERS.bill.host, POS_PRINTERS.bill.port);
+  const printer = ({ name, host, port }: (typeof POS_PRINTERS)[keyof typeof POS_PRINTERS]) =>
+    new TcpEscPosPrinter(name, host, port);
+  const officeQueue = process.env.POS_OFFICE_PRINTER_QUEUE?.trim();
   return {
     rfid: new MemoryCardReader(),
     nfc: new MemoryCardReader(),
     barcode: new MemoryBarcodeScanner(),
-    receipt: bill,
-    kitchen: bill,
-    bar: bill,
+    receipt: printer(POS_PRINTERS.bill),
+    kitchen: printer(POS_PRINTERS.kitchen),
+    bar: printer(POS_PRINTERS.bar),
+    cafeBar: printer(POS_PRINTERS.cafeBar),
+    office: officeQueue ? new TcpEscPosPrinter(officeQueue, "localhost") : undefined,
     drawer: new MemoryCashDrawer(),
     display: new MemoryCustomerDisplay(),
   };
-}
-
-export function printerForStation(hw: HardwareBus, station: "KITCHEN" | "BAR"): IPrinter {
-  return station === "BAR" ? hw.bar : hw.kitchen;
 }

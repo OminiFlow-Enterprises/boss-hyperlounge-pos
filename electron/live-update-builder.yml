@@ -1,0 +1,25 @@
+appId: com.theboss.pos
+productName: THE BOSS POS
+asar: false
+npmRebuild: false
+directories:
+  output: release/live-update/server
+files:
+  - dist/**/*
+  - "!dist/server/db/schema.sql"
+  - electron/**/*
+  - package.json
+extraResources: []
+extraMetadata:
+  posExistingDbOnly: true
+win:
+  target: nsis
+  icon: electron/app-icon.ico
+  signExecutable: false
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+  perMachine: false

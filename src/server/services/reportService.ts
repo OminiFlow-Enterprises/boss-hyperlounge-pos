@@ -1,5 +1,6 @@
 import { assertPermission } from "../../shared/permissions.js";
 import { formatTableNo } from "../../shared/tableLabel.js";
+import { businessDateRange as dateRange } from "../../shared/businessDate.js";
 import type { AppContext } from "../lib/context.js";
 import { AppError } from "../lib/errors.js";
 import { nextSequence, nowIso, todayDate, uuid } from "../lib/ids.js";
@@ -8,7 +9,7 @@ import { buildBillTotalLines, type BillTotalLine } from "../hardware/billTotals.
 import * as cards from "./cardService.js";
 
 function dayRange(date = todayDate()) {
-  return { from: `${date}T00:00:00.000Z`, to: `${date}T23:59:59.999Z` };
+  return dateRange(date, date);
 }
 
 export function ownerDashboard(ctx: AppContext, date = todayDate()) {
@@ -187,12 +188,6 @@ function stampClubTable<T extends Record<string, unknown>>(row: T): T {
   const label = formatTableNo(code, card, outlet);
   if (label === code) return row;
   return { ...row, table_label: label, table_no: label } as T;
-}
-
-function dateRange(from?: string, to?: string) {
-  const start = from || todayDate();
-  const end = to || start;
-  return { from: `${start}T00:00:00.000Z`, to: `${end}T23:59:59.999Z`, start, end };
 }
 
 export function itemWiseSales(ctx: AppContext, from?: string, to?: string) {
@@ -622,7 +617,7 @@ export function settlementReport(
 ) {
   assertPermission(ctx.actor.role, "VIEW_REPORTS");
   const range = dateRange(from, to);
-  const where = ["p.created_at BETWEEN ? AND ?", "COALESCE(i.complimentary_account_id, '') = ''"];
+  const where = ["p.created_at BETWEEN ? AND ?", "p.amount <> 0", "COALESCE(i.complimentary_account_id, '') = ''"];
   const args: Array<string | number> = [range.from, range.to];
   if (outlet) {
     where.push("COALESCE(t.outlet, 'BAR') = ?");

@@ -41,6 +41,7 @@ async function printWindowsKot(win) {
     await run("powershell.exe", [
       "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64"),
     ], {
+      timeout: 20_000,
       windowsHide: true,
       env: {
         ...process.env,

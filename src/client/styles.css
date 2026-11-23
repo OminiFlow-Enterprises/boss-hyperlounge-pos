@@ -297,6 +297,7 @@ label.chk input { width: 13px; height: 13px; margin: 0; }
 .bar-order-grid .igrid-row:not(.entry, .editing) > div { height: 22px; }
 .bar-order-grid .igrid-row:not(.entry, .editing) > div { line-height: 18px; }
 .bar-order-grid .igrid-row:not(.entry) :is(.cell-name, .cell-qty) { font-weight: 700; }
+.no-item-rates :is(.igrid-head, .igrid-row) { grid-template-columns: 58px minmax(0, 1fr) 78px; }
 .igrid-row.entry .cell-name,
 .igrid-row.editing .cell-name {
   overflow: visible;
@@ -452,21 +453,20 @@ button.dept-btn:focus-visible {
 .estimate col.c2 { width: 72px; }
 .estimate col.c-code { width: 72px; }
 .estimate col.c-qty { width: 36px; }
-.estimate.item-list th { background: var(--face); }
-.estimate.item-list td {
+.estimate .table-item-summary td {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.estimate.item-list td:nth-child(2) { text-align: left; }
-.estimate.item-list td.qty {
+.estimate .table-item-summary td:nth-child(2) { text-align: left; }
+.estimate .table-item-summary td.qty {
   background: var(--pink);
   color: var(--red);
   text-align: right;
 }
-.estimate.item-list tr.on td { background: var(--blue); color: #fff; }
-.estimate.item-list tr.on td.qty { background: var(--blue); color: #fff; }
-.estimate:not(.item-list) th {
+.estimate .table-item-summary tr.on td { background: var(--blue); color: #fff; }
+.estimate .table-item-summary tr.on td.qty { background: var(--blue); color: #fff; }
+.estimate th {
   background: #0078d7;
   color: #fff;
   border: 1px solid #0078d7;
@@ -474,7 +474,7 @@ button.dept-btn:focus-visible {
   text-align: left;
   padding: 2px 4px;
 }
-.estimate.item-list th {
+.estimate .table-item-summary th {
   background: var(--face);
   color: #000;
   border: 1px solid #c0c0c0;
@@ -503,9 +503,9 @@ button.dept-btn:focus-visible {
   cursor: default;
 }
 .estimate button.est-amt:focus { outline: 1px dotted #000; background: transparent; }
-.estimate:not(.item-list) tbody tr.occ:nth-child(odd) td { background: #fff; color: #000; font-weight: 700; }
-.estimate:not(.item-list) tbody tr.occ:nth-child(even) td { background: #ffc0cb; color: #000; font-weight: 700; }
-.estimate:not(.item-list) tbody tr.occ td.bill { color: #0000ff; }
+.estimate tbody tr.occ:nth-child(odd) td { background: #fff; color: #000; font-weight: 700; }
+.estimate tbody tr.occ:nth-child(even) td { background: #ffc0cb; color: #000; font-weight: 700; }
+.estimate tbody tr.occ td.bill { color: #0000ff; }
 .estimate tr.settle td { background: #90ee90; color: #000; font-weight: 700; }
 .estimate tr:focus { outline: 1px dotted #000; }
 .estimate-fill { flex: 1; background: #f7f7f7; }
@@ -1231,6 +1231,8 @@ table.data tr.grp td { background: #ffc0cb; font-weight: 700; }
   font-weight: 700;
 }
 .prep-pick-cap .cap-x { margin-left: auto; }
+.prep-pick-filter { box-sizing: border-box; width: calc(100% - 12px); margin: 4px 6px; }
+.prep-pick-list { max-height: min(300px, calc(100vh - 220px)); overflow-y: auto; }
 .prep-pick-row { padding: 1px 8px; height: 18px; }
 .prep-pick-row.on { background: var(--blue); color: #fff; }
 

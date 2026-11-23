@@ -1,6 +1,6 @@
 {
   "name": "boss-hyperlounge-pos",
-  "version": "1.0.1",
+  "version": "1.0.5",
   "description": "BOSS Hyperlounge club/lounge POS — member cards, tables, KOT, billing, offline-first",
   "private": true,
   "type": "module",
@@ -81,6 +81,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
       "perMachine": false
     }
   }

@@ -82,9 +82,11 @@ export interface KotPrintPayload {
   kotNumber: string;
   tableCode: string;
   waiter?: string;
-  station: "KITCHEN" | "BAR" | "BILL";
+  station: "KITCHEN" | "BAR" | "CAFE BAR" | "BILL" | "OFFICE" | "CONNECTED" | "OFFICE LOCAL";
   operatorName?: string;
   reprint: boolean;
+  customerCopy?: boolean;
+  tableTransfer?: { outlet: string; fromTable: string; toTable: string };
   /**
    * First KOT on a table/session → NEW ORDER.
    * Table already running (later KOTs / cancel) → RUNNING ORDER.

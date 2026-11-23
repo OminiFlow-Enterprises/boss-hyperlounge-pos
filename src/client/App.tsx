@@ -1,8 +1,10 @@
 import { formatUiLabel } from "./formatUiLabel";
-import { Component, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
-import { ignoreRepeatedPrintKey, reprintKot } from "./printActions";
+import { Component, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import { finishKotPrinting, ignoreRepeatedPrintKey, reprintKot, type KotPrintResponse } from "./printActions";
+import { trackKotPrintJobs, watchKotPrintJobs } from "./kotPrintJobs";
 import { api, ApiError } from "./api";
 import { formatINR } from "../shared/money";
+import { businessDayStart } from "../shared/businessDate";
 import { formatTableNo } from "../shared/tableLabel";
 import type { Actor, NavView, PaymentMode } from "../shared/types";
 import { ADVANCE_OUTLETS, isAdminActor, isAdvanceOutlet, isBarOrderOnly, outletRight, rightOn, viewRight } from "../shared/userRights";
@@ -224,13 +226,6 @@ function formatWinDate(d: Date) {
   return `${dd}-${months[d.getMonth()]}-${d.getFullYear()} ${hh}:${mm}:${ss} ${am}`;
 }
 
-function businessStartMs(at = new Date()) {
-  const d = new Date(at);
-  if (d.getHours() < 6) d.setDate(d.getDate() - 1);
-  d.setHours(6, 0, 0, 0);
-  return d.getTime();
-}
-
 const DROP_ROWS = 12;
 function visiblePicks<T>(list: T[], pick: number) {
   if (list.length <= DROP_ROWS) return list.map((p, i) => ({ p, i }));
@@ -268,6 +263,8 @@ export function App() {
   const [invoice, setInvoice] = useState<any>(null);
   const [alertText, setAlertText] = useState("");
   const alertAfterRef = useRef<(() => void) | null>(null);
+  const tableRefresh = useRef({ sequence: 0, pending: 0 });
+  const [tableConnectionLost, setTableConnectionLost] = useState(false);
 
   const barOnly = isBarOrderOnly(actor?.rights);
   const advance = actor?.userGroup === "ADVANCE";
@@ -287,17 +284,49 @@ export function App() {
     setSub(null);
   }
 
-  async function refreshTables() {
-    const rows = await api.get<Table[]>("/api/tables");
-    setBootstrap((prev: any) => (prev ? { ...prev, tables: rows } : prev));
-    return rows;
-  }
+  const refreshTables = useCallback(async (signal?: AbortSignal) => {
+    const refresh = tableRefresh.current;
+    const sequence = ++refresh.sequence;
+    refresh.pending++;
+    try {
+      const timeout = AbortSignal.timeout(10_000);
+      const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+      const rows = await api.get<Table[]>("/api/tables", requestSignal);
+      if (!requestSignal.aborted && sequence === refresh.sequence) {
+        setTableConnectionLost(false);
+        setBootstrap((prev: any) => (
+          prev && JSON.stringify(prev.tables) !== JSON.stringify(rows) ? { ...prev, tables: rows } : prev
+        ));
+      }
+      return rows;
+    } catch (error) {
+      if (!signal?.aborted && sequence === refresh.sequence) setTableConnectionLost(true);
+      throw error;
+    } finally {
+      refresh.pending--;
+    }
+  }, []);
 
   useEffect(() => {
-    if (!barOnly) return;
-    const timer = window.setInterval(() => { void refreshTables().catch(() => null); }, 5000);
-    return () => window.clearInterval(timer);
-  }, [barOnly]);
+    if (!signedIn || view !== "billing") return;
+    const controller = new AbortController();
+    function refreshVisibleTables() {
+      if (tableRefresh.current.pending) return;
+      void refreshTables(controller.signal).catch(() => null);
+    }
+    const timer = window.setInterval(refreshVisibleTables, 5000);
+    document.addEventListener("visibilitychange", refreshVisibleTables);
+    window.addEventListener("focus", refreshVisibleTables);
+    window.addEventListener("online", refreshVisibleTables);
+    refreshVisibleTables();
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshVisibleTables);
+      window.removeEventListener("focus", refreshVisibleTables);
+      window.removeEventListener("online", refreshVisibleTables);
+    };
+  }, [signedIn, view, refreshTables]);
 
   useEffect(() => {
     const request = new AbortController();
@@ -320,6 +349,10 @@ export function App() {
     alertAfterRef.current = after ?? null;
     setAlertText(m.trim());
   }
+
+  useEffect(() => watchKotPrintJobs((message) => {
+    setAlertText((current) => current ? `${current}\n\n${message}` : message);
+  }), []);
 
   function closeAlert() {
     setAlertText("");
@@ -459,6 +492,9 @@ export function App() {
         {signedIn && (barOnly || rightOn(actor?.rights, "logout")) && (
           <button type="button" onClick={() => { void logout(); }}>Logout</button>
         )}
+        {signedIn && view === "billing" && tableConnectionLost && (
+          <span role="status">Reconnecting to POS server… Table list may be out of date.</span>
+        )}
         {menu && (
           <div className="menu-flyout" style={{ left: menuLeft }}>
             {menus.find((m) => m.id === menu)?.items.map((item) => (
@@ -527,9 +563,9 @@ export function App() {
 
       {signedIn && view !== "billing" && view !== "login" && view !== "user-master" && (
         <div className={`workarea ${["card-block","advance-booking","booking-report","item-wise-sale","item-wise-group","settlement-report","card-settlement-report","kot-report","bill-report","history","item-combine-stock","outlet-stock","time-sale","tax-wise"].includes(view) ? "plain" : ""}`}>
-          {view === "kot" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard /></div>}
-          {view === "kitchen" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="KITCHEN" /></div>}
-          {view === "bar" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="BAR" /></div>}
+          {view === "kot" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard onPrintError={notify} /></div>}
+          {view === "kitchen" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="KITCHEN" onPrintError={notify} /></div>}
+          {view === "bar" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="BAR" onPrintError={notify} /></div>}
           <ReportCrashBoundary key={view} onRecover={() => go("billing")}>
             <Suspense fallback={<div className="rpt-page" role="status">Loading report…</div>}>
               <ReportHost view={view as NavView} outlet={outlet} advance={advance} cashier={cashier} operator={barOnly} onExit={() => go("billing")} />
@@ -609,6 +645,9 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   const [billOrder, setBillOrder] = useState<{ orderId: string; table: Table } | null>(null);
   const [settleInv, setSettleInv] = useState<{ invoiceId: string; table: Table } | null>(null);
   const [settleTables, setSettleTables] = useState<Table[]>([]);
+  const [sidebarTableId, setSidebarTableId] = useState("");
+  const [sidebarDayStart, setSidebarDayStart] = useState(() => businessDayStart().getTime());
+  const [sidebarItems, setSidebarItems] = useState<{ tableId: string; rows: Array<{ sku: string; name: string; qty: number }> }>();
   const [askExit, setAskExit] = useState(false);
   const [xferOpen, setXferOpen] = useState(false);
   const [itemXferOpen, setItemXferOpen] = useState(false);
@@ -650,18 +689,48 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   const allItems: OrderItem[] = detail?.items ?? [];
   const servedItems: OrderItem[] = allItems.filter((it) => it.kot_id);
   const items: OrderItem[] = draftItems;
+  useEffect(() => {
+    let timer: number;
+    function updateDay() {
+      window.clearTimeout(timer);
+      const start = businessDayStart().getTime();
+      setSidebarDayStart(start);
+      timer = window.setTimeout(updateDay, start + 86_400_000 - Date.now());
+    }
+    updateDay();
+    window.addEventListener("focus", updateDay);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", updateDay);
+    };
+  }, []);
+  function isCurrentSidebarTable(t: Table) {
+    return Boolean(t.session_opened_at && Date.parse(t.session_opened_at) >= sidebarDayStart);
+  }
+  const sidebarTable = tables.find((t) => t.id === sidebarTableId && t.status !== "AVAILABLE" && isCurrentSidebarTable(t));
+  const sidebarItemTableId = sidebarTable?.id;
+  useEffect(() => {
+    if (!sidebarItemTableId) return;
+    const controller = new AbortController();
+    api.get<Array<{ sku: string; name: string; qty: number; kot_number: string }>>(
+      `/api/tables/${sidebarItemTableId}/items`, controller.signal,
+    ).then((rows) => {
+      if (!controller.signal.aborted) setSidebarItems({ tableId: sidebarItemTableId, rows: rows.filter((item) => item.kot_number) });
+    }).catch(() => null);
+    return () => controller.abort();
+  }, [sidebarItemTableId, tables]);
+
   const tableItemList = useMemo(() => {
     const map = new Map<string, { code: string; name: string; qty: number }>();
-    for (const it of (detail?.items ?? []) as OrderItem[]) {
-      if (!it.kot_id) continue;
-      const key = it.product_id || it.name;
-      const code = it.sku || products.find((p) => p.id === it.product_id)?.sku || "";
+    if (!sidebarItems || sidebarItems.tableId !== sidebarItemTableId) return [];
+    for (const it of sidebarItems.rows) {
+      const key = it.sku || it.name;
       const cur = map.get(key);
       if (cur) cur.qty += it.qty;
-      else map.set(key, { code, name: it.name, qty: it.qty });
+      else map.set(key, { code: it.sku, name: it.name, qty: it.qty });
     }
     return [...map.values()];
-  }, [detail, products]);
+  }, [sidebarItems, sidebarItemTableId]);
   const kotNo = String(detail?.kots?.[0]?.kot_number ?? "").replace(/\D/g, "");
 
   const catalog = useMemo(() => {
@@ -720,6 +789,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   async function selectTable(id: string, code?: string, cardOverride?: string) {
     setOrderId(null);
     setTableId(id);
+    setSidebarTableId(id);
     if (code) setTableCode(code);
     const t = tables.find((x) => x.id === id);
     const existingCard = (t?.card_number || "").trim();
@@ -773,6 +843,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setDetail(null);
     setDraftItems([]);
     setTableId("");
+    setSidebarTableId("");
     setTableCode("");
     setPending(null);
     setEditingId(null);
@@ -839,7 +910,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
 
   async function ensureOpenByCode(code: string) {
     const raw = code.trim();
-    const out = deptOutlet(dept);
+    const out = barOnly ? "BAR" : deptOutlet(dept);
     const known = tables.find((x) => x.code.toLowerCase() === raw.toLowerCase() && (x.outlet || "BAR") === out);
     const cardOnTable = (known?.card_number || "").trim();
     const running = Boolean(known && known.status !== "AVAILABLE");
@@ -859,11 +930,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       return current;
     }
     try {
-      let t = tables.find((x) => x.code.toLowerCase() === raw.toLowerCase() && (x.outlet || "BAR") === out);
-      if (!t && barOnly) {
-        onMessage("Select an existing Bar table");
-        return null;
-      }
+      let t = known;
       if (barOnly && t?.status === "PAYMENT_PENDING") {
         onMessage("Bill already printed");
         return null;
@@ -1376,13 +1443,16 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           outlet: deptOutlet(dept),
         });
       }
-      await api.post(`/api/orders/${id}/send-kot`, {
+      const tickets = await api.post<Array<{ printJobIds?: string[]; print?: KotPrintResponse }>>(`/api/orders/${id}/send-kot`, {
         remark: remark.trim() || undefined,
         steward: waiter.trim() || undefined,
         cardNumber: clubMode ? clubCard.trim() || undefined : undefined,
       });
+      trackKotPrintJobs(tickets.flatMap((ticket) => ticket.printJobIds ?? []));
       setDraftItems([]);
       goMainBilling();
+      const printError = await finishKotPrinting(tickets.flatMap((ticket) => ticket.print ? [ticket.print] : []));
+      if (printError) onMessage(printError);
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "KOT failed");
       await clearServerUnsent(id).catch(() => null);
@@ -1405,6 +1475,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setItemQuery("");
     setTyped("");
     setQtyStr("1");
+    setQtyInvalid(false);
     setRemark("");
     setPick(0);
     setItemListSel(0);
@@ -1412,6 +1483,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setDetail(null);
     setDraftItems([]);
     setTableId("");
+    setSidebarTableId("");
     setTableCode("");
     setClubCard("");
     setClubBalPaise(0);
@@ -1421,11 +1493,17 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setMobile("");
     setSel(-1);
     setEditingId(null);
-    onRefresh();
+    void onRefresh().catch(() => null);
     setTimeout(() => {
       if (dept === "CLUB") clubCardRef.current?.focus();
       else tableRef.current?.focus();
     }, 0);
+  }
+
+  function selectSidebarTable(table: Table) {
+    setSidebarTableId(table.id);
+    setItemListSel(0);
+    if (table.status !== "PAYMENT_PENDING") void ensureOpenByCode(table.code);
   }
 
   async function abandonPunch() {
@@ -1515,7 +1593,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   async function openSettlement() {
     setListOpen(false);
     const outlet = deptOutlet(dept);
-    const dayStart = businessStartMs();
+    const dayStart = businessDayStart().getTime();
     try {
       const rows = await api.get<Table[]>("/api/tables");
       const printedToday = rows.filter((t) => {
@@ -1586,7 +1664,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       const fn = e.code || e.key;
       const outletShortcut = (e.altKey && /^[1-4]$/.test(e.key)) ||
         (e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight"));
-      if (barOnly && (/^F\d+$/.test(fn) || isF10(e) || isF11(e) || outletShortcut || e.key === "Escape")) {
+      if (barOnly && (/^F\d+$/.test(fn) || isF10(e) || isF11(e) || outletShortcut)) {
         e.preventDefault();
         e.stopPropagation();
         if (fn === "F5" && !e.repeat) void printKot();
@@ -1659,6 +1737,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       if (pickOpen || billOrder || settleInv) return;
       if (e.key === "Escape") {
         e.preventDefault();
+        if (e.repeat) return;
         if (payOpen) setPayOpen(false);
         else requestExit();
       }
@@ -1695,14 +1774,13 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     };
   }, []);
 
-  const dayStartMs = businessStartMs();
   const occupied = tables.filter((t) => {
-    if ((t.outlet || "BAR") !== deptOutlet(dept)) return false;
-    if (t.status === "AVAILABLE") return false;
-    if (advance && t.status === "PAYMENT_PENDING") return true;
-    if (!(((t.running_total as number) || 0) > 0 || t.id === tableId)) return false;
-    if (t.session_opened_at && Date.parse(t.session_opened_at) < dayStartMs) return false;
-    return true;
+    if ((t.outlet || "BAR") !== (barOnly ? "BAR" : deptOutlet(dept))) return false;
+    if (t.status === "AVAILABLE" || !isCurrentSidebarTable(t)) return false;
+    if ((advance || barOnly) && t.status === "PAYMENT_PENDING") return true;
+    const hasRunningOrder = t.has_running_order ?? Number(t.running_total) > 0;
+    if (barOnly) return t.status !== "RESERVED" && hasRunningOrder;
+    return hasRunningOrder || t.id === tableId;
   });
   const estimateRows = occupied;
   const nameInput = (
@@ -1866,15 +1944,45 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     return () => { current = false; };
   }, [orderId, requestBody, estimateKey]);
 
-  const barTableRows = barOnly ? tables
-    .filter((t) => (t.outlet || "BAR") === "BAR" && (
-      t.status === "PAYMENT_PENDING" || (t.status !== "AVAILABLE" && t.status !== "RESERVED" && (t.has_running_order || t.id === tableId))
-    ))
+  const barTableRows = barOnly ? [...occupied]
     .sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }) || a.code.localeCompare(b.code)) : [];
   const showTableItems = Boolean(tableId);
   const estimateNet = requestBody
     ? (draftEstimate?.key === estimateKey ? draftEstimate.total : null)
     : table ? estimateFor(table) : 0;
+  const sidebarItemSummary = sidebarTable && (
+    <>
+      <div className="estimate-head">Table {sidebarTable.code} Items</div>
+      <div className="bar-table-scroll">
+        <table className="table-item-summary">
+          <colgroup><col className="c-code" /><col /><col className="c-qty" /></colgroup>
+          <thead><tr><th>Code</th><th>Item Name</th><th>Qty</th></tr></thead>
+          <tbody>
+            {tableItemList.map((row, i) => (
+              <tr key={row.code || row.name} className={i === itemListSel ? "on" : ""} tabIndex={0}
+                onClick={() => setItemListSel(i)}
+                onKeyDown={(e) => {
+                  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+                  e.preventDefault();
+                  const next = i + (e.key === "ArrowDown" ? 1 : -1);
+                  const sibling = e.key === "ArrowDown" ? e.currentTarget.nextElementSibling : e.currentTarget.previousElementSibling;
+                  if (sibling instanceof HTMLElement) {
+                    setItemListSel(next);
+                    sibling.focus();
+                  }
+                }}>
+                <td>{row.code}</td><td>{row.name}</td><td className="qty">{row.qty}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="estimate-fill" />
+      <div className="estimate-total">Total Estimate: {amt(
+        sidebarTable.id === tableId ? estimateNet ?? estimateFor(sidebarTable) : estimateFor(sidebarTable),
+      )}</div>
+    </>
+  );
 
   return (
     <div className="billing">
@@ -1991,11 +2099,11 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           </div>
         </div>
 
-        <div className={`igrid${dept === "BAR" ? " bar-order-grid" : ""}`}>
+        <div className={`igrid${dept === "BAR" ? " bar-order-grid" : ""}${barOnly ? " no-item-rates" : ""}`}>
           <div className="igrid-head">
             <div>No.</div>
             <div>Item Name</div>
-            <div>Rate</div>
+            {!barOnly && <div>Rate</div>}
             <div>Qty</div>
           </div>
           <div className="igrid-body" ref={gridBodyRef}>
@@ -2033,7 +2141,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                 <div className={`cell-name ${sel === i ? "sel" : ""}`}>
                   {editingId === it.id ? nameInput : <>{it.name}{it.notes ? ` (${it.notes})` : ""}</>}
                 </div>
-                <div>{editingId === it.id ? (pending ? amt(pending.base_price) : "") : amt(it.unit_price)}</div>
+                {!barOnly && <div>{editingId === it.id ? (pending ? amt(pending.base_price) : "") : amt(it.unit_price)}</div>}
                 <div className="cell-qty">{editingId === it.id ? qtyInput : it.qty}</div>
               </div>
             ))}
@@ -2042,7 +2150,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
               <div className={`cell-name ${!editingId && (sel < 0 || sel >= items.length) && (listOpen || (pending && nameLocked)) ? "sel" : ""}`}>
                 {editingId ? null : nameInput}
               </div>
-              <div>{!editingId && pending ? amt(pending.base_price) : ""}</div>
+              {!barOnly && <div>{!editingId && pending ? amt(pending.base_price) : ""}</div>}
               <div className="cell-qty">{editingId ? null : qtyInput}</div>
             </div>
                 {listOpen && listForPick().length > 0 && (
@@ -2110,10 +2218,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                 <td><button className="fn" disabled={barOnly} onKeyDown={ignoreRepeatedPrintKey} onClick={printKot}>Save (F5)</button></td>
                 <td><button className="fn" disabled={barOnly || advance || cashier} onClick={() => { if (access && !access.comp) onMessage("Permission denied"); else setCompMasterOpen(true); }}>F1 Complim.</button></td>
                 <td className="exit-cell">
-                  {((!barOnly && showTableItems) || barPunchEstimate) && (
+                  {sidebarTable?.id !== tableId && ((!barOnly && showTableItems) || barPunchEstimate) && (
                     <div className="dashboard-estimate">Net Estimate: {estimateNet == null ? "—" : amt(estimateNet)}</div>
                   )}
-                  <button className="fn" disabled={barOnly} onClick={requestExit}>Exit</button>
+                  <button className="fn" onClick={requestExit}>Exit</button>
                 </td>
               </tr>
               <tr>
@@ -2141,8 +2249,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         </div>
       </div>
 
-      <aside className={`estimate ${!barOnly && !advance && showTableItems ? "item-list" : ""}`}>
-        {barOnly ? (
+      <aside className="estimate">
+        {sidebarItemSummary || (barOnly ? (
           <>
             <div className="estimate-head">Bar Table List</div>
             <div className="bar-table-scroll" role="region" aria-label="Bar tables" tabIndex={0}>
@@ -2154,11 +2262,9 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                     return (
                       <tr key={t.id} className={printed ? "settle" : "occ"}>
                         <td>
-                          {printed ? t.code : (
-                            <button type="button" className="est-amt" onClick={() => void ensureOpenByCode(t.code)}>
-                              {t.code}
-                            </button>
-                          )}
+                          <button type="button" className="est-amt" onClick={() => selectSidebarTable(t)}>
+                            {t.code}
+                          </button>
                         </td>
                         <td>{printed ? "Settlement" : "Bill"}</td>
                       </tr>
@@ -2167,44 +2273,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                 </tbody>
               </table>
             </div>
-            <div className="estimate-fill" />
-          </>
-        ) : !advance && showTableItems ? (
-          <>
-            <div className="estimate-head">Table No. Items List</div>
-            <table>
-              <colgroup><col className="c-code" /><col /><col className="c-qty" /></colgroup>
-              <thead>
-                <tr>
-                  <th>Code</th>
-                  <th>Item Name</th>
-                  <th>Qty</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tableItemList.map((row, i) => (
-                  <tr
-                    key={`${row.code}-${row.name}`}
-                    className={i === itemListSel ? "on" : ""}
-                    tabIndex={0}
-                    onClick={() => setItemListSel(i)}
-                    onKeyDown={(e) => {
-                      if (e.key === "ArrowDown") {
-                        e.preventDefault();
-                        setItemListSel((s) => Math.min(tableItemList.length - 1, s + 1));
-                      } else if (e.key === "ArrowUp") {
-                        e.preventDefault();
-                        setItemListSel((s) => Math.max(0, s - 1));
-                      }
-                    }}
-                  >
-                    <td>{row.code}</td>
-                    <td>{row.name}</td>
-                    <td className="qty">{row.qty}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
             <div className="estimate-fill" />
           </>
         ) : (
@@ -2239,13 +2307,14 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                         else void openBillForTable(t);
                       }}
                     >
-                      <td
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void ensureOpenByCode(t.code);
-                        }}
-                      >
-                        {formatTableNo(t.code, t.card_number, t.outlet || (clubMode ? "THE BOSS CLUB" : ""))}
+                      <td>
+                        <button type="button" className="est-amt" onKeyDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            selectSidebarTable(t);
+                          }}>
+                          {formatTableNo(t.code, t.card_number, t.outlet || (clubMode ? "THE BOSS CLUB" : ""))}
+                        </button>
                       </td>
                       {!advance && <td>
                         <button
@@ -2281,7 +2350,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
             <div className="estimate-fill" />
             {!advance && <div className="estimate-total">Total Amount : {amt(listTotal)}</div>}
           </>
-        )}
+        ))}
       </aside>
 
       {askExit && (
@@ -2322,11 +2391,12 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           outlet={deptOutlet(dept)}
           currentCode={tableCode}
           onClose={() => setXferOpen(false)}
-          onDone={(fromCode, to) => {
+          onDone={(fromCode, to, printError) => {
             setXferOpen(false);
             onRefresh();
             const toOutlet = to.outlet || "BAR";
-            onMessage(`Transferred ${fromCode} to ${to.code} (${toOutlet})`);
+            const message = `Transferred ${fromCode} to ${to.code} (${toOutlet})`;
+            onMessage(printError ? `${message}. Kitchen slip failed: ${printError}` : message);
             if (tableCode.toLowerCase() === fromCode.toLowerCase()) {
               setTableId(to.id);
               setTableCode(to.code);
@@ -2351,6 +2421,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       )}
       {pickOpen && (
         <PrepareTablePick
+          key={pickOpen}
           title={pickOpen === "settle" ? "Settlement" : pickOpen === "reopen" ? "Reopen Bill" : "Prepare Bill"}
           tables={pickOpen === "bill" ? runningForBill : settleTables}
           onPick={(t) => void (pickOpen === "settle" ? openSettleForTable(t) : openBillForTable(t))}
@@ -2657,7 +2728,7 @@ function LedgerScreen() {
   );
 }
 
-function KotBoard({ station }: { station?: "KITCHEN" | "BAR" }) {
+function KotBoard({ station, onPrintError }: { station?: "KITCHEN" | "BAR"; onPrintError: (message: string) => void }) {
   const [kots, setKots] = useState<any[]>([]);
   async function load() {
     setKots(await api.get(`/api/kots${station ? `?station=${station}` : ""}`));
@@ -2677,7 +2748,7 @@ function KotBoard({ station }: { station?: "KITCHEN" | "BAR" }) {
               {k.reprint_count > 0 && <div className="reprint-mark">*** REPRINT ***</div>}
               <ul>{k.items?.map((i: any) => <li key={i.id}>{i.qty} × {i.name}</li>)}</ul>
               {next[k.status] && <button className="fn wide" onClick={() => api.post(`/api/kots/${k.id}/status`, { status: next[k.status] }).then(load)}>{next[k.status]}</button>}
-              <button className="fn wide" onKeyDown={ignoreRepeatedPrintKey} onClick={() => reprintKot(k.id).then(load)}>Reprint</button>
+              <button className="fn wide" onKeyDown={ignoreRepeatedPrintKey} onClick={() => reprintKot(k.id).then(load).catch((error) => onPrintError(error instanceof Error ? error.message : "Reprint failed"))}>Reprint</button>
             </div>
           ))}
         </div>

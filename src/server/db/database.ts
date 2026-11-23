@@ -9,19 +9,24 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export interface OpenDbOptions {
   filePath?: string;
   memory?: boolean;
+  existingOnly?: boolean;
 }
 
 export function openDatabase(options: OpenDbOptions = {}): Database.Database {
   const db = options.memory
     ? new Database(":memory:")
-    : new Database(options.filePath ?? defaultDbPath());
+    : new Database(options.filePath ?? defaultDbPath(), { fileMustExist: options.existingOnly === true });
 
-  db.pragma("foreign_keys = ON");
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
-  migrate(db);
-  importBundledComplimentaryAccounts(db);
-  return db;
+  try {
+    db.pragma("foreign_keys = ON");
+    db.pragma("journal_mode = WAL");
+    db.pragma("busy_timeout = 5000");
+    if (!options.existingOnly) migrate(db);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }
 
 export function defaultDbPath(): string {
@@ -30,40 +35,6 @@ export function defaultDbPath(): string {
     : path.resolve(process.cwd(), "data");
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, "hyperlounge.sqlite");
-}
-
-function importBundledComplimentaryAccounts(db: Database.Database): void {
-  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
-  if (!resourcesPath) return;
-
-  const seedPath = path.join(resourcesPath, "data", "hyperlounge.sqlite");
-  if (!fs.existsSync(seedPath)) return;
-
-  let seed: Database.Database | undefined;
-  try {
-    seed = new Database(seedPath, { readonly: true, fileMustExist: true });
-    const seedAccounts = seed
-      .prepare("SELECT id, code, name, created_at FROM complimentary_accounts ORDER BY code")
-      .all() as Array<{ id: string; code: number; name: string; created_at: string }>;
-    if (seedAccounts.length === 0) return;
-
-    const count = (db.prepare("SELECT COUNT(*) AS count FROM complimentary_accounts").get() as { count: number }).count;
-    if (count !== 0) return;
-
-    const insert = db.prepare(
-      "INSERT OR IGNORE INTO complimentary_accounts (id, code, name, created_at) VALUES (?, ?, ?, ?)",
-    );
-    const importAccounts = db.transaction(() => {
-      for (const account of seedAccounts) {
-        insert.run(account.id, account.code, account.name, account.created_at);
-      }
-    });
-    importAccounts();
-  } catch {
-    // The bundled seed may be absent or from an older version without this table.
-  } finally {
-    seed?.close();
-  }
 }
 
 function separateTableCodesByOutlet(db: Database.Database) {
@@ -75,9 +46,7 @@ function separateTableCodesByOutlet(db: Database.Database) {
     return cols.length === 1 && cols[0]?.name === "code";
   });
   if (!codeOnly) return;
-  db.pragma("foreign_keys = OFF");
-  const rebuild = db.transaction(() => {
-    db.exec(`
+  db.exec(`
       CREATE TABLE dining_tables_new (
         id TEXT PRIMARY KEY,
         floor_id TEXT NOT NULL,
@@ -96,9 +65,6 @@ function separateTableCodesByOutlet(db: Database.Database) {
       DROP TABLE dining_tables;
       ALTER TABLE dining_tables_new RENAME TO dining_tables;
     `);
-  });
-  rebuild();
-  db.pragma("foreign_keys = ON");
 }
 
 function hasColumn(db: Database.Database, table: string, column: string) {
@@ -106,7 +72,7 @@ function hasColumn(db: Database.Database, table: string, column: string) {
   return cols.some((c) => c.name === column);
 }
 
-export function migrate(db: Database.Database): void {
+function installBaseline(db: Database.Database): void {
   const schemaPath = path.join(__dirname, "schema.sql");
   const sql = fs.readFileSync(schemaPath, "utf8");
   db.exec(sql);
@@ -178,9 +144,46 @@ export function migrate(db: Database.Database): void {
   }
 }
 
+// Append a numbered step for future schema changes. Keep released steps and schema.sql unchanged.
+const migrations: Array<{ version: number; apply: (db: Database.Database) => void; foreignKeysOff?: boolean }> = [
+  { version: 1, apply: installBaseline, foreignKeysOff: true },
+];
+
+export function migrate(db: Database.Database): void {
+  const version = () => Number(db.pragma("user_version", { simple: true }));
+  const installed = version();
+  const supported = migrations.at(-1)!.version;
+  if (installed > supported) throw new Error(`Database version ${installed} requires a newer POS build.`);
+  const pending = migrations.filter((migration) => migration.version > installed);
+  if (!pending.length) return;
+
+  const hasSchema = db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
+  if (!db.memory && hasSchema) {
+    const folder = path.join(path.dirname(db.name), "migration-backups");
+    fs.mkdirSync(folder, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    db.prepare("VACUUM INTO ?").run(path.join(folder, `hyperlounge-v${installed}-${stamp}.sqlite`));
+  }
+
+  for (const migration of pending) {
+    const manageForeignKeys = migration.foreignKeysOff && db.pragma("foreign_keys", { simple: true }) === 1;
+    if (manageForeignKeys) db.pragma("foreign_keys = OFF");
+    try {
+      db.transaction(() => {
+        if (version() >= migration.version) return;
+        migration.apply(db);
+        db.pragma(`user_version = ${migration.version}`);
+      }).immediate();
+    } finally {
+      if (manageForeignKeys) db.pragma("foreign_keys = ON");
+    }
+  }
+}
+
 export function resetDatabase(db: Database.Database): void {
   db.exec(`
     PRAGMA foreign_keys = OFF;
+    DROP TABLE IF EXISTS kot_print_jobs;
     DROP TABLE IF EXISTS day_closes;
     DROP TABLE IF EXISTS sync_queue;
     DROP TABLE IF EXISTS audit_log;
@@ -226,6 +229,7 @@ export function resetDatabase(db: Database.Database): void {
     DROP TABLE IF EXISTS terminals;
     DROP TABLE IF EXISTS bookings;
     DROP TABLE IF EXISTS sequences;
+    PRAGMA user_version = 0;
     PRAGMA foreign_keys = ON;
   `);
   migrate(db);

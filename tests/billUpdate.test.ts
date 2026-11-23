@@ -6,7 +6,7 @@ import { blockCard, issueCard, unblockCard } from "../src/server/services/cardSe
 import { addItem, createOrder } from "../src/server/services/orderService.js";
 import { createStaff } from "../src/server/services/staffService.js";
 import { getTableByCode, openTable } from "../src/server/services/tableService.js";
-import { createTestApp } from "./helpers.js";
+import { createApiClient, createTestApp } from "./helpers.js";
 
 it("estimates draft items with billing totals and stops orders and bills for blocked cards", async () => {
   const { ctx, db, hardware, seeded } = createTestApp();
@@ -159,13 +159,7 @@ it("lets Cashier users edit printed and settled bills with approval while blocki
   try {
     await once(server, "listening");
     const { port } = server.address() as AddressInfo;
-    function request(path: string, body?: object, method = body ? "POST" : "GET") {
-      return fetch(`http://127.0.0.1:${port}/api/${path}`, {
-        method,
-        headers: body ? { "Content-Type": "application/json" } : undefined,
-        body: body ? JSON.stringify(body) : undefined,
-      });
-    }
+    const request = createApiClient(port);
 
     const login = await request("auth/login", { username: "billcashier", password: "4242" });
     expect(await login.json()).toMatchObject({
@@ -210,7 +204,7 @@ it("lets Cashier users edit printed and settled bills with approval while blocki
     });
     expect(removed.status).toBe(200);
     expect(await removed.json()).toMatchObject({ id: invoiceId, status: "PAID" });
-    expect(db.prepare("SELECT COUNT(*) AS count FROM payments WHERE invoice_id = ?").get(invoiceId)).toEqual({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM payments WHERE invoice_id = ? AND amount = 0").get(invoiceId)).toEqual({ count: 1 });
     expect(db.prepare("SELECT qty, voided FROM order_items WHERE id = ?").get(drink.id)).toEqual({ qty: 0, voided: 1 });
 
     const adminLogin = await request("auth/login", { username: "pinadmin", password: "4242" });

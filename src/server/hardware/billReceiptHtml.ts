@@ -140,7 +140,7 @@ html, body {
 }
 .meta .lbl { font-weight: 700; }
 .meta .colon { font-weight: 700; padding-right: 0; }
-.meta .val { font-weight: 400; min-width: 0; }
+.meta .val { font-weight: 600; min-width: 0; }
 .meta-right .lbl { font-weight: 400; padding-right: 0.35em; }
 .items {
   width: 100%;
@@ -164,8 +164,8 @@ html, body {
 .items thead th.n { text-align: left; }
 .items thead th.r { text-align: right; }
 .items tbody td {
-  font-weight: 400;
-  font-size: 11px;
+  font-weight: 600;
+  font-size: 12px;
   padding: 2px 0;
   vertical-align: top;
   line-height: 1.25;

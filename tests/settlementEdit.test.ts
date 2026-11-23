@@ -5,6 +5,16 @@ import { addItem, createOrder, setBillLineQty } from "../src/server/services/ord
 import { saveBooking, settlementDetail, settlementReport, updateSettlement } from "../src/server/services/reportService.js";
 import { getTableByCode, openTable } from "../src/server/services/tableService.js";
 import { createTestApp } from "./helpers.js";
+import { businessDate, businessDateRange } from "../src/shared/businessDate.js";
+
+it("rolls the settlement report date over at 6 a.m. IST", () => {
+  expect(businessDate(new Date("2026-11-23T00:29:59.999Z"))).toBe("2026-11-22");
+  expect(businessDate(new Date("2026-11-23T00:30:00.000Z"))).toBe("2026-11-23");
+  expect(businessDateRange("2026-11-22")).toMatchObject({
+    from: "2026-11-22T00:30:00.000Z",
+    to: "2026-11-23T00:29:59.999Z",
+  });
+});
 
 it.each(["CASH", "CARD", "MEMBER_CARD"] as const)(
   "reduces a %s settlement in place and reopens the table if the bill increases",
@@ -32,7 +42,10 @@ it.each(["CASH", "CARD", "MEMBER_CARD"] as const)(
     };
     expect(reduced.status).toBe("PAID");
     expect(reduced.grand_total).toBeLessThan(invoice.grand_total);
-    expect(getInvoice(cashier, invoice.id).payments).toEqual([{ ...original.payments[0], amount: reduced.grand_total }]);
+    expect(getInvoice(cashier, invoice.id).payments).toEqual([
+      { ...original.payments[0], amount: reduced.grand_total },
+      expect.objectContaining({ method: "CASH", amount: 0 }),
+    ]);
     const expectedCredit = method === "MEMBER_CARD" ? invoice.grand_total - reduced.grand_total : 0;
     expect(balancesFromLedger(cashier, cardId).usable).toBe(afterPayment.usable + expectedCredit);
     generateInvoice(cashier, order.id, { invoiceId: invoice.id, serviceChargePct: 0 });
@@ -122,6 +135,10 @@ it("replaces one settlement with four parts on its original report date", () => 
     account: line.account,
     status: "PAID",
   }))));
+
+  cashier.db.prepare("UPDATE payments SET amount = 0 WHERE invoice_id = ? AND amount = ?").run(invoice.id, 3000);
+  expect(settlementReport(cashier, "2024-05-02", "2024-05-02", "BAR").rows).toHaveLength(3);
+  cashier.db.prepare("UPDATE payments SET amount = 3000 WHERE invoice_id = ? AND amount = 0").run(invoice.id);
 
   const before = cashier.db.prepare("SELECT * FROM payments WHERE id = ?").get(payment.id) as { amount: number };
   updateSettlement(cashier, payment.id, { original: { amount: before.amount }, amount: 1000 });

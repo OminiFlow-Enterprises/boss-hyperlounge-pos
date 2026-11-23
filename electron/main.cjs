@@ -3,12 +3,16 @@ if (process.env.POS_PRINT_HTML === "1") {
   return;
 }
 
-const { app, BrowserWindow, Menu, dialog, globalShortcut, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, dialog, globalShortcut, ipcMain, powerSaveBlocker } = require("electron");
 const { spawn, execFile, execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
+const os = require("node:os");
+const { printOfficeSlip } = require("./print-office-slip.cjs");
+const packageMetadata = require("../package.json");
+const clientOnly = packageMetadata.posClientOnly === true;
 
 const POS_KEYS = new Set(["F1", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"]);
 
@@ -39,7 +43,12 @@ function dataDir() {
   fs.mkdirSync(dir, { recursive: true });
   const dest = path.join(dir, "hyperlounge.sqlite");
   const bundled = path.join(process.resourcesPath, "data", "hyperlounge.sqlite");
-  if (!fs.existsSync(dest) && fs.existsSync(bundled)) fs.copyFileSync(bundled, dest);
+  if (!fs.existsSync(dest)) {
+    if (["-wal", "-shm", "-journal"].some((suffix) => fs.existsSync(dest + suffix))) {
+      throw new Error(`The POS database is missing but recovery files exist in ${dir}. Restore the database before starting.`);
+    }
+    if (fs.existsSync(bundled)) fs.copyFileSync(bundled, dest, fs.constants.COPYFILE_EXCL);
+  }
   return dir;
 }
 
@@ -62,6 +71,7 @@ function startServer(port, dbDir) {
     PORT: String(port),
     POS_DATA_DIR: dbDir,
     POS_CLIENT_DIR: path.join(root, "dist", "client"),
+    ...(packageMetadata.posExistingDbOnly === true ? { POS_EXISTING_DB_ONLY: "1" } : {}),
   };
   delete env.ELECTRON_RUN_AS_NODE;
   // Always run the API under Electron's Node so better-sqlite3 matches Electron ABI
@@ -327,20 +337,89 @@ function attachShortcuts(win) {
   });
 }
 
+function parseServerAddress(value) {
+  const address = value.trim();
+  if (!address) throw new Error("Enter the POS server IP address.");
+  const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(address);
+  const url = new URL(hasScheme ? address : `http://${address}`);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new Error("Use a server IP address or an HTTP or HTTPS address without credentials.");
+  }
+  const authority = address.split(/[/?#]/, 1)[0];
+  if (!hasScheme && !/:\d+$/.test(authority)) url.port = "8787";
+  return url;
+}
+
+function askForServerAddress(previousAddress) {
+  const setup = new BrowserWindow({
+    width: 465, height: 255, resizable: false, autoHideMenuBar: true,
+    title: "THE BOSS POS Client Setup",
+    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+  });
+  const form = `<!doctype html><html lang="en"><meta charset="utf-8"><title>THE BOSS POS Client Setup</title>
+    <style>
+      body{font:15px 'Segoe UI',sans-serif;margin:25px;color:#18202b;background:#f6f7f9}
+      label{display:block;font-weight:600;margin-bottom:8px}input{width:100%;box-sizing:border-box;padding:9px}
+      p{min-height:20px;margin:9px 0;color:#5e2222}button{padding:7px 18px}
+    </style>
+    <form action="https://pos-setup.invalid/connect">
+      <label for="address">POS server IP address</label>
+      <input id="address" name="address" placeholder="192.168.1.57" required autofocus>
+      <p id="error" role="alert"></p>
+      <button type="submit">Connect</button>
+    </form></html>`;
+
+  return new Promise((resolve, reject) => {
+    setup.once("closed", () => resolve(null));
+    setup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    setup.webContents.on("will-navigate", (event, target) => {
+      event.preventDefault();
+      const submission = new URL(target);
+      if (submission.origin !== "https://pos-setup.invalid" || submission.pathname !== "/connect") return;
+      try {
+        const address = parseServerAddress(submission.searchParams.get("address") ?? "");
+        resolve(address);
+        setup.close();
+      } catch {
+        void setup.webContents.executeJavaScript(
+          'document.getElementById("error").textContent = "Enter a valid server IP or address, such as 192.168.1.57:8787.";'
+        ).catch(() => {});
+      }
+    });
+    const initialPage = `data:text/html;charset=utf-8,${encodeURIComponent(form)}`;
+    void setup.loadURL(initialPage).then(() => setup.webContents.executeJavaScript(
+      `document.getElementById("address").value = ${JSON.stringify(previousAddress)};`
+    )).catch(reject);
+  });
+}
+
 async function openPos() {
   logFile = path.join(app.getPath("userData"), "logs", "pos-debug.log");
   fs.mkdirSync(path.dirname(logFile), { recursive: true });
   log(`START packaged=${app.isPackaged} version=${app.getVersion()} appPath=${app.getAppPath()}`);
   Menu.setApplicationMenu(null);
-  const port = await freePort(8787);
-  const dbDir = dataDir();
-  server = startServer(port, dbDir);
-  try {
+  let posUrl;
+  const addressFile = path.join(app.getPath("userData"), "server-address.txt");
+  let previousAddress = "";
+  if (clientOnly) {
+    const serverOption = process.argv.find((arg) => arg.startsWith("--pos-server="));
+    const saved = fs.existsSync(addressFile) ? fs.readFileSync(addressFile, "utf8").trim() : "";
+    previousAddress = serverOption?.slice("--pos-server=".length) || process.env.POS_SERVER_URL || saved;
+    if (previousAddress && !process.argv.includes("--change-server")) {
+      try { posUrl = parseServerAddress(previousAddress); } catch { /* Ask for a corrected address. */ }
+    }
+  } else {
+    const port = await freePort(8787);
+    server = startServer(port, dataDir());
     await waitForServer(port, server);
-  } catch (err) {
-    dialog.showErrorBox("THE BOSS POS", err instanceof Error ? err.message : "POS server did not start");
-    app.quit();
-    return;
+    if (app.isPackaged && process.platform === "win32" && !devInstance) {
+      try {
+        app.setLoginItemSettings({ openAtLogin: true, path: process.execPath });
+      } catch (error) {
+        log(`Could not register Windows sign-in startup: ${error}`);
+      }
+    }
+    posUrl = new URL(`http://127.0.0.1:${port}/`);
   }
 
   mainWindow = new BrowserWindow({
@@ -385,13 +464,39 @@ async function openPos() {
       window.addEventListener('unhandledrejection', e => console.error('[unhandledrejection]', e.reason?.stack || e.reason));
     `).catch((err) => log(`RENDERER instrumentation failed: ${err}`));
   });
-  mainWindow.once("ready-to-show", () => {
-    mainWindow.maximize();
-    mainWindow.show();
-    mainWindow.focus();
-    registerDeptKeys();
-  });
-  await mainWindow.loadURL(`http://127.0.0.1:${port}/`);
+  if (clientOnly) {
+    const blockOtherOrigins = (event, url) => {
+      if (new URL(url).origin !== posUrl?.origin) event.preventDefault();
+    };
+    mainWindow.webContents.on("will-navigate", blockOtherOrigins);
+    mainWindow.webContents.on("will-redirect", blockOtherOrigins);
+    mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  }
+  if (clientOnly) {
+    while (true) {
+      if (!posUrl) {
+        posUrl = await askForServerAddress(previousAddress);
+        if (!posUrl) return app.quit();
+      }
+      try {
+        await mainWindow.loadURL(posUrl.href);
+        fs.writeFileSync(addressFile, posUrl.href, "utf8");
+        break;
+      } catch {
+        dialog.showErrorBox("THE BOSS POS Client", `Could not connect to ${posUrl.href}. Check the server IP and try again.`);
+        previousAddress = posUrl.href;
+        posUrl = undefined;
+      }
+    }
+  } else {
+    await mainWindow.loadURL(posUrl.href);
+  }
+  mainWindow.maximize();
+  mainWindow.show();
+  mainWindow.focus();
+  const sleepBlocker = powerSaveBlocker.start("prevent-app-suspension");
+  mainWindow.once("closed", () => powerSaveBlocker.stop(sleepBlocker));
+  registerDeptKeys();
 }
 
 app.on("second-instance", () => {
@@ -431,7 +536,7 @@ ipcMain.handle("pos:export-pdf", async (event, opts) => {
 });
 
 ipcMain.handle("pos:print-html", async (_event, { html, deviceName }) => {
-  const printer = String(deviceName || "bill");
+  const printer = String(deviceName ?? "bill");
   const win = new BrowserWindow({
     show: false,
     width: 320,
@@ -440,11 +545,27 @@ ipcMain.handle("pos:print-html", async (_event, { html, deviceName }) => {
       nodeIntegration: false,
       contextIsolation: true,
       offscreen: true,
+      backgroundThrottling: false,
     },
   });
   try {
     await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(String(html || ""))}`);
-    await new Promise((r) => setTimeout(r, 400));
+    await win.webContents.executeJavaScript("document.fonts.ready.then(() => true)");
+    const officeIp = process.env.POS_OFFICE_TERMINAL_IP?.trim() || "192.168.1.21";
+    const isOfficePc = Object.values(os.networkInterfaces()).flat().some((ip) => ip?.address === officeIp);
+    const windowsBillQueue = process.platform === "win32" && printer.toLowerCase() === "bill";
+    const sharpBill = windowsBillQueue && packageMetadata.posSharpBillPrint === true &&
+      await win.webContents.executeJavaScript('Boolean(document.querySelector(".slip"))');
+    const connectedKot = process.platform === "win32" && printer === "" &&
+      await win.webContents.executeJavaScript('document.title.startsWith("KOT ")');
+    if (connectedKot || (windowsBillQueue && (sharpBill || isOfficePc))) {
+      await printOfficeSlip(win, printer, {
+        sharpBill,
+        rejectBlank: connectedKot,
+        preferredQueue: connectedKot && isOfficePc ? "bill" : "",
+      });
+      return { ok: true };
+    }
     const result = await new Promise((resolve) => {
       win.webContents.print(
         {
@@ -471,7 +592,10 @@ ipcMain.handle("pos:print-html", async (_event, { html, deviceName }) => {
   }
 });
 
-app.whenReady().then(openPos);
+app.whenReady().then(openPos).catch((error) => {
+  dialog.showErrorBox("THE BOSS POS", error instanceof Error ? error.message : String(error));
+  app.quit();
+});
 
 app.on("window-all-closed", () => {
   if (server && !server.killed) server.kill();

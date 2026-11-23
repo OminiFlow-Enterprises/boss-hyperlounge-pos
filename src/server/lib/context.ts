@@ -7,6 +7,7 @@ export interface AppContext {
   actor: Actor;
   hardware: HardwareBus;
   online: boolean;
+  officeTerminal?: boolean;
 }
 
 export function withActor(ctx: AppContext, actor: Actor): AppContext {

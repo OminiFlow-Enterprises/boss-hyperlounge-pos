@@ -4,7 +4,9 @@ import { AppError } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
 import { nextNumber, nowIso, uuid } from "../lib/ids.js";
-import { printerForStation } from "../hardware/index.js";
+import type { KotPrintPayload } from "../hardware/index.js";
+import { formatKotHtml } from "../hardware/kotReceiptHtml.js";
+import { enqueueKotPrint, kotPrinters } from "./kotPrintQueue.js";
 import { deductStock, restoreStock } from "./inventoryService.js";
 import { displayTaxRate } from "./itemService.js";
 import { resolvePrice } from "./pricingService.js";
@@ -331,10 +333,23 @@ function createKot(
   };
 }
 
-export async function sendKot(
+type SendKotOptions = { remark?: string; steward?: string; cardNumber?: string; queuePrinting?: boolean } | string;
+
+export async function sendKot(ctx: AppContext, orderId: string, opts?: SendKotOptions) {
+  const queued = typeof opts === "object" && opts.queuePrinting === true;
+  const tickets = ctx.db.transaction(prepareKot)(ctx, orderId, queued, opts);
+  return Promise.all(tickets.map(async ({ kot, slips, printJobIds }) => {
+    if (queued) return { ...kot, printJobIds };
+    const print = await printRoutedKot(ctx, kot.id, slips);
+    return { ...kot, print: print.error || print.clientPrintHtml.length || print.officePrintHtml.length ? print : undefined };
+  }));
+}
+
+function prepareKot(
   ctx: AppContext,
   orderId: string,
-  opts?: { remark?: string; steward?: string; cardNumber?: string } | string,
+  queued: boolean,
+  opts?: SendKotOptions,
 ) {
   assertPermission(ctx.actor.role, "SEND_KOT");
   const options = typeof opts === "string" ? { remark: opts } : opts ?? {};
@@ -395,15 +410,15 @@ export async function sendKot(
     .prepare("SELECT COUNT(*) AS n FROM kots WHERE session_id = ? AND type IN ('NEW','ADDITION')")
     .get(order.session_id) as { n: number };
   const kotType = existingKots.n > 0 ? "ADDITION" : "NEW";
-  getTable(ctx, order.table_id);
+  const table = getTable(ctx, order.table_id);
   const waiterFromStaff = order.waiter_id
     ? (ctx.db.prepare("SELECT name FROM staff WHERE id = ?").get(order.waiter_id) as { name: string } | undefined)
     : undefined;
   const steward = stewardName || waiterFromStaff?.name || "";
 
-  const created: Array<{ kot_number: string }> = [];
+  const created: Array<{ kot: ReturnType<typeof createKot>; slips: ReturnType<typeof routeKot>; printJobIds?: string[] }> = [];
 
-  async function printStationKot(
+  function saveStationKot(
     station: Station,
     type: "NEW" | "ADDITION" | "CANCEL",
     items: Array<{
@@ -426,9 +441,8 @@ export async function sendKot(
       items,
       notes: slipRemark || undefined,
     });
-    created.push(kot);
     const banner = type === "NEW" ? "NEW ORDER" : "RUNNING ORDER";
-    const print = await printerForStation(ctx.hardware, station).printKOT({
+    const slips = routeKot(ctx, station, table.outlet, {
       kotNumber: kot.kot_number,
       tableCode: printedTableNo(ctx, { tableId: openOrder.table_id, orderId: openOrder.id }),
       waiter: steward,
@@ -438,18 +452,15 @@ export async function sendKot(
       orderBanner: banner,
       remark: slipRemark || undefined,
       items: items.map((i) => ({
+        productId: i.productId,
         qty: type === "CANCEL" ? -i.qty : i.qty,
         name: itemNameWithNotes(i.name, i.notes),
         notes: i.notes,
       })),
       createdAt: kot.created_at,
     });
-    if (!print.ok) {
-      audit(ctx, "PRINTER_FAILURE", "kot", kot.id, print.error ?? "print failed", null, {
-        station,
-        kot: kot.kot_number,
-      });
-    }
+    const printJobIds = queued ? slips.map((slip) => enqueueKotPrint(ctx.db, kot.id, slip)) : undefined;
+    created.push({ kot, slips, printJobIds });
   }
 
   if (reductions.length) {
@@ -531,14 +542,14 @@ export async function sendKot(
         if (cur) cur.qty += it.qty;
         else merged.set(key, { ...it });
       }
-      await printStationKot(station, "CANCEL", [...merged.values()]);
+      saveStationKot(station, "CANCEL", [...merged.values()]);
     }
   }
 
   for (const station of ["KITCHEN", "BAR"] as Station[]) {
     const items = additions.filter((i) => i.station === station);
     if (!items.length) continue;
-    await printStationKot(
+    saveStationKot(
       station,
       kotType,
       items.map((i) => ({
@@ -553,7 +564,7 @@ export async function sendKot(
     );
   }
 
-  audit(ctx, "KOT_SEND", "order", orderId, null, null, created.map((k) => k.kot_number));
+  audit(ctx, "KOT_SEND", "order", orderId, null, null, created.map(({ kot }) => kot.kot_number));
   return created;
 }
 
@@ -767,6 +778,82 @@ export function setBillLinePrice(ctx: AppContext, orderId: string, ids: string[]
   })();
 }
 
+function routeKot(
+  ctx: AppContext,
+  station: Station,
+  outlet: string | undefined,
+  payload: Omit<KotPrintPayload, "items"> & {
+    items: Array<KotPrintPayload["items"][number] & { productId: string }>;
+  },
+) {
+  type Destination = keyof ReturnType<typeof kotPrinters> | "CONNECTED" | "OFFICE LOCAL";
+  const lookup = ctx.db.prepare("SELECT item_group FROM products WHERE id = ?");
+  const jobs = new Map<Destination, KotPrintPayload["items"]>();
+  const localOutlet = outlet === "THE BOSS CLUB" || outlet === "RESTAURANT";
+  for (const { productId, ...item } of payload.items) {
+    const product = lookup.get(productId) as { item_group: string | null } | undefined;
+    const group = product?.item_group?.trim().toUpperCase();
+    let destination: Destination = station;
+    if (localOutlet) {
+      const food = group === "FOOD" || group === "EV FOOD" || (!group && station === "KITCHEN");
+      destination = food ? "KITCHEN" : "CONNECTED";
+    } else switch (group) {
+      case "FOOD":
+      case "EV FOOD":
+        destination = "KITCHEN";
+        break;
+      case "BAR":
+        destination = "BAR";
+        break;
+      case "BEVERAGE":
+      case "CAFE":
+      case "EV CAFE":
+        destination = "CAFE BAR";
+        break;
+      case "SPL":
+        if (!ctx.officeTerminal) continue;
+        destination = "OFFICE LOCAL";
+        break;
+      case "SPL1":
+        destination = "CONNECTED";
+        break;
+    }
+    const items = jobs.get(destination) ?? [];
+    items.push(item);
+    jobs.set(destination, items);
+  }
+  const slips = Array.from(jobs, ([destination, items]) => ({ ...payload, station: destination, items }));
+  if (localOutlet) {
+    const items = payload.items.map(({ productId, ...item }) => item);
+    slips.push({ ...payload, station: "CONNECTED", customerCopy: true, items });
+  }
+  return slips;
+}
+
+async function printRoutedKot(ctx: AppContext, kotId: string, slips: ReturnType<typeof routeKot>) {
+  const printers = kotPrinters(ctx.hardware);
+  const errors: string[] = [];
+  const clientPrintHtml: string[] = [];
+  const officePrintHtml: string[] = [];
+  for (const slip of slips) {
+    const destination = slip.station;
+    if (destination === "CONNECTED" || destination === "OFFICE LOCAL") {
+      const html = formatKotHtml(slip);
+      if (destination === "OFFICE LOCAL") officePrintHtml.push(html);
+      else clientPrintHtml.push(html);
+      continue;
+    }
+    const printer = printers[destination];
+    const result = printer ? await printer.printKOT(slip) : { ok: false, error: "Printer queue is not configured" };
+    if (!result.ok) {
+      const error = result.error ?? "print failed";
+      errors.push(`${destination}: ${error}`);
+      audit(ctx, "PRINTER_FAILURE", "kot", kotId, error, null, { station: destination, kot: slip.kotNumber });
+    }
+  }
+  return { ok: !errors.length, error: errors.length ? errors.join(", ") : undefined, clientPrintHtml, officePrintHtml };
+}
+
 export async function reprintKot(ctx: AppContext, kotId: string) {
   const kot = ctx.db.prepare("SELECT * FROM kots WHERE id = ?").get(kotId) as
     | {
@@ -783,9 +870,9 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
     | undefined;
   if (!kot) throw new AppError("KOT not found", 404);
   const items = ctx.db
-    .prepare(`SELECT ki.qty, ki.name, ki.notes FROM kot_items ki WHERE ki.kot_id = ?`)
-    .all(kotId) as Array<{ qty: number; name: string; notes: string | null }>;
-  getTable(ctx, kot.table_id);
+    .prepare(`SELECT qty, name, notes, product_id FROM kot_items WHERE kot_id = ?`)
+    .all(kotId) as Array<{ qty: number; name: string; notes: string | null; product_id: string }>;
+  const table = getTable(ctx, kot.table_id);
   const waiter = kot.waiter_id
     ? (ctx.db.prepare("SELECT name FROM staff WHERE id = ?").get(kot.waiter_id) as { name: string } | undefined)
     : undefined;
@@ -794,7 +881,7 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
     .prepare("INSERT INTO kot_reprints (id, kot_id, staff_id, created_at) VALUES (?, ?, ?, ?)")
     .run(uuid(), kotId, ctx.actor.staffId, nowIso());
   audit(ctx, "KOT_REPRINT", "kot", kotId, "*** REPRINT ***", null, kot.kot_number);
-  const print = await printerForStation(ctx.hardware, kot.station).printKOT({
+  const print = await printRoutedKot(ctx, kotId, routeKot(ctx, kot.station, table.outlet, {
     kotNumber: kot.kot_number,
     tableCode: printedTableNo(ctx, { tableId: kot.table_id, orderId: kot.order_id }),
     waiter: waiter?.name,
@@ -804,13 +891,14 @@ export async function reprintKot(ctx: AppContext, kotId: string) {
     orderBanner: kot.type === "NEW" ? "NEW ORDER" : "RUNNING ORDER",
     remark: kot.notes,
     items: items.map((i) => ({
+      productId: i.product_id,
       qty: i.qty,
       name: itemNameWithNotes(i.name, i.notes),
       notes: i.notes,
     })),
     createdAt: kot.created_at,
-  });
-  return { ok: print.ok, error: print.error, reprint: true };
+  }));
+  return { ...print, reprint: true };
 }
 
 export function advanceKot(ctx: AppContext, kotId: string, status: KotStatus, reason = "void") {

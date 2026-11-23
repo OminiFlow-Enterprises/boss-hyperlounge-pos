@@ -1,0 +1,24 @@
+appId: com.theboss.pos.client
+productName: THE BOSS POS Client
+asar: false
+npmRebuild: false
+directories:
+  output: release/client
+files:
+  - electron/main.cjs
+  - electron/preload.cjs
+  - electron/print-office-slip.cjs
+  - electron/print-office-slip.ps1
+  - electron/app-icon.ico
+  - package.json
+extraMetadata:
+  name: boss-hyperlounge-pos-client
+  posClientOnly: true
+  posSharpBillPrint: true
+win:
+  target: nsis
+  icon: electron/app-icon.ico
+  signExecutable: false
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

@@ -455,6 +455,13 @@ export function generateInvoice(
       // payments. Recalculate its status so the reports show the revised bill
       // total while retaining the original payment history.
       const isPaid = paid >= payable && (payable > 0 || hadSettlement);
+      if (hadSettlement && isPaid && !isComplimentary && paid === payable) {
+        ctx.db.prepare(
+          `INSERT INTO payments (id, invoice_id, method, amount, reference, receipt_no, voucher_no, created_at)
+           VALUES (?, ?, 'CASH', 0, 'Cash.', ?, ?, ?)`,
+        ).run(uuid(), existing.id, nextSequence(ctx.db, "settlement_receipt", 32901),
+          nextSequence(ctx.db, "settlement_voucher", 47201), nowIso());
+      }
       ctx.db
         .prepare("UPDATE invoices SET status = ?, paid_at = CASE WHEN ? = 1 THEN COALESCE(paid_at, ?) ELSE NULL END WHERE id = ?")
         .run(isPaid ? "PAID" : paid > 0 ? "PARTIAL" : "UNPAID", isPaid ? 1 : 0, nowIso(), existing.id);
