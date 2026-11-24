@@ -1,5 +1,5 @@
 import { formatUiLabel } from "./formatUiLabel";
-import { Component, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import { Component, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { finishKotPrinting, ignoreRepeatedPrintKey, reprintKot, type KotPrintResponse } from "./printActions";
 import { trackKotPrintJobs, watchKotPrintJobs } from "./kotPrintJobs";
@@ -596,7 +596,7 @@ export function App() {
           cashier={cashier}
           admin={isAdminActor(actor)}
           showNcEstimate={canViewNcEstimate(actor)}
-          canOpenReport={(report) => rightOn(actor?.rights, viewRight(report) ?? "")}
+          canOpenReport={(report) => (!barOnly || actor?.userGroup === "OPERATOR") && rightOn(actor?.rights, viewRight(report) ?? "")}
           allowDept={(d) => barOnly ? d === "BAR" : advance ? isAdvanceOutlet(deptOutlet(d)) : rightOn(actor?.rights, outletRight(deptOutlet(d)))}
         />
       )}
@@ -879,13 +879,20 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     }
   }
 
-  function switchDept(next: Dept) {
+  function switchDept(next: Dept, showTableList = false) {
     if (allowDept && !allowDept(next)) {
       onMessage("Permission denied");
       return;
     }
     if (next === dept) {
-      focusDept(next);
+      if (showTableList) {
+        setSidebarTableId("");
+        setItemListSel(0);
+        setListOpen(false);
+        focusTableNo();
+      } else {
+        focusDept(next);
+      }
       return;
     }
     setDept(next);
@@ -907,7 +914,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setItemListSel(0);
     setSel(-1);
     onOpenView("billing", deptOutlet(next));
-    focusDept(next);
+    if (showTableList) focusTableNo();
+    else focusDept(next);
   }
 
   function stepDept(dir: -1 | 1) {
@@ -1082,18 +1090,13 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     return n;
   }
 
-  function movePick(delta: number, adopt = false) {
+  function movePick(delta: number) {
     const list = listForPick();
     if (!list.length) return;
     const cur = Math.min(Math.max(0, pick), list.length - 1);
     const next = Math.min(list.length - 1, Math.max(0, cur + delta));
-    const p = list[next];
     setPick(next);
-    if (adopt && p) {
-      setPending(p);
-      setItemQuery(p.name);
-      setNameLocked(true);
-    } else if (!nameLocked && typed.trim()) {
+    if (!nameLocked && typed.trim()) {
       setListOpen(true);
     }
   }
@@ -1108,11 +1111,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     });
   }
 
-  function movePending(delta: number) {
-    movePick(delta, true);
-    setSel(items.length);
-  }
-
   function clearEditor() {
     setEditingId(null);
     setPending(null);
@@ -1124,7 +1122,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setListOpen(false);
   }
 
-  function returnToEntry() {
+  function focusNewItem() {
     clearEditor();
     setSel(items.length);
     setFocusEntry((x) => x + 1);
@@ -1139,22 +1137,35 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     else if (bottom > body.scrollTop + body.clientHeight) body.scrollTop = bottom - body.clientHeight;
   }
 
-  function moveRow(delta: number) {
-    const last = items.length;
-    const cur = sel < 0 || sel > last ? last : sel;
-    const next = Math.min(last, Math.max(0, cur + delta));
-    if (next === last) {
-      returnToEntry();
-      return;
+  function moveGridFocus(e: ReactKeyboardEvent<HTMLDivElement>) {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const vertical = e.key === "ArrowUp" || e.key === "ArrowDown";
+    const horizontal = e.key === "ArrowLeft" || e.key === "ArrowRight";
+    if (!vertical && !horizontal) return;
+    const target = e.target as HTMLElement;
+    if (target === itemRef.current && listOpen) return;
+    const row = target.closest<HTMLElement>(".igrid-row");
+    if (!row) return;
+    const rows = Array.from(e.currentTarget.querySelectorAll<HTMLElement>(".igrid-row"));
+    const cells = Array.from(row.children);
+    const column = target === row ? 1 : cells.findIndex((cell) => cell.contains(target));
+    const direction = e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1;
+    const nextRow = rows[rows.indexOf(row) + (vertical ? direction : 0)];
+    const nextCell = nextRow?.children[column + (horizontal ? direction : 0)] as HTMLElement | undefined;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!nextCell) return;
+    const input = nextCell.querySelector<HTMLInputElement>("input");
+    const nextIndex = rows.indexOf(nextRow);
+    if (!input && nextCell.classList.contains("cell-qty") && nextIndex < items.length) {
+      startEdit(nextIndex, "qty");
+    } else {
+      (input ?? nextCell).focus({ preventScroll: true });
     }
-    startEdit(next);
-    requestAnimationFrame(() => {
-      const row = gridBodyRef.current?.querySelectorAll(".igrid-row:not(.entry)")[next] as HTMLElement | undefined;
-      scrollGridRow(row);
-    });
+    scrollGridRow(nextRow);
   }
 
-  function startEdit(index: number) {
+  function startEdit(index: number, field: "name" | "qty" = "name") {
     const it = items[index];
     if (!it) {
       setSel(items.length);
@@ -1174,7 +1185,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setListOpen(false);
     setPick(0);
     setSel(index);
-    focusName();
+    if (field === "qty") focusQty();
+    else focusName();
   }
 
   function replaceItem(index: number, ch: string) {
@@ -1369,10 +1381,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       return false;
     }
     // A minus quantity queues a reduction for Print KOT.
-    if (editingId && n > 0) {
-      const line = items.find((it) => it.id === editingId);
-      const sameItem = !line || pending.id === line.product_id || pending.name === line.name;
-      if (line && !sameItem) {
+    const editedLine = editingId ? items.find((it) => it.id === editingId) : undefined;
+    if (editedLine && n > 0) {
+      const line = editedLine;
+      if (pending.id !== line.product_id) {
         setDraftItems((prev) => {
           draftSeq.current += 1;
           const row: OrderItem = {
@@ -1387,10 +1399,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           };
           return prev.map((it) => (it.id === editingId ? row : it));
         });
-      } else if (line && n !== line.qty) {
+      } else if (n !== line.qty) {
         setDraftItems((prev) => prev.map((it) => (it.id === editingId ? { ...it, qty: n } : it)));
       }
-      returnToEntry();
+      focusNewItem();
       return true;
     }
     const ok = await addItem(pending, n);
@@ -1408,11 +1420,56 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       onMessage("Bill already printed");
       return;
     }
-    const id = orderId;
-    if (!id) {
-      onMessage("No items to print");
-      return;
+    sendingKot.current = true;
+    try {
+      if (orderId) {
+        await printOrderKot(orderId, servedItems);
+        return;
+      }
+      if (!pending && !draftItems.length) {
+        onMessage("No items to print");
+        return;
+      }
+      const qty = pending ? parseQty(qtyStr) : null;
+      const code = tableCode.trim().toLowerCase();
+      if (qty == null || qty >= 0 || !sidebarTable ||
+          sidebarTable.status !== "OCCUPIED" ||
+          (sidebarTable.outlet || "BAR") !== deptOutlet(dept) ||
+          (code && code !== sidebarTable.code.toLowerCase())) {
+        onMessage("Select a running table before printing KOT", focusTableNo);
+        return;
+      }
+      if (!remark.trim()) {
+        remarkRef.current?.focus();
+        return;
+      }
+      const order = await api.post<{ id: string; session_id: string; status: string }>(
+        "/api/orders", { tableId: sidebarTable.id },
+      );
+      if (order.session_id !== sidebarTable.current_session_id || order.status !== "OPEN") {
+        onMessage("Table has changed. Select it again before reducing an item.", focusTableNo);
+        return;
+      }
+      const current = await api.get<{ items: OrderItem[] }>(`/api/orders/${order.id}`);
+      if (current.items.some((it) => !it.kot_id)) {
+        onMessage("This table has unsent items. Select it again before reducing an item.", focusTableNo);
+        return;
+      }
+      setDetail(current);
+      setOrderId(order.id);
+      setTableId(sidebarTable.id);
+      setTableCode(sidebarTable.code);
+      const cardNumber = clubMode ? cardNoDigits(sidebarTable.card_number || "") : "";
+      if (clubMode) setClubCard(cardNumber);
+      await printOrderKot(order.id, current.items, cardNumber);
+    } catch (e) {
+      onMessage(e instanceof Error ? e.message : "KOT failed");
+    } finally {
+      sendingKot.current = false;
     }
+  }
+
+  async function printOrderKot(id: string, served: OrderItem[], cardNumber = clubMode ? clubCard.trim() : "") {
     let toSend = draftItems;
     if (pending) {
       const n = parseQty(qtyStr);
@@ -1424,9 +1481,9 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       }
       if (n < 0) {
         const netAfter = draftQtyOf(pending.id, editingId) + n;
-        const served = servedQtyOf(pending.id);
-        if (netAfter < 0 && served < -netAfter) {
-          onMessage(served <= 0 ? "This item not served on this table!" : "Cannot reduce more than ordered qty");
+        const servedQty = served.reduce((sum, it) => it.product_id === pending.id ? sum + it.qty : sum, 0);
+        if (netAfter < 0 && servedQty < -netAfter) {
+          onMessage(servedQty <= 0 ? "This item not served on this table!" : "Cannot reduce more than ordered qty");
           return;
         }
       }
@@ -1474,7 +1531,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       remarkRef.current?.focus();
       return;
     }
-    sendingKot.current = true;
     try {
       for (const it of toSend) {
         await api.post(`/api/orders/${id}/items`, {
@@ -1487,7 +1543,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       const tickets = await api.post<Array<{ printJobIds?: string[]; print?: KotPrintResponse }>>(`/api/orders/${id}/send-kot`, {
         remark: remark.trim() || undefined,
         steward: waiter.trim() || undefined,
-        cardNumber: clubMode ? clubCard.trim() || undefined : undefined,
+        cardNumber: cardNumber || undefined,
       });
       trackKotPrintJobs(tickets.flatMap((ticket) => ticket.printJobIds ?? []));
       setDraftItems([]);
@@ -1498,8 +1554,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       onMessage(e instanceof Error ? e.message : "KOT failed");
       await clearServerUnsent(id).catch(() => null);
       if (barOnly) void onRefresh().catch(() => null);
-    } finally {
-      sendingKot.current = false;
     }
   }
 
@@ -1547,6 +1601,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     if (table.status !== "PAYMENT_PENDING") {
       setTableCode(table.code);
       void ensureOpenByCode(table.code);
+    } else if ((table.outlet || "BAR") === "BAR" && (!tableId || tableId === table.id)) {
+      setTableCode(table.code);
     }
   }
 
@@ -1709,7 +1765,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       const fn = e.code || e.key;
       const outletShortcut = (e.altKey && /^[1-4]$/.test(e.key)) ||
         (e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight"));
-      if (barOnly && (/^F\d+$/.test(fn) || isF10(e) || isF11(e) || outletShortcut)) {
+      const billingReport = fn === "F7" ? "kot-report" : fn === "F8" ? "bill-report" : null;
+      if (barOnly && !billingReport && (/^F\d+$/.test(fn) || isF10(e) || isF11(e) || outletShortcut)) {
         e.preventDefault();
         e.stopPropagation();
         if (fn === "F5" && !e.repeat) void printKot();
@@ -1799,8 +1856,15 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         setItemXferOpen(true);
       }
       if (e.key === "F5" || e.key === "F6" || e.key === "F16") { e.preventDefault(); if (!e.repeat) void printKot(); }
-      if (e.key === "F7") { e.preventDefault(); onOpenView("kot-report", deptOutlet(dept)); }
-      if (e.key === "F8") { e.preventDefault(); onOpenView("bill-report", deptOutlet(dept)); }
+      if (billingReport) {
+        e.preventDefault();
+        if (e.repeat) return;
+        if (!canOpenReport(billingReport)) {
+          onMessage(billingReport === "kot-report" ? "Permission denied: KOT Report" : "Permission denied: Bill Report");
+          return;
+        }
+        onOpenView(billingReport, deptOutlet(dept));
+      }
       if (e.key === "F12") { e.preventDefault(); onOpenView("settlement-report", deptOutlet(dept)); }
     }
     keyHandler.current = keys;
@@ -1873,15 +1937,14 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           setListOpen(false);
           return;
         }
-        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (listOpen && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
           e.preventDefault();
           e.stopPropagation();
-          if (listOpen) movePick(e.key === "ArrowDown" ? 1 : -1);
-          else moveRow(e.key === "ArrowDown" ? 1 : -1);
+          movePick(e.key === "ArrowDown" ? 1 : -1);
         } else if (e.key === "Enter" || e.key === "Tab") {
           const list = listForPick();
           const chosen = list[pick] ?? list[0];
-          if (!nameLocked && chosen && (itemQuery.trim() || listOpen)) {
+          if (chosen && (itemQuery.trim() || listOpen)) {
             e.preventDefault();
             e.stopPropagation();
             chooseItem(chosen);
@@ -1914,19 +1977,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       onChange={(e) => setQtyStr(e.target.value.replace(/[^\d-]/g, "").replace(/(?!^)-/g, ""))}
       onFocus={(e) => e.target.select()}
       onKeyDown={(e) => {
-        if (e.key === "ArrowLeft") {
-          e.preventDefault();
-          e.stopPropagation();
-          if (!editingId) movePending(-1);
-        } else if (e.key === "ArrowRight") {
-          e.preventDefault();
-          e.stopPropagation();
-          if (!editingId) movePending(1);
-        } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-          e.preventDefault();
-          e.stopPropagation();
-          moveRow(e.key === "ArrowDown" ? 1 : -1);
-        } else if (e.key === "+" || e.key === "=") {
+        if (e.key === "+" || e.key === "=") {
           e.preventDefault();
           bumpQty(1);
         } else if (e.key === "-" || e.key === "_") {
@@ -2093,7 +2144,23 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
 
           <div className="dept-box">
             <div className="dept-yellow">
-              <span className="dept-name">{dept}</span>
+              <button
+                type="button"
+                className="dept-name"
+                title="Exit (Esc)"
+                aria-label={`${dept}: Exit (Esc)`}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={(e) => {
+                  e.currentTarget.dispatchEvent(new KeyboardEvent("keydown", {
+                    key: "Escape",
+                    code: "Escape",
+                    bubbles: true,
+                    cancelable: true,
+                  }));
+                }}
+              >
+                {dept}
+              </button>
               {!barOnly && <div className="card-pane">
                 <span>Card No. :</span>
                 <input
@@ -2136,10 +2203,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
               </div>}
             </div>
             {!barOnly && <div className="dept-body">
-              <button type="button" className={`dept-btn ${dept === "CLUB" ? "active" : ""}`} title="Alt+1" onClick={() => switchDept("CLUB")}>The Boss<br />Club</button>
-              <button type="button" className={`dept-btn ${dept === "RESTAURANT" ? "active" : ""}`} title="Alt+2" onClick={() => switchDept("RESTAURANT")}>Restaurant</button>
-              {!advance && <button type="button" className={`dept-btn ${dept === "NC" ? "active" : ""}`} title="Alt+3" onClick={() => switchDept("NC")}>NC</button>}
-              <button type="button" className={`dept-btn ${dept === "BAR" ? "active" : ""}`} title="Alt+4" onClick={() => switchDept("BAR")}>Bar</button>
+              <button type="button" className={`dept-btn ${dept === "CLUB" ? "active" : ""}`} title="Alt+1" onClick={() => switchDept("CLUB", true)}>The Boss<br />Club</button>
+              <button type="button" className={`dept-btn ${dept === "RESTAURANT" ? "active" : ""}`} title="Alt+2" onClick={() => switchDept("RESTAURANT", true)}>Restaurant</button>
+              {!advance && <button type="button" className={`dept-btn ${dept === "NC" ? "active" : ""}`} title="Alt+3" onClick={() => switchDept("NC", true)}>NC</button>}
+              <button type="button" className={`dept-btn ${dept === "BAR" ? "active" : ""}`} title="Alt+4" onClick={() => switchDept("BAR", true)}>Bar</button>
             </div>}
           </div>
         </div>
@@ -2151,15 +2218,18 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
             <div>Rate</div>
             <div>Qty</div>
           </div>
-          <div className="igrid-body" ref={gridBodyRef}>
+          <div className="igrid-body" ref={gridBodyRef} onKeyDownCapture={moveGridFocus}>
             {items.map((it, i) => (
               <div
                 key={it.id}
                 tabIndex={0}
                 className={`igrid-row ${editingId === it.id ? "editing" : ""}`}
-                onClick={(e) => {
+                onFocus={(e) => {
                   setSel(i);
-                  if (!(e.target instanceof HTMLInputElement)) e.currentTarget.focus();
+                  if (e.target === e.currentTarget) {
+                    const nameCell = e.currentTarget.querySelector<HTMLElement>(".cell-name");
+                    (nameCell?.querySelector("input") ?? nameCell)?.focus({ preventScroll: true });
+                  }
                 }}
                 onDoubleClick={(e) => {
                   e.preventDefault();
@@ -2170,39 +2240,45 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                 onKeyDown={(e) => {
                   const target = e.target as HTMLElement;
                   if (target.closest("input, textarea, select")) return;
-                  if (e.key === "ArrowUp") {
+                  if (e.key === "Enter") {
                     e.preventDefault();
-                    moveRow(-1);
-                  } else if (e.key === "ArrowDown") {
-                    e.preventDefault();
-                    moveRow(1);
-                  } else if (e.key === "Enter") {
-                    e.preventDefault();
-                    startEdit(i);
-                  } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                    startEdit(i, target.classList.contains("cell-qty") ? "qty" : "name");
+                  } else if (target.classList.contains("cell-name") && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
                     e.preventDefault();
                     replaceItem(i, e.key);
                   }
                 }}
               >
-                <div>{i + 1}</div>
-                <div className={`cell-name ${sel === i ? "sel" : ""}`}>
+                <div tabIndex={-1}>{i + 1}</div>
+                <div tabIndex={-1} className={`cell-name ${sel === i ? "sel" : ""}`}>
                   {editingId === it.id ? nameInput : <>{it.name}{it.notes ? ` (${it.notes})` : ""}</>}
                 </div>
-                <div>{editingId === it.id ? (pending ? amt(pending.base_price) : "") : amt(it.unit_price)}</div>
-                <div className="cell-qty">{editingId === it.id ? qtyInput : it.qty}</div>
+                <div tabIndex={-1}>{editingId === it.id ? (pending ? amt(pending.base_price) : "") : amt(it.unit_price)}</div>
+                <div tabIndex={-1} className="cell-qty" onClick={(e) => {
+                  if (editingId === it.id) return;
+                  e.stopPropagation();
+                  startEdit(i, "qty");
+                }}>{editingId === it.id ? qtyInput : it.qty}</div>
               </div>
             ))}
-            <div className={`igrid-row entry${!editingId && pending && !listOpen ? " item-picked" : ""}`} onClick={() => {
-              if (editingId) returnToEntry();
-              else setSel(items.length);
-            }}>
-              <div>{items.length + 1}</div>
-              <div className={`cell-name ${!editingId && (sel < 0 || sel >= items.length) && (listOpen || (pending && nameLocked)) ? "sel" : ""}`}>
+            <div className={`igrid-row entry${!editingId && pending && !listOpen ? " item-picked" : ""}`}
+              onFocus={() => setSel(items.length)}
+              onClick={() => {
+                if (editingId) focusNewItem();
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" || e.target instanceof HTMLInputElement) return;
+                e.preventDefault();
+                if (editingId) focusNewItem();
+                else focusName();
+              }}
+            >
+              <div tabIndex={-1}>{items.length + 1}</div>
+              <div tabIndex={-1} className={`cell-name ${!editingId && (sel < 0 || sel >= items.length) && (listOpen || (pending && nameLocked)) ? "sel" : ""}`}>
                 {editingId ? null : nameInput}
               </div>
-              <div>{!editingId && pending ? amt(pending.base_price) : ""}</div>
-              <div className="cell-qty">{editingId ? null : qtyInput}</div>
+              <div tabIndex={-1}>{!editingId && pending ? amt(pending.base_price) : ""}</div>
+              <div tabIndex={-1} className="cell-qty">{editingId ? null : qtyInput}</div>
             </div>
                 {listOpen && listForPick().length > 0 && (
               <div
@@ -2271,8 +2347,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                 </td>
               </tr>
               <tr>
-                <td><button className="fn" disabled={barOnly || !canOpenReport("kot-report")} onClick={() => onOpenView("kot-report", deptOutlet(dept))}>KOT Rep. (F7)</button></td>
-                <td><button className="fn" disabled={barOnly || !canOpenReport("bill-report")} onClick={() => onOpenView("bill-report", deptOutlet(dept))}>Bill Rep. (F8)</button></td>
+                <td><button className="fn" disabled={!canOpenReport("kot-report")} onClick={() => onOpenView("kot-report", deptOutlet(dept))}>KOT Rep. (F7)</button></td>
+                <td><button className="fn" disabled={!canOpenReport("bill-report")} onClick={() => onOpenView("bill-report", deptOutlet(dept))}>Bill Rep. (F8)</button></td>
                 <td><button className="fn" disabled={barOnly || !canOpenReport("settlement-report")} onClick={() => onOpenView("settlement-report", deptOutlet(dept))}>S. Report (F12)</button></td>
                 <td><button className="fn" disabled={barOnly} onClick={() => { if (access && !access.itemXfer) onMessage("Permission denied"); else setItemXferOpen(true); }}>Item transfer (F4)</button></td>
                 <td><button className="fn" disabled={barOnly} onClick={() => { if (access && !access.table) onMessage("Permission denied"); else setXferOpen(true); }}>T. Transfer (F9)</button></td>

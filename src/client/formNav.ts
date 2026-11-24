@@ -104,11 +104,17 @@ function focusFormField(el: HTMLElement) {
   }
 }
 
+export function focusNearestFormField(from: HTMLElement, direction: ArrowDir, root: HTMLElement) {
+  const next = nearestField(from, direction, formFields(root));
+  if (next) focusFormField(next);
+}
+
 export function moveFormFocus(e: KeyboardEvent) {
   if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return false;
   if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "ArrowUp" && e.key !== "ArrowDown") return false;
   const active = document.activeElement as HTMLElement | null;
   if (!active?.matches("input, select, textarea, button")) return false;
+  if (active.closest(".bill-grid")) return false;
   if (active instanceof HTMLSelectElement && (e.key === "ArrowUp" || e.key === "ArrowDown")) return false;
   if (active.dataset.list === "open") return false;
   // "1" owns every arrow. "ud" owns Up/Down only (dropdowns). Text edits keep Left/Right for the caret.
@@ -126,8 +132,7 @@ export function moveFormFocus(e: KeyboardEvent) {
   e.preventDefault();
   e.stopPropagation();
   e.stopImmediatePropagation();
-  const next = nearestField(active, e.key, formFields(root as HTMLElement));
-  if (next) focusFormField(next);
+  focusNearestFormField(active, e.key, root as HTMLElement);
   return true;
 }
 

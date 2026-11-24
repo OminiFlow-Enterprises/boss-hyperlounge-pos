@@ -368,22 +368,19 @@ function cashAfterExpense(cashRupees: number, amounts: Record<string, string>, h
   return formatRupees(cashRupees - club - incentives);
 }
 
-/** Cash in hand = (ENTRY SALE + party payment + system cash sale + added fields) − CASH AFTER EXPENSE. Hidden lines count as 0. */
+/** Cash in hand adds the visible cash receipts, including system cash after expenses. */
 function cashInHandAmount(
-  entrySale: string,
-  partyPayment: string,
+  amounts: Record<string, string>,
   systemCash: string,
-  expense: string,
   extras: Array<{ amount?: string }>,
   hidden: string[],
 ) {
   const off = (id: string) => hidden.includes(id);
   const added = extras.reduce((sum, line) => sum + manualRupees(line.amount), 0);
-  const total = manualRupees(entrySale)
-    + (off("party_payment") ? 0 : manualRupees(partyPayment))
+  const total = (off("entry_sale") ? 0 : manualRupees(amounts.entry_sale))
+    + (off("party_payment") ? 0 : manualRupees(amounts.party_payment))
     + (off("system_cash") ? 0 : manualRupees(systemCash))
-    + added
-    - (off("expense") ? 0 : manualRupees(expense));
+    + added;
   return formatRupees(total);
 }
 
@@ -391,18 +388,6 @@ function cashInHandAmount(
 function totalSaleAmount(systemSale: string, lines: GstExtraLine[]) {
   const added = lines.reduce((sum, line) => sum + manualRupees(line.amount), 0);
   return formatRupees(manualRupees(systemSale) + added);
-}
-
-/** ENTRY SALE is the Advance :CASH total already on the slip. */
-function advanceCashPaise(particulars: Array<{ label?: string; amount?: number }>) {
-  let sum = 0;
-  for (const p of particulars) {
-    const label = String(p.label || "").toUpperCase().replace(/\s+/g, "");
-    if (!label.startsWith("ADVANCE:")) continue;
-    const mop = label.slice("ADVANCE:".length);
-    if (mop === "CASH" || mop.startsWith("CASH/") || mop.startsWith("CASH")) sum += Number(p.amount) || 0;
-  }
-  return sum;
 }
 
 export function GstReport({ onExit }: { onExit: () => void }) {
@@ -590,27 +575,18 @@ export function GstReport({ onExit }: { onExit: () => void }) {
   const footer = (view === "summary" ? summary?.footer : data.footer) || {};
   const s = summary?.summary || {};
   const particulars = summary?.particulars || [];
-  const entrySaleAmt = gstSumAmt(advanceCashPaise(particulars));
   const expenseShown = cashAfterExpense(cashParticularRupees(particulars), cashAmounts, hiddenLines);
   const systemSaleAmt = gstSumAmt(s.net_amount);
   const totalSaleAmt = totalSaleAmount(systemSaleAmt, saleLines);
-  const cashInHandAmt = cashInHandAmount(
-    entrySaleAmt,
-    cashAmounts.party_payment ?? "0.00",
-    expenseShown,
-    expenseShown,
-    extraLines,
-    hiddenLines,
-  );
+  const cashInHandAmt = cashInHandAmount(cashAmounts, expenseShown, extraLines, hiddenLines);
   const fromLabel = gstSlipDate(from);
   const cashLines = GST_CASH_LINES.filter((line) => line.id !== "cash_in_hand" && line.id !== "system_cash" && !hiddenLines.includes(line.id));
   const systemCash = GST_CASH_LINES.find((line) => line.id === "system_cash")!;
   const cashInHand = GST_CASH_LINES.find((line) => line.id === "cash_in_hand")!;
 
   function cashRow(line: { id: string; label: string }, withAdd = false) {
-    const locked = line.id === "entry_sale" || line.id === "cash_in_hand" || line.id === "expense" || line.id === "system_cash";
-    const shown = line.id === "entry_sale" ? entrySaleAmt
-      : line.id === "cash_in_hand" ? cashInHandAmt
+    const locked = line.id === "cash_in_hand" || line.id === "expense" || line.id === "system_cash";
+    const shown = line.id === "cash_in_hand" ? cashInHandAmt
       : line.id === "expense" || line.id === "system_cash" ? expenseShown
       : (cashAmounts[line.id] ?? "");
     return (
@@ -1362,6 +1338,8 @@ function SettlementUpdateDialog({
     setMode(label);
     setAmount(rupees(next.amount));
     setBankName(bank);
+    setCardNumber(next.card_number ?? "");
+    setCardBalance(null);
     setRemark(next.remark || "");
   }
 
@@ -1385,9 +1363,11 @@ function SettlementUpdateDialog({
   const prepaid = row?.method === "MEMBER_CARD";
 
   async function validateCard(paise: number) {
+    if (prepaid && cardNumber && cardNumber === row.card_number) return cardNumber;
     if (!cardNoReady(cardNumber)) throw new Error("Enter a four-digit card number");
     const params = new URLSearchParams({ q: cardNumber, exact: "1" });
     const result = await api.get<{ card: { card_number: string }; balances: { available: number } }>(`/api/cards/balance/check?${params}`);
+    if (prepaid && result.card.card_number === row.card_number) return result.card.card_number;
     const available = result.balances.available;
     const staged = parts.reduce((total, part) => part.cardNumber === result.card.card_number ? total + part.amount : total, 0);
     setCardBalance(available);
@@ -1403,10 +1383,10 @@ function SettlementUpdateDialog({
     if (paise > remaining) { showWarn("Amount exceeds the remaining settlement", "amount"); return; }
     if (prepaid && paise !== remaining) { showWarn("Prepaid card settlements cannot be split", "amount"); return; }
     busy.current = true;
-    const original = { method: row.method, amount: row.amount, account: row.account, remark: row.remark };
-    const newPrepaid = mode === "PREPAID CARD" && !prepaid;
+    const original = { method: row.method, amount: row.amount, account: row.account, remark: row.remark, ledger_id: row.ledger_id };
+    const cardPayment = mode === "PREPAID CARD";
     try {
-      const number = newPrepaid ? await validateCard(paise) : undefined;
+      const number = cardPayment ? await validateCard(paise) : undefined;
       const account = mode === "BANK TRANSFER" ? bankName : mode === "CASH" ? "Cash." : row.account;
       const lines = [...parts, { method: mode, amount: paise, account, remark, cardNumber: number }];
       if (paise < remaining) {
@@ -1423,7 +1403,7 @@ function SettlementUpdateDialog({
       onChanged();
       onClose();
     } catch (e) {
-      showWarn(e instanceof Error ? e.message : "Could not update settlement", newPrepaid ? "card" : "save");
+      showWarn(e instanceof Error ? e.message : "Could not update settlement", cardPayment ? "card" : "save");
     } finally {
       busy.current = false;
     }
@@ -1451,9 +1431,9 @@ function SettlementUpdateDialog({
         e.preventDefault();
         e.stopImmediatePropagation();
         if (mode === "BANK TRANSFER") bankRef.current?.focus();
-        else if (mode === "PREPAID CARD" && !prepaid) focusField("card");
+        else if (mode === "PREPAID CARD") focusField("card");
         else updateRef.current?.focus();
-      } else if (!prepaid && active === cardRef.current) {
+      } else if (active === cardRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
         if (busy.current) return;
@@ -1519,7 +1499,7 @@ function SettlementUpdateDialog({
               <td className="lbl">Payment Mode :</td>
               <td>
                 <select ref={modeRef} className="win" tabIndex={2} value={mode} onChange={(e) => setMode(e.target.value)}>
-                  {REPORT_PAY_MODES.filter((choice) => !prepaid || choice === "PREPAID CARD").map((choice) => <option key={choice} value={choice}>{formatUiLabel(choice)}</option>)}
+                  {REPORT_PAY_MODES.map((choice) => <option key={choice} value={choice}>{formatUiLabel(choice)}</option>)}
                 </select>
               </td>
             </tr>
@@ -1527,18 +1507,16 @@ function SettlementUpdateDialog({
               <tr>
                 <td className="lbl">Card No. :</td>
                 <td><input ref={cardRef} className="win" aria-label="Card number" data-num="card"
-                  inputMode="numeric" maxLength={4} tabIndex={prepaid ? -1 : 3} readOnly={prepaid}
-                  value={prepaid ? row?.card_number ?? "" : cardNumber}
+                  inputMode="numeric" maxLength={4} tabIndex={3}
+                  value={cardNumber}
                   onChange={(e) => {
                     if (busy.current) return;
                     setCardNumber(cardNoDigits(e.target.value));
                     setCardBalance(null);
                   }} /></td>
-                {!prepaid && <>
-                  <td className="lbl">Card Balance :</td>
-                  <td><input className="win num" aria-label="Card balance" readOnly tabIndex={-1}
-                    value={cardBalance === null ? "" : rupees(cardBalance)} /></td>
-                </>}
+                <td className="lbl">Card Balance :</td>
+                <td><input className="win num" aria-label="Card balance" readOnly tabIndex={-1}
+                  value={cardBalance === null ? "" : rupees(cardBalance)} /></td>
               </tr>
             )}
             {mode === "BANK TRANSFER" && (

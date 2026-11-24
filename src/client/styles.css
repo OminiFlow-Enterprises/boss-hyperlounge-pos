@@ -159,15 +159,13 @@ input.win, select.win {
 }
 input.win.green, select.win.green { background: var(--green-box); }
 .bill-dlg [aria-invalid="true"],
-.confirm-dlg .win[aria-invalid="true"],
-.igrid-row .cell-qty input[aria-invalid="true"] {
+.confirm-dlg .win[aria-invalid="true"] {
   outline: 2px solid #b42318;
   background: #fff1ef;
 }
 input.win:focus,
 select.win:focus,
-textarea:focus,
-.igrid-row .cell-qty input:focus {
+textarea:focus {
   background: #cce6ff;
   color: #000;
   outline: none;
@@ -203,7 +201,17 @@ label.chk input { width: 13px; height: 13px; margin: 0; }
   font-weight: 700;
   border-bottom: 1px solid #c0c0c0;
 }
-.dept-name { line-height: 36px; }
+.dept-name {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.dept-name:focus-visible { outline-offset: -2px; }
 .table-stack {
   display: flex;
   flex-direction: column;
@@ -294,6 +302,7 @@ label.chk input { width: 13px; height: 13px; margin: 0; }
   background: var(--white);
 }
 .igrid-row:focus { outline: 1px solid var(--blue); outline-offset: -1px; }
+.igrid-row > div:focus { outline: 2px solid var(--blue); outline-offset: -2px; }
 .igrid-row > div {
   border-right: 1px solid #a0a0a0;
   border-bottom: 1px solid #a0a0a0;
@@ -351,6 +360,22 @@ label.chk input { width: 13px; height: 13px; margin: 0; }
   text-align: right;
   padding: 0 3px;
   outline: none;
+}
+.igrid-row .cell-qty:focus-within,
+.igrid-row .cell-qty input:focus {
+  background: var(--blue);
+  color: #fff;
+}
+.igrid-row:has(.cell-qty:focus-within) .cell-name.sel,
+.igrid-row:has(.cell-qty:focus-within) .cell-name.sel input {
+  background: var(--white);
+  color: var(--text);
+}
+.igrid-row .cell-qty input[aria-invalid="true"] {
+  outline: 2px solid #b42318;
+}
+.igrid-row .cell-qty input[aria-invalid="true"]:not(:focus) {
+  background: #fff1ef;
 }
 .item-drop {
   position: absolute;
@@ -1461,7 +1486,10 @@ table.data tr.grp td { background: #ffc0cb; font-weight: 700; }
 .bill-grid td:nth-child(4),
 .bill-grid td:nth-child(5),
 .bill-grid td:nth-child(6) { text-align: right; }
-.bill-grid tbody tr.on:not(:first-child) td { background: var(--blue); color: #fff; }
+.bill-grid tbody td:focus-within {
+  outline: 2px solid #ffda66;
+  outline-offset: -2px;
+}
 .bill-totals { width: 100%; border-collapse: collapse; margin-top: 8px; table-layout: fixed; }
 .bill-totals > tbody > tr > td { width: 50%; vertical-align: top; padding: 0 10px; }
 .bill-side { width: 100%; border-collapse: collapse; table-layout: fixed; }
@@ -1488,6 +1516,11 @@ table.data tr.grp td { background: #ffc0cb; font-weight: 700; }
 .bill-grid tr.add td input.line {
   background: var(--green-box);
   border: 1px solid #7a7a7a;
+}
+.bill-grid tbody td:focus-within,
+.bill-grid tbody td:focus-within input.line {
+  background: var(--blue);
+  color: #fff;
 }
 .bill-drop {
   position: fixed;

@@ -10,7 +10,7 @@ import { formatTableNo } from "../shared/tableLabel";
 import { SETTLEMENT_PENDING_TRANSFER_MESSAGE } from "../shared/tableTransfer";
 import { itemMatchScore } from "../shared/itemSearch";
 import type { BillDetails, BillLineEdit, PaymentMode } from "../shared/types";
-import { cardNoDigits, cardNoReady, moveSelectOption, stayOnCard } from "./formNav";
+import { cardNoDigits, cardNoReady, focusNearestFormField, moveSelectOption, stayOnCard } from "./formNav";
 import { BANK_PAYMENT_ACCOUNTS, DEFAULT_BANK_PAYMENT_ACCOUNT } from "../shared/paymentAccounts";
 import { ComplimentaryMasterDialog, type CompAccount } from "./ComplimentaryMaster";
 
@@ -227,7 +227,7 @@ export function PrepareBillDialog({
   const [masterOpen, setMasterOpen] = useState(false);
   const compRef = useRef<HTMLSelectElement>(null);
   const remarkRef = useRef<HTMLInputElement>(null);
-  const [rowSel, setRowSel] = useState(0);
+  const [rowSel, setRowSel] = useState(-1);
   const gridRef = useRef<HTMLDivElement>(null);
   const discRef = useRef<HTMLInputElement>(null);
   const serviceChargeRef = useRef<HTMLInputElement>(null);
@@ -239,9 +239,7 @@ export function PrepareBillDialog({
   const busy = useRef(false);
   const skipQtyBlur = useRef(false);
   const skipPriceBlur = useRef(false);
-  const pendingFocus = useRef<number | null>(null);
   const itemsRef = useRef<any[]>([]);
-  const rowSelRef = useRef(0);
   const [editQty, setEditQty] = useState("");
   const [editPrice, setEditPrice] = useState("");
   const [nameQuery, setNameQuery] = useState("");
@@ -251,6 +249,7 @@ export function PrepareBillDialog({
   const [addQuery, setAddQuery] = useState("");
   const [addPick, setAddPick] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
+  const [addRowOpened, setAddRowOpened] = useState(false);
   const [addQty, setAddQty] = useState("1");
   const [invalidAddField, setInvalidAddField] = useState<"item" | "qty" | null>(null);
   const [pending, setPending] = useState<BillProduct | null>(null);
@@ -412,6 +411,13 @@ export function PrepareBillDialog({
     savedServiceChargePct.current = DEFAULT_SVC_PCT;
     setDelivery("0");
     setBill(null);
+    setRowSel(-1);
+    setAddRowOpened(false);
+    setPending(null);
+    setAddQuery("");
+    setAddOpen(false);
+    setAddQty("1");
+    setInvalidAddField(null);
     setComp(outlet === "NC");
     setCompId("");
     (async () => {
@@ -539,7 +545,6 @@ export function PrepareBillDialog({
   }, [nameMatches.length, namePick]);
 
   itemsRef.current = bill?.items ?? [];
-  rowSelRef.current = rowSel;
 
   const shown = useMemo(() => {
     const source = (bill?.items ?? []) as any[];
@@ -616,39 +621,34 @@ export function PrepareBillDialog({
     setNameOpen(false);
   }, [bill, rowSel]);
 
-  useEffect(() => {
-    const index = pendingFocus.current;
-    if (index == null || index !== rowSel) return;
-    const it = bill?.items?.[rowSel];
-    if (it && nameQuery !== it.name) return;
-    pendingFocus.current = null;
-    scrollBillRow(rowSel);
-    const name = gridRef.current?.querySelector<HTMLInputElement>("tr.on input.name");
-    name?.focus();
-    name?.select();
-  }, [rowSel, nameQuery, bill]);
+  function focusBillCell(rowIndex: number, columnIndex: number) {
+    const cell = gridRef.current?.querySelector("tbody")?.rows[rowIndex]?.cells[columnIndex];
+    if (!cell) return;
+    if (!cell.contains(document.activeElement)) cell.focus({ preventScroll: true });
+    scrollBillRow(rowIndex);
+    requestAnimationFrame(() => {
+      if (document.activeElement !== cell) return;
+      const input = cell.querySelector<HTMLInputElement>("input:not(:disabled)");
+      input?.focus({ preventScroll: true });
+      if (input?.type === "text") input.select();
+    });
+  }
 
-  function focusLine(index: number) {
+  function focusOutsideBillGrid(cell: HTMLTableCellElement, direction: "ArrowUp" | "ArrowDown") {
+    const section = direction === "ArrowUp" ? ".bill-form" : ".bill-totals";
+    const fields = cell.closest(".bill-body")?.querySelector<HTMLElement>(section);
+    if (fields) focusNearestFormField(cell, direction, fields);
+  }
+
+  function focusLine(index: number, openAddRow = false) {
     const count = itemsRef.current.length;
-    if (index < 0 || index >= count) {
-      pendingFocus.current = null;
-      setRowSel(-1);
-      requestAnimationFrame(() => {
-        scrollBillRow(count);
-        addNameRef.current?.focus();
-      });
+    if (index >= 0 && index < count) {
+      focusBillCell(index, 1);
       return;
     }
-    pendingFocus.current = index;
-    if (index === rowSelRef.current) {
-      pendingFocus.current = null;
-      scrollBillRow(index);
-      const name = gridRef.current?.querySelector<HTMLInputElement>("tr.on input.name");
-      name?.focus();
-      name?.select();
-      return;
-    }
-    setRowSel(index);
+    if (advance || (!openAddRow && !addRowOpened && count > 0)) return;
+    if (openAddRow) setAddRowOpened(true);
+    requestAnimationFrame(() => focusBillCell(itemsRef.current.length, 1));
   }
 
   useLayoutEffect(() => {
@@ -672,21 +672,6 @@ export function PrepareBillDialog({
     if (top < box.scrollTop) box.scrollTop = top;
     else if (bottom > box.scrollTop + box.clientHeight) box.scrollTop = bottom - box.clientHeight;
   }, [listPick, listOpen, listMatches.length]);
-
-  function moveBillRow(dir: number) {
-    const count = bill?.items?.length ?? 0;
-    if (!count) {
-      addNameRef.current?.focus();
-      return;
-    }
-    const next = Math.max(0, Math.min(count - 1, rowSel + dir));
-    if (dir > 0 && rowSel >= count - 1) {
-      addNameRef.current?.focus();
-      return;
-    }
-    setRowSel(next);
-    requestAnimationFrame(() => scrollBillRow(next));
-  }
 
   function chooseAdd(p: BillProduct) {
     setPending(p);
@@ -734,19 +719,21 @@ export function PrepareBillDialog({
   }
 
   async function commitQty(it: any, raw: string) {
-    if (!it || raw.trim() === "") return;
+    if (!it || raw.trim() === "") return false;
     const qty = Number(raw);
-    if (!Number.isInteger(qty) || qty < 0) return;
-    if (qty === Math.round(Number(it.qty))) return;
-    if (!ready || busy.current) return;
+    if (!Number.isInteger(qty) || qty < 0) return false;
+    if (!ready || busy.current) return false;
+    if (qty === Math.round(Number(it.qty))) return true;
     busy.current = true;
     try {
-      if (!await stageEdit({ kind: "qty", ids: it.ids ?? [it.id], qty })) setEditQty(String(it.qty));
+      if (await stageEdit({ kind: "qty", ids: it.ids ?? [it.id], qty })) return true;
+      setEditQty(String(it.qty));
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Could not change qty");
     } finally {
       busy.current = false;
     }
+    return false;
   }
 
   async function commitPrice(it: any, raw: string) {
@@ -789,14 +776,12 @@ export function PrepareBillDialog({
       const random = crypto.getRandomValues(new Uint8Array(16));
       const id = "bill-" + Array.from(random, (byte) => byte.toString(16).padStart(2, "0")).join("");
       if (!await stageEdit({ kind: "add", id, productId: pending.id, qty, outlet })) return;
+      setAddRowOpened(true);
       setPending(null);
       setAddQuery("");
       setAddOpen(false);
       setAddQty("1");
-      requestAnimationFrame(() => {
-        if (outlet === "NC") remarkRef.current?.focus();
-        else addNameRef.current?.focus();
-      });
+      requestAnimationFrame(() => addNameRef.current?.focus());
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Could not add item");
     } finally {
@@ -839,18 +824,6 @@ export function PrepareBillDialog({
           e.stopPropagation();
           removeSelected();
         }
-      }
-      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && document.activeElement === gridRef.current) {
-        e.preventDefault();
-        e.stopPropagation();
-        moveBillRow(e.key === "ArrowDown" ? 1 : -1);
-      }
-      if (e.key === "Enter" && document.activeElement === gridRef.current) {
-        e.preventDefault();
-        e.stopPropagation();
-        const name = gridRef.current?.querySelector<HTMLInputElement>("tr.on input.name");
-        name?.focus();
-        name?.select();
       }
     }
     window.addEventListener("keydown", keys, true);
@@ -1100,10 +1073,35 @@ export function PrepareBillDialog({
         <div
           className="bill-grid-wrap"
           ref={gridRef}
-          tabIndex={-1}
-          onMouseDown={(e) => {
-            if ((e.target as HTMLElement).closest("input")) return;
-            gridRef.current?.focus();
+          tabIndex={0}
+          onKeyDown={(e) => {
+            const cell = (e.target as HTMLElement).closest<HTMLTableCellElement>("tbody td");
+            const row = cell?.closest("tr");
+            const lastRow = (e.currentTarget.querySelector("tbody")?.rows.length ?? 0) - 1;
+            if (lastRow < 0) return;
+            if (e.key === "Enter" && e.target === e.currentTarget) {
+              e.preventDefault();
+              focusBillCell(rowSel >= 0 ? rowSel : 0, 1);
+              return;
+            }
+            if (e.key === "Enter" && cell && row?.sectionRowIndex === lastRow) {
+              e.preventDefault();
+              e.stopPropagation();
+              focusOutsideBillGrid(cell, "ArrowDown");
+              return;
+            }
+            const vertical = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
+            const horizontal = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
+            if ((!vertical && !horizontal) || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+            e.preventDefault();
+            e.stopPropagation();
+            const nextRow = row ? row.sectionRowIndex + vertical : 0;
+            if (cell && (nextRow < 0 || nextRow > lastRow)) {
+              focusOutsideBillGrid(cell, nextRow < 0 ? "ArrowUp" : "ArrowDown");
+              return;
+            }
+            const nextColumn = cell ? Math.max(0, Math.min(6, cell.cellIndex + horizontal)) : 1;
+            focusBillCell(nextRow, nextColumn);
           }}
         >
           <table className="bill-grid">
@@ -1115,14 +1113,23 @@ export function PrepareBillDialog({
                 <th>No.</th><th>Item Name</th><th>Qty</th><th>Item Price</th><th>Tax (%)</th><th>Amount</th><th title="No Discount">No Disc.</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody
+              onFocus={(e) => {
+                const row = (e.target as HTMLElement).closest("tr");
+                if (row) setRowSel(row.classList.contains("add") ? -1 : row.sectionRowIndex);
+              }}
+              onClick={(e) => {
+                const target = e.target as HTMLElement;
+                if (target.closest("input")) return;
+                const cell = target.closest<HTMLTableCellElement>("td");
+                const row = cell?.closest("tr");
+                if (cell && row) focusBillCell(row.sectionRowIndex, cell.cellIndex);
+              }}
+            >
               {(bill?.items ?? []).map((it: any, i: number) => (
-                <tr key={it.id} className={i === rowSel ? "on" : ""} onClick={() => {
-                  if (i === (bill?.items?.length ?? 0) - 1) focusLine(i + 1);
-                  else setRowSel(i);
-                }}>
-                  <td>{String(i + 1).padStart(2, "0")}</td>
-                  <td>
+                <tr key={it.id}>
+                  <td tabIndex={-1}>{String(i + 1).padStart(2, "0")}</td>
+                  <td tabIndex={-1}>
                     {!advance && i === rowSel ? (
                       <input
                         ref={editNameRef}
@@ -1131,7 +1138,6 @@ export function PrepareBillDialog({
                         spellCheck={false}
                         data-list={nameOpen ? "open" : undefined}
                         value={nameQuery}
-                        onClick={(e) => e.stopPropagation()}
                         onChange={(e) => {
                           const v = e.target.value;
                           setNameLocked(false);
@@ -1167,13 +1173,12 @@ export function PrepareBillDialog({
                       />
                     ) : it.name}
                   </td>
-                  <td>
+                  <td tabIndex={-1}>
                     {!advance && i === rowSel ? (
                       <input
                         className="line qty"
                         data-num="int"
                         value={editQty}
-                        onClick={(e) => e.stopPropagation()}
                         onChange={(e) => setEditQty(e.target.value.replace(/\D/g, ""))}
                         onBlur={() => {
                           if (skipQtyBlur.current) { skipQtyBlur.current = false; return; }
@@ -1186,7 +1191,15 @@ export function PrepareBillDialog({
                           skipQtyBlur.current = true;
                           const raw = (e.target as HTMLInputElement).value;
                           const row = e.currentTarget.closest("tr");
-                          void commitQty(it, raw).then(() => {
+                          void commitQty(it, raw).then((committed) => {
+                            if (!committed) {
+                              skipQtyBlur.current = false;
+                              return;
+                            }
+                            if (i === (bill?.items?.length ?? 0) - 1) {
+                              focusLine(itemsRef.current.length, true);
+                              return;
+                            }
                             if (outlet === "NC") {
                               remarkRef.current?.focus();
                               return;
@@ -1203,13 +1216,12 @@ export function PrepareBillDialog({
                       />
                     ) : Number(it.qty).toFixed(2)}
                   </td>
-                  <td>
+                  <td tabIndex={-1}>
                     {!advance && !cashier && i === rowSel ? (
                       <input
                         className="line price"
                         data-num="dec"
                         value={editPrice}
-                        onClick={(e) => e.stopPropagation()}
                         onChange={(e) => setEditPrice(numText(e.target.value))}
                         onBlur={() => {
                           if (skipPriceBlur.current) { skipPriceBlur.current = false; return; }
@@ -1221,25 +1233,27 @@ export function PrepareBillDialog({
                           e.stopPropagation();
                           skipPriceBlur.current = true;
                           const raw = (e.target as HTMLInputElement).value;
+                          const cell = e.currentTarget.closest("td");
                           const next = i + 1;
                           void commitPrice(it, raw).then(() => {
-                            if (outlet === "NC") remarkRef.current?.focus();
+                            if (cell && !cell.closest("tr")?.nextElementSibling) {
+                              focusOutsideBillGrid(cell, "ArrowDown");
+                            } else if (outlet === "NC") remarkRef.current?.focus();
                             else focusLine(next);
                           });
                         }}
                       />
                     ) : rupee(shown.items[i]?.unit_price ?? it.unit_price)}
                   </td>
-                  <td>{Number(it.tax_rate).toFixed(2)}</td>
-                  <td>{rupee(shown.items[i]?.amount ?? it.amount)}</td>
-                  <td>
+                  <td tabIndex={-1}>{Number(it.tax_rate).toFixed(2)}</td>
+                  <td tabIndex={-1}>{rupee(shown.items[i]?.amount ?? it.amount)}</td>
+                  <td tabIndex={-1}>
                     <input
                       type="checkbox"
                       aria-label={`Exclude ${it.name} from discount`}
                       title="No discount for this item"
                       disabled={advance}
                       checked={(it.ids ?? [it.id]).some((id: string) => noDisc.includes(id))}
-                      onClick={(e) => e.stopPropagation()}
                       onChange={(e) => {
                         const ids: string[] = it.ids ?? [it.id];
                         const excludeItemIds = e.target.checked
@@ -1252,9 +1266,9 @@ export function PrepareBillDialog({
                   </td>
                 </tr>
               ))}
-              {!advance && <tr className="add">
-                <td>{String((bill?.items?.length ?? 0) + 1).padStart(2, "0")}</td>
-                <td>
+              {!advance && (addRowOpened || (ready && !bill?.items?.length)) && <tr className="add">
+                <td tabIndex={-1}>{String((bill?.items?.length ?? 0) + 1).padStart(2, "0")}</td>
+                <td tabIndex={-1}>
                   <input
                     ref={addNameRef}
                     className="line"
@@ -1305,7 +1319,7 @@ export function PrepareBillDialog({
                     }}
                   />
                 </td>
-                <td>
+                <td tabIndex={-1}>
                   <input
                     ref={addQtyRef}
                     className="line"
@@ -1324,10 +1338,10 @@ export function PrepareBillDialog({
                     }}
                   />
                 </td>
-                <td>{pending ? rupee(Number(pending.base_price || 0)) : ""}</td>
-                <td />
-                <td>{pending ? rupee(shown.extra) : ""}</td>
-                <td />
+                <td tabIndex={-1}>{pending ? rupee(Number(pending.base_price || 0)) : ""}</td>
+                <td tabIndex={-1} />
+                <td tabIndex={-1}>{pending ? rupee(shown.extra) : ""}</td>
+                <td tabIndex={-1} />
               </tr>}
             </tbody>
           </table>

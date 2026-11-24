@@ -748,7 +748,7 @@ type SettlementPart = { method: string; amount: number; account: string; remark:
 export function updateSettlement(
   ctx: AppContext,
   paymentId: string,
-  input: { original?: Partial<SettlementPart>; lines?: SettlementPart[]; amount?: number },
+  input: { original?: Partial<SettlementPart> & { ledger_id?: string | null }; lines?: SettlementPart[]; amount?: number },
 ) {
   assertPermission(ctx.actor.role, "SETTLE_BILL");
   const { original } = input;
@@ -788,23 +788,51 @@ export function updateSettlement(
     if (!row) throw new AppError("Settlement not found", 404);
     if (row.status === "CANCELLED") throw new AppError("Invoice is CANCELLED");
     if (row.method !== original.method || row.amount !== original.amount ||
-        row.account !== original.account || row.remark !== original.remark) {
+        row.account !== original.account || row.remark !== original.remark ||
+        (row.method === "MEMBER_CARD" && row.ledger_id !== original.ledger_id)) {
       throw new AppError("Settlement changed. Reopen it from the report and try again.", 409);
     }
     if (lines.reduce((total, line) => total + line.amount, 0) !== row.amount) {
       throw new AppError("Payment parts must add up to the selected settlement amount");
     }
 
-    if (row.method === "MEMBER_CARD") {
-      if (lines.length !== 1 || lines[0].method !== "MEMBER_CARD") {
-        throw new AppError("Prepaid card settlement cannot be changed");
+    const prepaid = row.method === "MEMBER_CARD";
+    if (prepaid && lines.length !== 1) throw new AppError("Prepaid card settlements cannot be split");
+    const replacementNumber = lines[0].cardNumber;
+    const sameCard = prepaid && lines[0].method === "MEMBER_CARD" && (
+      replacementNumber === row.card_number ||
+      Boolean(replacementNumber && cards.findCardByScan(ctx, replacementNumber)?.id === row.member_card_id)
+    );
+    if (prepaid && !sameCard) {
+      const purchase = ctx.db.prepare(
+        `SELECT debit.paid_amount - COALESCE(SUM(credit.paid_amount), 0) AS paid,
+                debit.bonus_amount - COALESCE(SUM(credit.bonus_amount), 0) AS bonus
+         FROM card_ledger debit
+         LEFT JOIN card_ledger credit ON credit.related_ledger_id = debit.id AND credit.type = 'REFUND'
+         WHERE debit.id = ? AND debit.card_id = ? AND debit.type = 'PURCHASE'
+           AND debit.direction = 'DEBIT' AND debit.reference_number IS NULL
+         GROUP BY debit.id`,
+      ).get(row.ledger_id, row.member_card_id) as { paid: number; bonus: number } | undefined;
+      if (!purchase || purchase.paid < 0 || purchase.bonus < 0 || purchase.paid + purchase.bonus !== row.amount) {
+        throw new AppError("The original prepaid charge cannot be reversed from this settlement");
       }
-      lines[0].account = String(row.account);
+      cards.writeLedger(ctx, {
+        cardId: String(row.member_card_id),
+        type: "REFUND",
+        direction: "CREDIT",
+        paidAmount: purchase.paid,
+        bonusAmount: purchase.bonus,
+        paymentMode: "MEMBER_CARD",
+        relatedLedgerId: String(row.ledger_id),
+        relatedInvoiceId: String(row.invoice_id),
+        reason: "Settlement payment changed",
+        idempotencyKey: `settlement-reversal:${row.ledger_id}`,
+      });
     }
 
     const posted = lines.map(({ cardNumber, ...line }) => {
       if (line.method !== "MEMBER_CARD") return { ...line, cardId: null, ledgerId: null };
-      if (row.method === "MEMBER_CARD") return { ...line, cardId: row.member_card_id, ledgerId: row.ledger_id };
+      if (sameCard) return { ...line, account: String(row.account), cardId: row.member_card_id, ledgerId: row.ledger_id };
       if (!cardNumber) throw new AppError("Enter card number");
       const { card } = cards.checkBalance(ctx, cardNumber, true);
       try {

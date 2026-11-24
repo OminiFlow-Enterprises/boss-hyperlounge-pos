@@ -153,6 +153,50 @@ it("posts prepaid settlement parts atomically and rejects stale retries", () => 
   expect(balancesFromLedger(cashier, card.id).usable).toBe(0);
 });
 
+it.each(["CASH", "BANK TRANSFER"] as const)("moves a prepaid settlement to another card and then to %s", (mode) => {
+  const { ctx, seeded } = createTestApp();
+  const cashier = ctx("cashier");
+  const table = getTableByCode(cashier, "01");
+  openTable(cashier, { tableId: table.id });
+  const order = createOrder(cashier, table.id) as { id: string };
+  addItem(cashier, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
+  const invoice = generateInvoice(cashier, order.id) as { id: string; grand_total: number };
+  const amount = invoice.grand_total;
+  const book = (cardNo: string, usable: number) =>
+    (saveBooking(cashier, { cardNo, advance: usable + 10_000, mop: "CASH" }) as { card: { id: string } }).card.id;
+  const originalCard = book("1234", amount);
+  const replacementCard = book("5678", amount);
+  const underfundedCard = book("6789", amount - 1);
+  const balance = (id: string) => balancesFromLedger(cashier, id).usable;
+  settleInvoice(cashier, invoice.id, [{ method: "MEMBER_CARD", amount, memberCardId: originalCard }], { printReceipt: false });
+  const [payment] = getInvoice(cashier, invoice.id).payments;
+  const detail = () => settlementDetail(cashier, payment.id) as {
+    method: string; amount: number; account: string; remark: string; ledger_id: string | null;
+  };
+  const original = detail();
+  const prepaid = { method: "PREPAID CARD", amount, account: "", remark: "", cardNumber: "5678" };
+
+  updateSettlement(cashier, payment.id, { original, lines: [{ ...prepaid, cardNumber: "1234" }] });
+  expect(detail().ledger_id).toBe(original.ledger_id);
+  expect(() => updateSettlement(cashier, payment.id, { original, lines: [{ ...prepaid, cardNumber: "6789" }] }))
+    .toThrow("Insufficient amount");
+  expect([balance(originalCard), balance(underfundedCard)]).toEqual([0, amount - 1]);
+  expect(detail()).toEqual(original);
+
+  updateSettlement(cashier, payment.id, { original, lines: [prepaid] });
+  expect([balance(originalCard), balance(replacementCard)]).toEqual([amount, 0]);
+  expect(detail()).toMatchObject({ card_number: "5678", amount, status: "PAID" });
+  expect(() => updateSettlement(cashier, payment.id, { original, lines: [prepaid] })).toThrow("Settlement changed");
+
+  updateSettlement(cashier, payment.id, { original: detail(), lines: [{ method: mode, amount, account: "HDFC", remark: "" }] });
+  expect([balance(originalCard), balance(replacementCard)]).toEqual([amount, amount]);
+  expect(detail()).toMatchObject({
+    method: mode === "CASH" ? "CASH" : "CARD",
+    account: mode === "CASH" ? "Cash." : "HDFC",
+    amount, member_card_id: null, ledger_id: null, status: "PAID",
+  });
+});
+
 it("replaces one settlement with four parts on its original report date", () => {
   const { ctx, seeded } = createTestApp();
   const waiter = ctx("waiter");

@@ -11,3 +11,6 @@ data/*.sqlite-shm
 .vite
 release
 .cache
+
+/backups/*.sqlite*
+/data/migration-backups/*.sqlite*
