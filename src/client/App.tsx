@@ -1,13 +1,14 @@
 import { formatUiLabel } from "./formatUiLabel";
 import { Component, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { finishKotPrinting, ignoreRepeatedPrintKey, reprintKot, type KotPrintResponse } from "./printActions";
 import { trackKotPrintJobs, watchKotPrintJobs } from "./kotPrintJobs";
-import { api, ApiError } from "./api";
+import { api, ApiError, sessionExpiredEvent } from "./api";
 import { formatINR } from "../shared/money";
 import { businessDayStart } from "../shared/businessDate";
 import { formatTableNo } from "../shared/tableLabel";
 import type { Actor, NavView, PaymentMode } from "../shared/types";
-import { ADVANCE_OUTLETS, isAdminActor, isAdvanceOutlet, isBarOrderOnly, outletRight, rightOn, viewRight } from "../shared/userRights";
+import { ADVANCE_OUTLETS, canViewNcEstimate, isAdminActor, isAdvanceOutlet, isBarOrderOnly, outletRight, rightOn, viewRight } from "../shared/userRights";
 import { AlertBox, CapBtns, ConfirmAsk, ItemNotesDialog, ItemTransferDialog, PrepareBillDialog, PrepareTablePick, SettleDialog, TransferDialog } from "./BillDialogs";
 import { armReplaceOnFocus, blockLetterInsert, blockLetters, cardNoDigits, cardNoReady, moveFormFocus, replaceOnFirstKey, stayOnCard } from "./formNav";
 import { itemMatchScore } from "../shared/itemSearch";
@@ -275,14 +276,57 @@ export function App() {
     setBootstrap(data);
   }
 
-  async function logout() {
-    try { await api.post("/api/auth/logout"); } catch { /* lock the screen anyway */ }
+  const lockScreen = useCallback(() => {
     setActor(null);
     setSignedIn(false);
     setView("billing");
     setMenu(null);
     setSub(null);
+    setInvoice(null);
+    setAlertText("");
+    alertAfterRef.current = null;
+  }, []);
+
+  async function logout() {
+    try { await api.post("/api/auth/logout"); } catch { /* lock the screen anyway */ }
+    lockScreen();
   }
+
+  useLayoutEffect(() => {
+    if (!signedIn) return;
+    const onExpired = () => flushSync(lockScreen);
+    window.addEventListener(sessionExpiredEvent, onExpired);
+    return () => window.removeEventListener(sessionExpiredEvent, onExpired);
+  }, [signedIn, lockScreen]);
+
+  useEffect(() => {
+    if (!signedIn) return;
+    const controller = new AbortController();
+    let checking = false;
+    async function checkSession() {
+      if (checking) return;
+      checking = true;
+      try {
+        const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(10_000)]);
+        const session = await api.get<{ authenticated: boolean }>("/api/session", signal);
+        if (!signal.aborted && session.authenticated === false) lockScreen();
+      } catch {
+        // Retry when the server is reachable again.
+      } finally {
+        checking = false;
+      }
+    }
+    const timer = window.setInterval(checkSession, 5000);
+    window.addEventListener("focus", checkSession);
+    window.addEventListener("online", checkSession);
+    void checkSession();
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+      window.removeEventListener("focus", checkSession);
+      window.removeEventListener("online", checkSession);
+    };
+  }, [signedIn, lockScreen]);
 
   const refreshTables = useCallback(async (signal?: AbortSignal) => {
     const refresh = tableRefresh.current;
@@ -550,6 +594,8 @@ export function App() {
           barOnly={barOnly}
           advance={advance}
           cashier={cashier}
+          admin={isAdminActor(actor)}
+          showNcEstimate={canViewNcEstimate(actor)}
           canOpenReport={(report) => rightOn(actor?.rights, viewRight(report) ?? "")}
           allowDept={(d) => barOnly ? d === "BAR" : advance ? isAdvanceOutlet(deptOutlet(d)) : rightOn(actor?.rights, outletRight(deptOutlet(d)))}
         />
@@ -568,7 +614,7 @@ export function App() {
           {view === "bar" && <div className="rpt-page plain" style={{ padding: 8 }}><KotBoard station="BAR" onPrintError={notify} /></div>}
           <ReportCrashBoundary key={view} onRecover={() => go("billing")}>
             <Suspense fallback={<div className="rpt-page" role="status">Loading report…</div>}>
-              <ReportHost view={view as NavView} outlet={outlet} advance={advance} cashier={cashier} operator={barOnly} onExit={() => go("billing")} />
+              <ReportHost view={view as NavView} outlet={outlet} advance={advance} cashier={cashier} admin={isAdminActor(actor)} operator={barOnly} onExit={() => go("billing")} />
             </Suspense>
           </ReportCrashBoundary>
         </div>
@@ -578,6 +624,8 @@ export function App() {
         <LoginGate
           terminalId={bootstrap.actor.terminalId}
           onLogin={(next) => {
+            setAlertText("");
+            alertAfterRef.current = null;
             setActor(next);
             setSignedIn(true);
             go("billing", isBarOrderOnly(next.rights) || next.userGroup === "ADVANCE" ? "BAR" : undefined);
@@ -589,13 +637,13 @@ export function App() {
           }}
         />
       )}
-      {alertText && <AlertBox message={alertText} onClose={closeAlert} />}
+      {signedIn && alertText && <AlertBox message={alertText} onClose={closeAlert} />}
       <StaffMark name={actor?.username ?? actor?.staffName ?? ""} />
     </div>
   );
 }
 
-function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoice, onMessage, onOpenView, onRegisterStep, access, allowDept, barOnly, advance, cashier, canOpenReport }: {
+function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoice, onMessage, onOpenView, onRegisterStep, access, allowDept, barOnly, advance, cashier, admin, showNcEstimate, canOpenReport }: {
   tables: Table[];
   products: Product[];
   outlet: string;
@@ -609,6 +657,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   barOnly: boolean;
   advance: boolean;
   cashier: boolean;
+  admin: boolean;
+  showNcEstimate: boolean;
   canOpenReport: (view: AppView) => boolean;
   allowDept?: (d: Dept) => boolean;
 }) {
@@ -670,7 +720,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   const [listOpen, setListOpen] = useState(false);
   const [pick, setPick] = useState(0);
   const [itemListSel, setItemListSel] = useState(0);
-  const [dropPos, setDropPos] = useState({ top: 0, left: 58 });
+  const [dropTop, setDropTop] = useState(0);
   const amt = (n: number) => (n / 100).toFixed(2);
 
   useEffect(() => {
@@ -806,7 +856,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         await api.post(`/api/tables/${id}/card`, { cardNumber: typedCard });
       }
       const order = await api.post<any>("/api/orders", { tableId: id });
-      setOrderId(order.id);
       setItemListSel(0);
       setDraftItems([]);
       setEditingId(null);
@@ -818,6 +867,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       setListOpen(false);
       setSel(-1);
       await clearServerUnsent(order.id);
+      setOrderId(order.id);
       if (t?.customer_name) setGuest(t.customer_name);
       if (clubMode && clubCardNo) void loadCard(cardNoDigits(clubCardNo), true);
       else if (existingCard) setCheckCard(cardNoDigits(existingCard));
@@ -1019,7 +1069,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     const b = body.getBoundingClientRect();
     const r = entry.getBoundingClientRect();
     const top = Math.max(0, r.bottom - b.top - 1);
-    setDropPos((prev) => (prev.top === top && prev.left === 58 ? prev : { top, left: 58 }));
+    setDropTop(top);
   }
 
   function listForPick() {
@@ -1070,7 +1120,14 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setItemQuery("");
     setTyped("");
     setQtyStr("1");
+    setQtyInvalid(false);
     setListOpen(false);
+  }
+
+  function returnToEntry() {
+    clearEditor();
+    setSel(items.length);
+    setFocusEntry((x) => x + 1);
   }
 
   function scrollGridRow(row: HTMLElement | null | undefined) {
@@ -1087,12 +1144,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     const cur = sel < 0 || sel > last ? last : sel;
     const next = Math.min(last, Math.max(0, cur + delta));
     if (next === last) {
-      clearEditor();
-      setSel(next);
-      requestAnimationFrame(() => {
-        itemRef.current?.focus();
-        scrollGridRow(gridBodyRef.current?.querySelector(".igrid-row.entry") as HTMLElement | null);
-      });
+      returnToEntry();
       return;
     }
     startEdit(next);
@@ -1226,7 +1278,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     return [...prev, row];
   }
 
-  async function addItem(product: Product, qty = 1, next: "item" | "none" = "item") {
+  async function addItem(product: Product, qty = 1) {
     const payCard = clubMode ? clubCard : checkCard;
     if (clubMode && !cardNoReady(payCard)) {
       stayOnCard(clubCardRef.current);
@@ -1285,7 +1337,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setListOpen(false);
     setEditingId(null);
     setSel(merged.length);
-    if (next === "item") setFocusEntry((x) => x + 1);
+    setFocusEntry((x) => x + 1);
     return true;
   }
 
@@ -1316,21 +1368,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       qtyRef.current?.select();
       return false;
     }
-    // Minus qty is a reduction punch (Print KOT cancel), never in-place /qty edit
-    if (n < 0) {
-      const ok = await addItem(pending, n, "none");
-      if (ok) {
-        setEditingId(null);
-        if (!remark.trim()) {
-          focusInput(remarkRef.current);
-        } else {
-          setFocusEntry((x) => x + 1);
-          focusInput(itemRef.current);
-        }
-      }
-      return ok;
-    }
-    if (editingId) {
+    // A minus quantity queues a reduction for Print KOT.
+    if (editingId && n > 0) {
       const line = items.find((it) => it.id === editingId);
       const sameItem = !line || pending.id === line.product_id || pending.name === line.name;
       if (line && !sameItem) {
@@ -1351,13 +1390,15 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       } else if (line && n !== line.qty) {
         setDraftItems((prev) => prev.map((it) => (it.id === editingId ? { ...it, qty: n } : it)));
       }
-      clearEditor();
-      setSel(draftItems.length);
-      focusInput(itemRef.current);
+      returnToEntry();
       return true;
     }
-    const ok = await addItem(pending, n, "item");
-    if (ok) focusInput(itemRef.current);
+    const ok = await addItem(pending, n);
+    if (ok) {
+      // A held Enter that entered a reduction should stop at item entry.
+      if (n < 0 && kotEnter.current) kotEnter.current.printed = true;
+      focusInput(itemRef.current);
+    }
     return ok;
   }
 
@@ -1503,7 +1544,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   function selectSidebarTable(table: Table) {
     setSidebarTableId(table.id);
     setItemListSel(0);
-    if (table.status !== "PAYMENT_PENDING") void ensureOpenByCode(table.code);
+    if (table.status !== "PAYMENT_PENDING") {
+      setTableCode(table.code);
+      void ensureOpenByCode(table.code);
+    }
   }
 
   async function abandonPunch() {
@@ -1526,7 +1570,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     const here = (t.outlet || "BAR") === deptOutlet(dept);
     if (!here) return false;
     if (t.status === "AVAILABLE" || t.status === "PAYMENT_PENDING") return false;
-    return ((t.running_total as number) || 0) > 0 || t.id === tableId;
+    return (t.has_running_order ?? Number(t.running_total) > 0) || t.id === tableId;
   });
 
   async function openReopenList() {
@@ -1648,7 +1692,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     }
     function keys(e: KeyboardEvent) {
       // A held Enter can move focus from item to qty, remark or Print KOT.
-      const heldEnter = e.key === "Enter" && e.repeat ? kotEnter.current : null;
+      const heldEnter = e.key === "Enter" && e.repeat && !billOrder && !settleInv && !pickOpen
+        ? kotEnter.current : null;
       if (heldEnter) {
         e.preventDefault();
         e.stopPropagation();
@@ -1774,15 +1819,16 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     };
   }, []);
 
-  const occupied = tables.filter((t) => {
+  const estimateRows = tables.filter((t) => {
     if ((t.outlet || "BAR") !== (barOnly ? "BAR" : deptOutlet(dept))) return false;
     if (t.status === "AVAILABLE" || !isCurrentSidebarTable(t)) return false;
     if ((advance || barOnly) && t.status === "PAYMENT_PENDING") return true;
     const hasRunningOrder = t.has_running_order ?? Number(t.running_total) > 0;
     if (barOnly) return t.status !== "RESERVED" && hasRunningOrder;
     return hasRunningOrder || t.id === tableId;
-  });
-  const estimateRows = occupied;
+  }).sort((a, b) => a.code.length - b.code.length
+    || a.code.localeCompare(b.code, undefined, { numeric: true })
+    || a.code.localeCompare(b.code));
   const nameInput = (
     <input
       ref={itemRef}
@@ -1835,7 +1881,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         } else if (e.key === "Enter" || e.key === "Tab") {
           const list = listForPick();
           const chosen = list[pick] ?? list[0];
-          if (chosen && (itemQuery.trim() || listOpen)) {
+          if (!nameLocked && chosen && (itemQuery.trim() || listOpen)) {
             e.preventDefault();
             e.stopPropagation();
             chooseItem(chosen);
@@ -1847,7 +1893,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
             e.preventDefault();
             e.stopPropagation();
             setListOpen(false);
-            if (items.length > 0 && !itemQuery.trim()) {
+            if (!e.repeat && items.length > 0 && !itemQuery.trim()) {
               focusInput(remarkRef.current);
             } else {
               itemRef.current?.focus();
@@ -1919,7 +1965,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       }}
     />
   ) : null;
-  const estimateFor = (t: Table) => (dept === "NC" ? 0 : t.net_total ?? t.running_total) ?? 0;
+  const estimateFor = (t: Table) => t.net_total ?? t.running_total ?? 0;
+  const showTableEstimate = !advance && (dept !== "NC" || showNcEstimate);
   const listTotal = estimateRows.reduce((s, t) => s + estimateFor(t), 0);
   const clubDraftNet = draftItems.reduce((s, it) => s + netOf(it), 0);
   const clubRemain = clubBalPaise - clubDraftNet;
@@ -1944,8 +1991,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     return () => { current = false; };
   }, [orderId, requestBody, estimateKey]);
 
-  const barTableRows = barOnly ? [...occupied]
-    .sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }) || a.code.localeCompare(b.code)) : [];
   const showTableItems = Boolean(tableId);
   const estimateNet = requestBody
     ? (draftEstimate?.key === estimateKey ? draftEstimate.total : null)
@@ -1978,9 +2023,9 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         </table>
       </div>
       <div className="estimate-fill" />
-      <div className="estimate-total">Total Estimate: {amt(
+      {(dept !== "NC" || showNcEstimate) && <div className="estimate-total">Total Estimate: {amt(
         sidebarTable.id === tableId ? estimateNet ?? estimateFor(sidebarTable) : estimateFor(sidebarTable),
-      )}</div>
+      )}</div>}
     </>
   );
 
@@ -2099,11 +2144,11 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           </div>
         </div>
 
-        <div className={`igrid${dept === "BAR" ? " bar-order-grid" : ""}${barOnly ? " no-item-rates" : ""}`}>
+        <div className="igrid">
           <div className="igrid-head">
-            <div>No.</div>
+            <div>Sr. No.</div>
             <div>Item Name</div>
-            {!barOnly && <div>Rate</div>}
+            <div>Rate</div>
             <div>Qty</div>
           </div>
           <div className="igrid-body" ref={gridBodyRef}>
@@ -2112,7 +2157,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                 key={it.id}
                 tabIndex={0}
                 className={`igrid-row ${editingId === it.id ? "editing" : ""}`}
-                onClick={(e) => { setSel(i); e.currentTarget.focus(); }}
+                onClick={(e) => {
+                  setSel(i);
+                  if (!(e.target instanceof HTMLInputElement)) e.currentTarget.focus();
+                }}
                 onDoubleClick={(e) => {
                   e.preventDefault();
                   setSel(i);
@@ -2141,23 +2189,26 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                 <div className={`cell-name ${sel === i ? "sel" : ""}`}>
                   {editingId === it.id ? nameInput : <>{it.name}{it.notes ? ` (${it.notes})` : ""}</>}
                 </div>
-                {!barOnly && <div>{editingId === it.id ? (pending ? amt(pending.base_price) : "") : amt(it.unit_price)}</div>}
+                <div>{editingId === it.id ? (pending ? amt(pending.base_price) : "") : amt(it.unit_price)}</div>
                 <div className="cell-qty">{editingId === it.id ? qtyInput : it.qty}</div>
               </div>
             ))}
-            <div className="igrid-row entry" onClick={() => setSel(items.length)}>
+            <div className={`igrid-row entry${!editingId && pending && !listOpen ? " item-picked" : ""}`} onClick={() => {
+              if (editingId) returnToEntry();
+              else setSel(items.length);
+            }}>
               <div>{items.length + 1}</div>
               <div className={`cell-name ${!editingId && (sel < 0 || sel >= items.length) && (listOpen || (pending && nameLocked)) ? "sel" : ""}`}>
                 {editingId ? null : nameInput}
               </div>
-              {!barOnly && <div>{!editingId && pending ? amt(pending.base_price) : ""}</div>}
+              <div>{!editingId && pending ? amt(pending.base_price) : ""}</div>
               <div className="cell-qty">{editingId ? null : qtyInput}</div>
             </div>
                 {listOpen && listForPick().length > 0 && (
               <div
                 ref={dropRef}
                 className="item-drop"
-                style={{ top: dropPos.top, left: dropPos.left }}
+                style={{ top: dropTop }}
                 onMouseDown={(e) => e.preventDefault()}
               >
                 {visiblePicks(listForPick(), pick).map(({ p, i }) => (
@@ -2180,11 +2231,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
             tabIndex={6}
             value={remark}
             onChange={(e) => setRemark(e.target.value)}
-            onBlur={() => {
-              if (draftItems.some((it) => it.qty < 0) && !remark.trim()) {
-                requestAnimationFrame(() => remarkRef.current?.focus());
-              }
-            }}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === "Tab") {
                 e.preventDefault();
@@ -2218,7 +2264,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                 <td><button className="fn" disabled={barOnly} onKeyDown={ignoreRepeatedPrintKey} onClick={printKot}>Save (F5)</button></td>
                 <td><button className="fn" disabled={barOnly || advance || cashier} onClick={() => { if (access && !access.comp) onMessage("Permission denied"); else setCompMasterOpen(true); }}>F1 Complim.</button></td>
                 <td className="exit-cell">
-                  {sidebarTable?.id !== tableId && ((!barOnly && showTableItems) || barPunchEstimate) && (
+                  {sidebarTable?.id !== tableId && (dept !== "NC" || showNcEstimate) && ((!barOnly && showTableItems) || barPunchEstimate) && (
                     <div className="dashboard-estimate">Net Estimate: {estimateNet == null ? "—" : amt(estimateNet)}</div>
                   )}
                   <button className="fn" onClick={requestExit}>Exit</button>
@@ -2249,42 +2295,41 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         </div>
       </div>
 
-      <aside className="estimate">
+      <aside className={sidebarItemSummary ? "estimate" : "estimate table-list-panel"}>
         {sidebarItemSummary || (barOnly ? (
           <>
             <div className="estimate-head">Bar Table List</div>
             <div className="bar-table-scroll" role="region" aria-label="Bar tables" tabIndex={0}>
-              <table>
-                <thead><tr><th>Table No.</th><th>Status</th></tr></thead>
+              <table className="table-list">
+                <thead><tr><th>TableNo</th><th>Bill/Settle</th></tr></thead>
                 <tbody>
-                  {barTableRows.map((t) => {
+                  {estimateRows.map((t) => {
                     const printed = t.status === "PAYMENT_PENDING";
                     return (
-                      <tr key={t.id} className={printed ? "settle" : "occ"}>
+                      <tr key={t.id} className={printed ? "settle" : "occ"} onClick={() => selectSidebarTable(t)}>
                         <td>
-                          <button type="button" className="est-amt" onClick={() => selectSidebarTable(t)}>
+                          <button type="button" className="est-amt">
                             {t.code}
                           </button>
                         </td>
-                        <td>{printed ? "Settlement" : "Bill"}</td>
+                        <td className={printed ? "" : "bill"}>{printed ? "Settlement" : "Bill"}</td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
-            <div className="estimate-fill" />
           </>
         ) : (
           <>
-            <div className="estimate-head">{advance ? "Table List [F10 Prepare Bill]" : "Table Estimate [F10 Prepare Bill]"}</div>
-            <div className={advance ? "bar-table-scroll" : undefined}>
-            <table>
-              <colgroup><col className={clubMode ? "c1 club" : "c1"} />{!advance && <col className="c2" />}<col /></colgroup>
+            <div className="estimate-head">{showTableEstimate ? "Table Estimate [F10 Prepare Bill]" : "Table List [F10 Prepare Bill]"}</div>
+            <div className="bar-table-scroll">
+            <table className="table-list">
+              <colgroup><col className={clubMode ? "c1 club" : "c1"} />{showTableEstimate && <col className="c2" />}<col /></colgroup>
               <thead>
                 <tr>
-                  <th>Table No.</th>
-                  {!advance && <th>Estimate</th>}
+                  <th>TableNo</th>
+                  {showTableEstimate && <th>Estimate</th>}
                   <th>Bill/Settle</th>
                 </tr>
               </thead>
@@ -2296,15 +2341,11 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                       key={t.id}
                       className={settle ? "settle" : "occ"}
                       tabIndex={0}
-                      onClick={() => {
-                        if (settle) void openSettleForTable(t);
-                        else void openBillForTable(t);
-                      }}
+                      onClick={() => selectSidebarTable(t)}
                       onKeyDown={(e) => {
                         if (e.key !== "Enter" && e.key !== " ") return;
                         e.preventDefault();
-                        if (settle) void openSettleForTable(t);
-                        else void openBillForTable(t);
+                        selectSidebarTable(t);
                       }}
                     >
                       <td>
@@ -2316,7 +2357,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                           {formatTableNo(t.code, t.card_number, t.outlet || (clubMode ? "THE BOSS CLUB" : ""))}
                         </button>
                       </td>
-                      {!advance && <td>
+                      {showTableEstimate && <td>
                         <button
                           type="button"
                           className="est-amt"
@@ -2334,21 +2375,20 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
                           {amt(estimateFor(t))}
                         </button>
                       </td>}
-                      <td className={settle ? "" : "bill"}>{advance ? (
-                        <button type="button" className="fn" onKeyDown={(e) => e.stopPropagation()} onClick={(e) => {
+                      <td className={settle ? "" : "bill"}>
+                        <button type="button" className="table-list-action" onKeyDown={(e) => e.stopPropagation()} onClick={(e) => {
                           e.stopPropagation();
                           if (settle) void openSettleForTable(t);
                           else void openBillForTable(t);
                         }}>{settle ? "Settlement" : "Bill"}</button>
-                      ) : settle ? "Settlement" : "Bill"}</td>
+                      </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
             </div>
-            <div className="estimate-fill" />
-            {!advance && <div className="estimate-total">Total Amount : {amt(listTotal)}</div>}
+            {showTableEstimate && <div className="estimate-total">Total Amount : {amt(listTotal)}</div>}
           </>
         ))}
       </aside>
@@ -2391,12 +2431,11 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           outlet={deptOutlet(dept)}
           currentCode={tableCode}
           onClose={() => setXferOpen(false)}
-          onDone={(fromCode, to, printError) => {
+          onDone={(fromCode, to) => {
             setXferOpen(false);
             onRefresh();
             const toOutlet = to.outlet || "BAR";
-            const message = `Transferred ${fromCode} to ${to.code} (${toOutlet})`;
-            onMessage(printError ? `${message}. Kitchen slip failed: ${printError}` : message);
+            onMessage(`Transferred ${fromCode} to ${to.code} (${toOutlet})`);
             if (tableCode.toLowerCase() === fromCode.toLowerCase()) {
               setTableId(to.id);
               setTableCode(to.code);
@@ -2432,6 +2471,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         <PrepareBillDialog
           advance={advance}
           cashier={cashier}
+          admin={admin}
           orderId={billOrder.orderId}
           table={billOrder.table}
           outlet={deptOutlet(dept)}

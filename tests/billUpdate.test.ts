@@ -3,10 +3,58 @@ import type { AddressInfo } from "node:net";
 import { expect, it } from "vitest";
 import { createApp } from "../src/server/api/app.js";
 import { blockCard, issueCard, unblockCard } from "../src/server/services/cardService.js";
+import { createComplimentary } from "../src/server/services/complimentaryService.js";
 import { addItem, createOrder } from "../src/server/services/orderService.js";
 import { createStaff } from "../src/server/services/staffService.js";
-import { getTableByCode, openTable } from "../src/server/services/tableService.js";
+import { createTable, getTableByCode, openTable } from "../src/server/services/tableService.js";
+import { flagsPreset } from "../src/shared/userRights.js";
 import { createApiClient, createTestApp } from "./helpers.js";
+
+it("shows NC estimates by permission and lets Admin save an NC bill without a remark or PIN", async () => {
+  const { ctx, db, hardware, seeded } = createTestApp();
+  const manager = ctx("manager");
+  createStaff(manager, { username: "ncadmin", password: "4242", userRole: "ADMIN" });
+  createStaff(manager, {
+    username: "nchidden", password: "4242", userRole: "ADMIN",
+    flags: { ...flagsPreset("ADMIN"), hideEstimate: true },
+  });
+  createStaff(manager, { username: "nccashier", password: "4242", userRole: "CASHIER" });
+  const account = createComplimentary(manager, "NC account");
+  const table = createTable(manager, { code: "N1", outlet: "NC" });
+  openTable(manager, { tableId: table.id });
+  const order = createOrder(manager, table.id) as { id: string };
+  addItem(manager, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 2 });
+
+  const server = createApp({ db, hardware }).listen(0, "127.0.0.1");
+  try {
+    await once(server, "listening");
+    const request = createApiClient((server.address() as AddressInfo).port);
+    const login = (username: string) => request("auth/login", { username, password: "4242" });
+    const listedTable = async () => (await (await request("tables")).json())
+      .find((row: { id: string }) => row.id === table.id);
+    const bill = { orderId: order.id, complimentary: true, complimentaryAccountId: account.id };
+
+    expect((await login("nchidden")).status).toBe(200);
+    const hidden = await listedTable();
+    expect(hidden.has_running_order).toBe(true);
+    expect(hidden).not.toHaveProperty("net_total");
+    expect(hidden).not.toHaveProperty("running_total");
+    expect((await request(`orders/${order.id}/estimate`, { items: [] })).status).toBe(403);
+    expect((await login("nccashier")).status).toBe(200);
+    expect((await listedTable()).net_total).toBeGreaterThan(0);
+    const denied = await request("invoices/generate", bill);
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toMatchObject({ error: expect.stringContaining("master PIN") });
+    expect((await login("ncadmin")).status).toBe(200);
+    const saved = await request("invoices/generate", bill);
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ status: "PAID", grand_total: 0 });
+  } finally {
+    server.close();
+    await once(server, "close");
+    db.close();
+  }
+});
 
 it("estimates draft items with billing totals and stops orders and bills for blocked cards", async () => {
   const { ctx, db, hardware, seeded } = createTestApp();
@@ -97,6 +145,13 @@ it("previews bill edits without saving and requires the PIN to update only the s
     const serviceOnly = await post("generate", { orderId, invoiceId: invoice.id, serviceChargePct: 5 });
     expect(serviceOnly.status).toBe(200);
     expect(await serviceOnly.json()).toMatchObject({ service_charge_pct: 5, discount: invoice.discount });
+    const serviceWithRemark = await post("generate", {
+      orderId, invoiceId: invoice.id, serviceChargePct: 3, reason: "Guest requested a lower charge",
+    });
+    expect(serviceWithRemark.status).toBe(200);
+    const serviceInvoice = await serviceWithRemark.json();
+    expect(serviceInvoice.service_charge_pct).toBe(3);
+    expect(JSON.parse(serviceInvoice.bill_details).remark).toBe("Guest requested a lower charge");
 
     const changes = {
       orderId,

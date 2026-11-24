@@ -2,7 +2,7 @@ import type { KotPrintPayload } from "./types.js";
 
 interface KotTicket {
   tableTransfer?: KotPrintPayload["tableTransfer"];
-  department: KotPrintPayload["station"];
+  department: KotPrintPayload["station"] | NonNullable<KotPrintPayload["heading"]>;
   kotNo: string | number;
   tableNo: string | number;
   date: string;
@@ -13,7 +13,6 @@ interface KotTicket {
   items: KotPrintPayload["items"];
   printTime: string;
   operatorName: string;
-  waiterName?: string;
   remark?: string | null;
 }
 
@@ -34,7 +33,7 @@ export function formatKotHtml(payload: KotPrintPayload, printedAt = new Date()):
   const validDate = Number.isFinite(createdAt.getTime());
   return renderKotTicket({
     tableTransfer: payload.tableTransfer,
-    department: payload.station,
+    department: payload.heading ?? payload.station,
     kotNo: payload.kotNumber.replace(/^KOT-/i, ""),
     tableNo: payload.tableCode,
     date: validDate
@@ -49,7 +48,6 @@ export function formatKotHtml(payload: KotPrintPayload, printedAt = new Date()):
     items: payload.items,
     printTime: clockTime(printedAt),
     operatorName: payload.operatorName ?? "",
-    waiterName: payload.waiter?.trim(),
     remark: payload.remark?.trim(),
   });
 }
@@ -112,7 +110,7 @@ export function renderKotTicket(ticket: KotTicket): string {
   .items { border-bottom: 1px dashed #000; }
   .cancelled span { text-decoration: line-through; text-decoration-thickness: 2px; }
   .qty { text-align: right; white-space: nowrap; }
-  .waiter, .remark { margin: 2px 0 0; overflow-wrap: anywhere; }
+  .remark { margin: 2px 0 0; overflow-wrap: anywhere; }
   footer { padding-bottom: 6mm; break-inside: avoid; }
   .end { margin: 6px 0; text-align: center; }
   .operator { display: flex; justify-content: space-between; gap: 2mm; font-size: 7.5pt; }
@@ -149,7 +147,6 @@ export function renderKotTicket(ticket: KotTicket): string {
   <div class="order"><div>${esc(ticket.orderType)}</div><div>${esc(ticket.copyType)}</div></div>
   <div class="head"><span>Item Name</span><span class="qty">Qty</span></div>
   <div class="items">${rows}</div>
-  ${ticket.waiterName ? `<p class="waiter">${esc(ticket.waiterName.toUpperCase())}</p>` : ""}
   ${ticket.remark ? `<p class="remark">${esc(ticket.remark)}</p>` : ""}
   <footer>
     <p class="end">--- END ---</p>

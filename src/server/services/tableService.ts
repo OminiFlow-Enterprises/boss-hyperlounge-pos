@@ -1,4 +1,4 @@
-import { ADVANCE_OUTLETS, isBarOrderOnly } from "../../shared/userRights.js";
+import { ADVANCE_OUTLETS, canViewNcEstimate, isBarOrderOnly } from "../../shared/userRights.js";
 import { assertPermission } from "../../shared/permissions.js";
 import { AppError } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
@@ -76,6 +76,11 @@ function withNetTotals(ctx: AppContext, rows: Array<Record<string, unknown>>) {
       ORDER BY created_at DESC LIMIT 1`,
   );
   for (const row of rows) {
+    if (row.outlet === "NC" && !canViewNcEstimate(ctx.actor)) {
+      row.has_running_order = Number(row.running_total) > 0;
+      delete row.running_total;
+      continue;
+    }
     const sessionId = row.current_session_id as string | null;
     const running = Number(row.running_total) || 0;
     if (!sessionId) {
@@ -359,29 +364,32 @@ export function transferTable(ctx: AppContext, fromTableId: string, toTableId: s
   return { transferId, from: getTable(ctx, from.id), to: getTable(ctx, to.id), sessionId, transferredAt };
 }
 
-export async function transferTableAndPrint(ctx: AppContext, fromTableId: string, toTableId: string, reason?: string) {
+export function transferTableAndPrint(ctx: AppContext, fromTableId: string, toTableId: string, reason?: string) {
   const transfer = ctx.db.transaction(() => transferTable(ctx, fromTableId, toTableId, reason))();
-  const { transferId, from, to, sessionId, transferredAt } = transfer;
-  let printError: string | undefined;
-  try {
-    const steward = ctx.db.prepare(`SELECT st.name FROM table_sessions s
-      JOIN staff st ON st.id = s.waiter_id WHERE s.id = ?`).pluck().get(sessionId) as string | undefined;
-    const result = await ctx.hardware.kitchen.printKOT({
-      kotNumber: transferId,
-      tableCode: to.code,
-      station: "KITCHEN",
-      tableTransfer: { outlet: to.outlet || "BAR", fromTable: from.code, toTable: to.code },
-      operatorName: ctx.actor.staffName,
-      waiter: steward,
-      reprint: false,
-      items: [],
-      createdAt: transferredAt,
+  setImmediate(() => {
+    void printTableTransfer(ctx, transfer).catch((error) => {
+      console.error(`Kitchen slip failed for table transfer ${transfer.transferId}:`, error);
     });
-    if (!result.ok) printError = result.error || "Print failed";
-  } catch (error) {
-    printError = error instanceof Error ? error.message : "Print failed";
-  }
-  return { ...transfer, printError };
+  });
+  return transfer;
+}
+
+async function printTableTransfer(ctx: AppContext, transfer: ReturnType<typeof transferTable>) {
+  const { transferId, from, to, sessionId, transferredAt } = transfer;
+  const steward = ctx.db.prepare(`SELECT st.name FROM table_sessions s
+    JOIN staff st ON st.id = s.waiter_id WHERE s.id = ?`).pluck().get(sessionId) as string | undefined;
+  const result = await ctx.hardware.kitchen.printKOT({
+    kotNumber: transferId,
+    tableCode: to.code,
+    station: "KITCHEN",
+    tableTransfer: { outlet: to.outlet || "BAR", fromTable: from.code, toTable: to.code },
+    operatorName: ctx.actor.staffName,
+    waiter: steward,
+    reprint: false,
+    items: [],
+    createdAt: transferredAt,
+  });
+  if (!result.ok) throw new Error(result.error || "Print failed");
 }
 
 export function listTableItems(ctx: AppContext, tableId: string) {

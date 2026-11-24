@@ -8,7 +8,7 @@ BOSS Hyperlounge POS is an offline Windows Electron desktop app for lounge order
 2. On the server PC, install and open THE BOSS POS once under the Windows account used for service. The installed server starts automatically at that account's Windows sign-in. Keep the app open and the server PC awake during service. Closing the app stops its server. For a source checkout, use `npm run desktop` after installing dependencies.
 3. On the server PC, run `ipconfig` and find the IPv4 address of the active Ethernet or Wi-Fi adapter. The app starts at port `8787` and tries the next available port if that port is in use. If needed, confirm the actual port in the Electron user data directory under `logs/pos-debug.log`.
 4. On each client PC, install THE BOSS POS Client or open `http://<server-ip>:<port>/` in a browser. The desktop client asks for the server IP on first launch and remembers the address after connecting. An IP without a port uses `8787`. If the address changes, the client asks again after a connection failure. To open the setup prompt directly, launch with `--change-server`. Sign in with the staff account for that station. If connections are blocked, allow the POS port through Windows Firewall for the private network and restrict access to the local subnet.
-5. To verify the setup, disconnect the site from the internet while keeping the LAN active. Sign in on both PCs. On test data, open a table on one PC, reload the floor view on the other, and confirm both show the same table. Then test a KOT, a bill, and settlement with the intended printer setup.
+5. To verify the setup, disconnect the site from the internet while keeping the LAN active. Sign in with the same staff account on both PCs. On test data, open a table on one PC, reload the floor view on the other, and confirm both show the same table. Then test a KOT, a bill, and settlement with the intended printer setup. Sign out on one PC and confirm the other remains signed in.
 
 The server installer hosts the local database. The desktop client and browser clients connect to that server over the LAN for orders and payments. The LAN uses HTTP, so keep the POS on a trusted private network and avoid forwarding its port to the internet.
 
@@ -95,3 +95,13 @@ For mixed orders, route each item by its item group. Each destination receives t
 Start future requests with “Read README.md, then …” and describe which staff role and station are involved. For a bug report, include the floor/table or report affected, the steps to reproduce, and whether it occurs on the Electron server window, a browser client, or both.
 
 For changes to billing, card balances, tables, or inventory, trace the request from the React screen through `src/client/api.ts`, the Express route, and the server service before editing. Check the relevant schema and tests so the change works with existing data. Keep the one-server LAN workflow working without internet access.
+
+## Card balance reset and server payments
+
+The POS resets unused paid and bonus card balances at 6:00 AM IST. It checks for a missed reset on startup. A card's first recharge in each business day incurs a ₹100 fee. Each subsequent recharge that day credits the full amount.
+
+Launch the installed Windows POS server app once to register automatic startup at Windows sign-in. The built-in server payment sync runs as part of the POS server. Stop the legacy ERP worker before switching the cloud queue to this POS.
+
+Place `erp-sync-config.json` beside the active POS database or set `POS_ERP_SYNC_CONFIG` to its full path. Keep the file private because it contains the cloud API key. The POS uses `cloud_api_base` (HTTPS) and `api_key`. Optional settings include `poll_interval_seconds`, `batch_size`, `fetch_timeout_ms`, `pos_staff_username` (default `cashier`), and `pos_terminal_name` (default `POS-01`).
+
+The POS acknowledges each payment after the booking and ledger commit. The cloud receives a booking reference such as `POS-430` for subsequent edits. Confirm that reference format with the cloud API during cutover. Amount edits after the original business day require reconciliation.

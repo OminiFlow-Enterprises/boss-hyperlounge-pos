@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
+import { businessDate } from "../../shared/businessDate.js";
 
 export function uuid(): string {
   return randomUUID();
@@ -42,8 +43,9 @@ export function peekNextNumber(db: Database.Database, name: string, prefix: stri
 
 /** Indian FY label, e.g. Nov 2026 → `26-27/` for bill nos like `26-27/10022`. */
 export function financialYearPrefix(d = new Date()): string {
-  const year = d.getFullYear();
-  const fyStart = d.getMonth() >= 3 ? year : year - 1;
+  const date = businessDate(d, 0);
+  const year = Number(date.slice(0, 4));
+  const fyStart = Number(date.slice(5, 7)) >= 4 ? year : year - 1;
   const a = String(fyStart).slice(-2);
   const b = String(fyStart + 1).slice(-2);
   return `${a}-${b}/`;

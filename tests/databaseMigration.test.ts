@@ -15,7 +15,7 @@ it("backs up and migrates an existing database once without replacing its record
   function inspect() {
     const db = openDatabase({ filePath });
     try {
-      expect(db.pragma("user_version", { simple: true })).toBe(1);
+      expect(db.pragma("user_version", { simple: true })).toBe(2);
       expect(db.prepare("SELECT value FROM existing_records").pluck().get()).toBe("saved record");
     } finally {
       db.close();

@@ -117,6 +117,7 @@ function actorFrom(ctx: AppContext, staff: StaffRow, terminal: { id: string; nam
     userGroup: isUserRoleLabel(staff.user_role) ? staff.user_role : undefined,
     rights: mapped.rights,
     allowComplementary: mapped.flags ? mapped.flags.allowComplementary : null,
+    hideEstimate: mapped.flags?.hideEstimate,
     tableTransfer: mapped.bill ? mapped.bill.tableTransfer : null,
     itemTransfer: mapped.bill ? mapped.bill.itemTransfer : null,
   };

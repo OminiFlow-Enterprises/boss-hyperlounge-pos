@@ -16,6 +16,24 @@ it("rolls the settlement report date over at 6 a.m. IST", () => {
   });
 });
 
+it("reports and filters by the cashier who took the payment", () => {
+  const { ctx, seeded } = createTestApp();
+  const billCreator = ctx("manager");
+  const cashier = ctx("cashier");
+  const table = getTableByCode(billCreator, "01");
+  openTable(billCreator, { tableId: table.id });
+  const order = createOrder(billCreator, table.id) as { id: string };
+  addItem(billCreator, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
+  const invoice = generateInvoice(billCreator, order.id, {}) as { id: string; grand_total: number };
+  settleInvoice(cashier, invoice.id, [{ method: "CASH", amount: invoice.grand_total }], { printReceipt: false });
+
+  const reportFor = (user: string) => settlementReport(billCreator, undefined, undefined, "BAR", { user }).rows;
+  expect(reportFor(cashier.actor.staffName)).toEqual([
+    expect.objectContaining({ invoice_id: invoice.id, username: cashier.actor.staffName }),
+  ]);
+  expect(reportFor(billCreator.actor.staffName)).toEqual([]);
+});
+
 it.each(["CASH", "CARD", "MEMBER_CARD"] as const)(
   "reduces a %s settlement in place and reopens the table if the bill increases",
   (method) => {
@@ -97,6 +115,42 @@ it("carries partial payments forward when reopening a revised table bill", () =>
   expect(settleInvoice(cashier, invoice.id, [{ method: "CASH", amount: withoutServiceCharge.due }], {
     printReceipt: false,
   })).toMatchObject({ complete: true, due: 0 });
+});
+
+it("posts prepaid settlement parts atomically and rejects stale retries", () => {
+  const { ctx, seeded } = createTestApp();
+  const cashier = ctx("cashier");
+  const table = getTableByCode(cashier, "01");
+  openTable(cashier, { tableId: table.id });
+  const order = createOrder(cashier, table.id) as { id: string };
+  addItem(cashier, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
+  const invoice = generateInvoice(cashier, order.id, {}) as { id: string; grand_total: number };
+  settleInvoice(cashier, invoice.id, [{ method: "CASH", amount: invoice.grand_total }], { printReceipt: false });
+  const [payment] = getInvoice(cashier, invoice.id).payments;
+  const original = settlementDetail(cashier, payment.id) as {
+    method: string; amount: number; account: string; remark: string;
+  };
+  const advance = Math.floor(original.amount / 2);
+  const { card } = saveBooking(cashier, { cardNo: "1234", advance: advance + 10_000, mop: "CASH" }) as { card: { id: string } };
+  const prepaidPart = { method: "PREPAID CARD", amount: advance, account: "", remark: "", cardNumber: "1234" };
+  const remaining = { ...prepaidPart, amount: original.amount - advance };
+
+  expect(() => updateSettlement(cashier, payment.id, {
+    original, lines: [prepaidPart, { ...remaining, cardNumber: "9999" }],
+  })).toThrow("Card not found");
+  expect(() => updateSettlement(cashier, payment.id, { original, lines: [prepaidPart, remaining] }))
+    .toThrow("Insufficient amount");
+  expect(balancesFromLedger(cashier, card.id).usable).toBe(advance);
+  expect(getInvoice(cashier, invoice.id).payments).toEqual([payment]);
+
+  const lines = [{ ...remaining, method: "CASH" }, prepaidPart];
+  updateSettlement(cashier, payment.id, { original, lines });
+  expect(getInvoice(cashier, invoice.id).payments).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: payment.id, method: "CASH", amount: remaining.amount }),
+    expect.objectContaining({ method: "MEMBER_CARD", amount: advance, member_card_id: card.id, ledger_id: expect.any(String) }),
+  ]));
+  expect(() => updateSettlement(cashier, payment.id, { original, lines })).toThrow("Settlement changed");
+  expect(balancesFromLedger(cashier, card.id).usable).toBe(0);
 });
 
 it("replaces one settlement with four parts on its original report date", () => {

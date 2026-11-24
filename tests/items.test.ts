@@ -27,17 +27,20 @@ describe("item master", () => {
     const table = getTableByCode(waiter, "02");
     openTable(waiter, { tableId: table.id, outlet: "BAR" });
     const order = createOrder(waiter, table.id) as { id: string };
-    addItem(waiter, { orderId: order.id, productId: eligible.id, qty: 1 });
+    const checked = addItem(waiter, { orderId: order.id, productId: eligible.id, qty: 2 }) as { id: string };
     const line = addItem(waiter, { orderId: order.id, productId: excluded.id, qty: 1 }) as { id: string };
 
     const preview = previewBill(cashier, order.id, { discountPct: 10 });
     expect(preview.excludeItemIds).toEqual([line.id]);
-    expect(preview.discount).toBe(rupeesToPaise(10));
+    expect(preview.discount).toBe(rupeesToPaise(20));
+    const checkboxPreview = previewBill(cashier, order.id, { discountPct: 10, discountCheckboxes: true });
+    expect(checkboxPreview.excludeItemIds).toEqual([checked.id]);
+    expect(checkboxPreview.discount).toBe(rupeesToPaise(10));
     const invoice = generateInvoice(cashier, order.id, { discountPct: 10, excludeItemIds: [] }) as {
       discount: number;
       bill_details: string;
     };
-    expect(invoice.discount).toBe(rupeesToPaise(20));
+    expect(invoice.discount).toBe(rupeesToPaise(30));
     expect(JSON.parse(invoice.bill_details).excludeItemIds).toEqual([]);
   });
 

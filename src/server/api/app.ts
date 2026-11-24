@@ -5,7 +5,7 @@ import cors from "cors";
 import type Database from "better-sqlite3";
 import type { Actor, BillDetails, BillLineEdit, ServiceChargeMode } from "../../shared/types.js";
 import { billApprovalFields } from "../../shared/billApproval.js";
-import { isAdminActor, isAdvanceOutlet, isBarOrderOnly, isUserRoleLabel, rightOn } from "../../shared/userRights.js";
+import { canViewNcEstimate, isAdminActor, isAdvanceOutlet, isBarOrderOnly, isUserRoleLabel, rightOn } from "../../shared/userRights.js";
 import { hasPermission, type Permission } from "../../shared/permissions.js";
 import { AppError } from "../lib/errors.js";
 import { createBackgroundReports } from "./backgroundReports.js";
@@ -90,6 +90,7 @@ function advanceBillAdjustments(
     throw new AppError("Advance users can only remove service charge from a bill", 403);
   }
   return {
+    invoiceId: existing?.id,
     discount: existing?.discount,
     excludeItemIds: existing ? details?.excludeItemIds ?? [] : undefined,
     otherCharges: existing?.other_charges,
@@ -138,7 +139,7 @@ export function createApp(options: CreateAppOptions) {
       .find((part) => part.startsWith(`${sessionCookie}=`))?.slice(sessionCookie.length + 1) ?? "";
   }
 
-  function sessionActor(req: Request) {
+  function sessionActor(req: Request, refresh = true) {
     const id = sessionId(req);
     const session = sessions.get(id);
     if (!session) return undefined;
@@ -147,7 +148,7 @@ export function createApp(options: CreateAppOptions) {
       sessions.delete(id);
       return undefined;
     }
-    session.expiresAt = now + sessionIdleMs;
+    if (refresh) session.expiresAt = now + sessionIdleMs;
     return session.actor;
   }
 
@@ -169,7 +170,7 @@ export function createApp(options: CreateAppOptions) {
     if (req.path.startsWith("/api/")) res.set("Cache-Control", "no-store");
     req.ctx = {
       db: options.db,
-      actor: sessionActor(req) ?? guestActor(),
+      actor: sessionActor(req, req.method !== "GET" || req.path !== "/api/session") ?? guestActor(),
       hardware,
       online,
       officeTerminal: req.socket.remoteAddress?.replace(/^::ffff:/i, "") === (process.env.POS_OFFICE_TERMINAL_IP?.trim() || "192.168.1.21"),
@@ -321,9 +322,10 @@ export function createApp(options: CreateAppOptions) {
   };
 
   app.use((req, _res, next) => {
-    if (req.ctx.actor.staffId === "anonymous" && req.method === "POST" &&
-        /^\/api\/(?:tables|orders|order-items|invoices)(?:\/|$)/i.test(req.path)) {
-      throw new AppError("Please sign in again before punching items or billing.", 401, "SESSION_REQUIRED");
+    if (req.method === "POST" && /^\/api\/(?:tables|orders|order-items|invoices)(?:\/|$)/i.test(req.path) &&
+        (req.ctx.actor.staffId === "anonymous" ||
+          ((req.get("X-POS-Client") === "1" || sessionId(req)) && !sessionActor(req, false)))) {
+      throw new AppError("Session expired.", 401, "SESSION_REQUIRED");
     }
     const reportRoute = /^\/api\/reports\/([^/]+)/i.exec(req.path)?.[1].toLowerCase();
     const reportRights = reportRoute && Object.hasOwn(reportRouteRights, reportRoute) ? reportRouteRights[reportRoute] : undefined;
@@ -408,7 +410,12 @@ export function createApp(options: CreateAppOptions) {
   );
 
   app.get("/api/session", (req, res) => {
-    res.json({ actor: req.ctx.actor, online: req.ctx.online, sync: sync.syncStatus(req.ctx) });
+    res.json({
+      authenticated: Boolean(sessionActor(req, false)),
+      actor: req.ctx.actor,
+      online: req.ctx.online,
+      sync: sync.syncStatus(req.ctx),
+    });
   });
 
   app.post("/api/session/online", (req, res) => {
@@ -542,8 +549,8 @@ export function createApp(options: CreateAppOptions) {
     res.json(tables.checkIn(req.ctx, { tableId: req.params.id, ...req.body }));
   }));
   app.post("/api/tables/:id/request-bill", wrap((req, res) => res.json(tables.requestBill(req.ctx, req.params.id))));
-  app.post("/api/tables/transfer", wrap(async (req, res) => {
-    res.json(await tables.transferTableAndPrint(req.ctx, req.body.fromTableId, req.body.toTableId, req.body.reason));
+  app.post("/api/tables/transfer", wrap((req, res) => {
+    res.json(tables.transferTableAndPrint(req.ctx, req.body.fromTableId, req.body.toTableId, req.body.reason));
   }));
   app.get("/api/tables/:id/items", wrap((req, res) => res.json(tables.listTableItems(req.ctx, req.params.id))));
   app.post("/api/tables/item-transfer", wrap((req, res) => {
@@ -578,6 +585,9 @@ export function createApp(options: CreateAppOptions) {
   app.post("/api/orders/:id/estimate", wrap((req, res) => {
     const orderId = req.params.id;
     const { items } = req.body;
+    if (!canViewNcEstimate(req.ctx.actor) && billing.orderOutlet(req.ctx, orderId) === "NC") {
+      throw new AppError("Estimate permission denied", 403, "PERMISSION_DENIED");
+    }
     const barOnly = isBarOrderOnly(req.ctx.actor.rights);
     if (barOnly) assertBarOrder(req.ctx, orderId);
     const outlet = barOnly ? "BAR" : req.body.outlet;
@@ -687,7 +697,8 @@ export function createApp(options: CreateAppOptions) {
   }));
   app.post("/api/invoices/generate", wrap((req, res) => {
     const { orderId, invoiceId, edits = [], masterPin, ...billOptions } = req.body;
-    if (masterPin && !settings.verifyMasterPin(req.ctx, masterPin)) {
+    const admin = isAdminActor(sessionActor(req));
+    if (!admin && masterPin && !settings.verifyMasterPin(req.ctx, masterPin)) {
       throw new AppError("Incorrect master PIN", 403);
     }
     const invoice = req.ctx.db.transaction(() => {
@@ -712,7 +723,9 @@ export function createApp(options: CreateAppOptions) {
         complimentaryAccountId: existing?.complimentary_account_id,
         otherCharges: existing?.other_charges,
         discount: existing?.discount,
-        excludeItemIds: existing ? undefined : billing.previewBill(req.ctx, orderId, {}, true).excludeItemIds,
+        excludeItemIds: existing ? undefined : billing.previewBill(req.ctx, orderId, {
+          discountCheckboxes: !advance && billOptions.discountCheckboxes === true,
+        }, true).excludeItemIds,
       };
       const discountChanged = billOptions.discount != null || billOptions.discountPct != null || billOptions.discountFrom != null;
       const discountPct = discountChanged
@@ -721,6 +734,8 @@ export function createApp(options: CreateAppOptions) {
       const submittedRemark = billOptions.billDetails?.remark;
       const remarkValue = billOptions.reason ?? (submittedRemark === savedDetails.remark ? undefined : submittedRemark);
       const remark = typeof remarkValue === "string" ? remarkValue.trim() : "";
+      const savedServiceChargePct = existing && (existing.service_charge_pct || !existing.service_charge)
+        ? existing.service_charge_pct : 10;
       const finalOptions = {
         ...billOptions,
         billDetails: {
@@ -739,19 +754,25 @@ export function createApp(options: CreateAppOptions) {
           savedDetails.excludeItemIds ?? (existing ? [] : undefined),
         otherCharges: billOptions.otherCharges ?? existing?.other_charges,
         serviceChargeMode: adjustments?.serviceChargeMode ?? billOptions.serviceChargeMode ?? existing?.service_charge_mode,
-        serviceChargePct: adjustments?.serviceChargePct ?? billOptions.serviceChargePct ??
-          (existing && (existing.service_charge_pct || !existing.service_charge) ? existing.service_charge_pct : 10),
+        serviceChargePct: adjustments?.serviceChargePct ?? billOptions.serviceChargePct ?? savedServiceChargePct,
       };
       if (!finalOptions.complimentary) finalOptions.complimentaryAccountId = undefined;
       finalOptions.billDetails.excludeItemIds = finalOptions.excludeItemIds;
       const needsApproval = edits.length || billApprovalFields({
         ...savedFields,
         ...finalOptions,
+        billDetails: {
+          ...finalOptions.billDetails,
+          remark: finalOptions.serviceChargePct !== savedServiceChargePct
+            ? savedDetails.remark : finalOptions.billDetails.remark,
+        },
         excludeItemIds: finalOptions.excludeItemIds ?? savedFields.excludeItemIds,
       }) !== billApprovalFields(savedFields);
       if (needsApproval) {
-        if (!remark) throw new AppError("Enter a remark to update this bill", 403, "BILL_REMARK_REQUIRED", "billRemark");
-        if (!masterPin) {
+        if (!remark && billing.orderOutlet(req.ctx, orderId) !== "NC") {
+          throw new AppError("Enter a remark to update this bill", 403, "BILL_REMARK_REQUIRED", "billRemark");
+        }
+        if (!admin && !masterPin) {
           throw new AppError("Enter the master PIN to update this bill", 403);
         }
       }

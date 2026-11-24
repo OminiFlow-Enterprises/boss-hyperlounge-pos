@@ -1,10 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { rupeesToPaise } from "../src/shared/money.js";
 import { openTable, transferTable, transferTableAndPrint, mergeTables, getTableByCode, splitTable, createTable, transferItems, listTables } from "../src/server/services/tableService.js";
 import { formatKotHtml } from "../src/server/hardware/kotReceiptHtml.js";
 import type { KotPrintPayload } from "../src/server/hardware/types.js";
 import { addItem, createOrder, sendKot, getOrderDetail, reprintKot, setBillLineQty, setBillLineProduct, setBillLinePrice } from "../src/server/services/orderService.js";
-import { generateInvoice, settleInvoice, previewBill, cardSpendable, settleClubFromCard } from "../src/server/services/billingService.js";
+import { generateInvoice, settleInvoice, previewBill, printReceipt, cardSpendable, settleClubFromCard } from "../src/server/services/billingService.js";
 import { issueCard, rechargeCard, checkBalance } from "../src/server/services/cardService.js";
 import { InsufficientBalanceError } from "../src/server/lib/errors.js";
 import { setSetting } from "../src/server/services/settingsService.js";
@@ -12,6 +12,44 @@ import { resolvePrice } from "../src/server/services/pricingService.js";
 import { createTestApp } from "./helpers.js";
 
 describe("tables, KOT and billing", () => {
+  it("saves and prints bills after midnight using the previous business date until day close", async () => {
+    vi.setSystemTime(new Date("2026-04-01T05:59:59+05:30"));
+    vi.stubEnv("POS_BILL_PRINT", "html");
+    try {
+      const { ctx, seeded } = createTestApp();
+      const cashier = ctx("cashier");
+      setSetting(cashier, "day_close_hour", "4");
+      function orderFor(code: string) {
+        const table = getTableByCode(cashier, code);
+        openTable(cashier, { tableId: table.id });
+        const order = createOrder(cashier, table.id) as { id: string };
+        addItem(cashier, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
+        return order.id;
+      }
+
+      const orderId = orderFor("01");
+      const preview = previewBill(cashier, orderId);
+      expect(preview.createdAt).toBe("2026-03-31T18:28:00.000Z");
+      expect(preview.invoiceNumber).toMatch(/^25-26\//);
+      const bill = generateInvoice(cashier, orderId) as { id: string; invoice_number: string; created_at: string };
+      expect(bill.created_at).toBe(preview.createdAt);
+      expect(bill.invoice_number).toBe(preview.invoiceNumber);
+
+      vi.setSystemTime(new Date("2026-04-01T06:00:00+05:30"));
+      const receipt = await printReceipt(cashier, bill.id);
+      expect(receipt).toMatchObject({ html: expect.stringContaining("31 Mar 2026") });
+      expect(receipt).toMatchObject({ html: expect.stringContaining("11:58 PM") });
+      expect(generateInvoice(cashier, orderId, { invoiceId: bill.id })).toMatchObject({ created_at: bill.created_at });
+      expect(generateInvoice(cashier, orderFor("02"))).toMatchObject({
+        created_at: "2026-04-01T00:30:00.000Z",
+        invoice_number: expect.stringMatching(/^26-27\//),
+      });
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("transfers a running order and its KOTs", async () => {
     const { seeded, ctx, hardware } = createTestApp();
     const waiter = ctx("waiter");
@@ -21,8 +59,12 @@ describe("tables, KOT and billing", () => {
     const order = createOrder(waiter, from.id) as { id: string };
     addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
     await sendKot(waiter, order.id);
-    const transfer = await transferTableAndPrint(waiter, from.id, to.id, "Guest moved");
-    expect(transfer.printError).toBeUndefined();
+    const previousPrintCount = hardware.kitchen.logs.length;
+    const transfer = transferTableAndPrint(waiter, from.id, to.id, "Guest moved");
+    expect(transfer.to.status).toBe("OCCUPIED");
+    expect(hardware.kitchen.logs).toHaveLength(previousPrintCount);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(hardware.kitchen.logs).toHaveLength(previousPrintCount + 1);
     const slip = hardware.kitchen.logs.at(-1)?.payload as KotPrintPayload;
     expect(slip.tableTransfer).toEqual({ outlet: to.outlet || "BAR", fromTable: "01", toTable: "08" });
     expect(formatKotHtml(slip)).toMatch(/TABLE TRANSFER[\s\S]*OLD TABLE[\s\S]*01[\s\S]*NEW TABLE[\s\S]*08/);

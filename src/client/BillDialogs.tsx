@@ -5,11 +5,13 @@ import { createPortal } from "react-dom";
 import { api, ApiError } from "./api";
 import { billLineTaxes, parseRupeesInput } from "../shared/money";
 import { billApprovalFields } from "../shared/billApproval";
+import { billDateParts } from "../shared/businessDate";
 import { formatTableNo } from "../shared/tableLabel";
 import { SETTLEMENT_PENDING_TRANSFER_MESSAGE } from "../shared/tableTransfer";
 import { itemMatchScore } from "../shared/itemSearch";
 import type { BillDetails, BillLineEdit, PaymentMode } from "../shared/types";
-import { cardNoDigits, cardNoReady, selectByFirstLetter, stayOnCard } from "./formNav";
+import { cardNoDigits, cardNoReady, moveSelectOption, stayOnCard } from "./formNav";
+import { BANK_PAYMENT_ACCOUNTS, DEFAULT_BANK_PAYMENT_ACCOUNT } from "../shared/paymentAccounts";
 import { ComplimentaryMasterDialog, type CompAccount } from "./ComplimentaryMaster";
 
 type Table = { id: string; code: string; status: string; customer_name?: string; card_number?: string; running_total?: number; outlet?: string };
@@ -26,20 +28,7 @@ const PAY_MODES: Array<{ id: PaymentMode; label: string }> = [
   { id: "MEMBER_CARD", label: "Prepaid Card" },
 ];
 
-const BANK_NAMES = [
-  "Bank payment",
-  "BOOK MY SHOW",
-  "COUPON",
-  "DINEOUT",
-  "DISTRICT",
-  "EAZYDINNER",
-  "HDFC",
-  "PAYTM",
-  "ZOMATO",
-  "PARTYPAL",
-  "INDUS",
-  "MOBIKWIK",
-];
+const BANK_NAMES: readonly string[] = BANK_PAYMENT_ACCOUNTS;
 
 function rupee(n: number) {
   return (n / 100).toFixed(2);
@@ -172,6 +161,7 @@ export function PrepareTablePick({
 export function PrepareBillDialog({
   advance = false,
   cashier = false,
+  admin = false,
   orderId,
   table,
   outlet,
@@ -188,6 +178,7 @@ export function PrepareBillDialog({
 }: {
   advance?: boolean;
   cashier?: boolean;
+  admin?: boolean;
   orderId: string;
   table: Table;
   outlet: string;
@@ -213,6 +204,7 @@ export function PrepareBillDialog({
   const DEFAULT_SVC_PCT = 10;
   const [svcPct, setSvcPct] = useState(String(DEFAULT_SVC_PCT));
   const svcPctDraft = useRef(String(DEFAULT_SVC_PCT));
+  const savedServiceChargePct = useRef(DEFAULT_SVC_PCT);
   const previewRequest = useRef(0);
   function svcPctValue(raw?: string | number | null) {
     const n = Number(raw);
@@ -291,6 +283,7 @@ export function PrepareBillDialog({
         } : {}),
       } satisfies BillDetails,
       ...(includeDiscount ? discountBody() : {}),
+      discountCheckboxes: !advance,
       otherCharges: isComplimentary ? 0 : Math.round((Number(delivery) || 0) * 100),
       complimentaryAccountId: isComplimentary ? compId : undefined,
       customerDisplayName: name.trim(),
@@ -299,7 +292,12 @@ export function PrepareBillDialog({
   }
 
   function needsApproval() {
-    return edits.current.length > 0 || billApprovalFields(billFields(true)) !== savedApprovalFields.current;
+    const fields = billFields(true);
+    const serviceChargePct = isComplimentary ? 0 : svcPctValue(svcPctDraft.current);
+    if (serviceChargePct !== savedServiceChargePct.current) {
+      fields.billDetails.remark = savedRemark.current;
+    }
+    return edits.current.length > 0 || billApprovalFields(fields) !== savedApprovalFields.current;
   }
 
   function highlightRemark() {
@@ -315,7 +313,7 @@ export function PrepareBillDialog({
       compRef.current?.focus();
       return false;
     }
-    if (needsApproval() && !remark.trim()) {
+    if (outlet !== "NC" && needsApproval() && !remark.trim()) {
       highlightRemark();
       return false;
     }
@@ -352,6 +350,7 @@ export function PrepareBillDialog({
         invoiceId: invoiceId.current,
         edits: edits.current,
         ...(!advance ? {
+          discountCheckboxes: true,
           serviceChargeMode: serviceChargeMode.current,
           ...discountBody(next),
           excludeItemIds: initial ? next?.excludeItemIds : (next?.excludeItemIds ?? noDisc).filter((id) => !resetDiscount.has(id)),
@@ -410,6 +409,7 @@ export function PrepareBillDialog({
     setNoDisc([]);
     setSvcPct(String(DEFAULT_SVC_PCT));
     svcPctDraft.current = String(DEFAULT_SVC_PCT);
+    savedServiceChargePct.current = DEFAULT_SVC_PCT;
     setDelivery("0");
     setBill(null);
     setComp(outlet === "NC");
@@ -457,6 +457,7 @@ export function PrepareBillDialog({
           setDiscAmt(discountAmt.toFixed(2));
           setSvcPct(String(serviceChargePct));
           svcPctDraft.current = String(serviceChargePct);
+          savedServiceChargePct.current = serviceChargePct;
           setDelivery(String(otherCharges));
           if (details.discountPct != null) {
             discMode.current = "pct";
@@ -921,7 +922,8 @@ export function PrepareBillDialog({
         return;
       }
       if (!validateBillFields()) return;
-      if (needsApproval() && !pin) {
+      const hasChanges = needsApproval();
+      if (hasChanges && !admin && !pin) {
         setAsk(action);
         setPinOpen(true);
         return;
@@ -943,7 +945,7 @@ export function PrepareBillDialog({
         }
         settleAfterSave(invoice);
       } else if (action === "print") await printAndClose(invoice);
-      else if (pin || invoiceId.current) setPrintChoice(invoice);
+      else if (hasChanges || invoiceId.current) setPrintChoice(invoice);
       else if (isComplimentary) onPrinted(invoice);
       else settleAfterSave(invoice);
     } finally {
@@ -980,9 +982,7 @@ export function PrepareBillDialog({
     }, 200);
   }
 
-  const now = new Date();
-  const dateStr = `${String(now.getDate()).padStart(2, "0")}-${now.toLocaleString("en-GB", { month: "short" })}-${now.getFullYear()}`;
-  const timeStr = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  const billStamp = bill?.createdAt ? billDateParts(bill.createdAt) : undefined;
 
   return (
     <div className="dialog bill-dlg">
@@ -1070,8 +1070,8 @@ export function PrepareBillDialog({
               <td className="lbl">Date :</td>
               <td>
                 <div className="date-cell">
-                  <input className="win" value={dateStr} readOnly />
-                  <input className="win" value={timeStr} readOnly />
+                  <input className="win" value={billStamp?.date.replaceAll(" ", "-") ?? ""} readOnly />
+                  <input className="win" value={billStamp?.time ?? ""} readOnly />
                 </div>
               </td>
               <td className="lbl">GSTIN :</td>
@@ -1112,7 +1112,7 @@ export function PrepareBillDialog({
             </colgroup>
             <thead>
               <tr>
-                <th>No.</th><th>Item Name</th><th>Qty</th><th>Item Price</th><th>Tax (%)</th><th>Amount</th><th />
+                <th>No.</th><th>Item Name</th><th>Qty</th><th>Item Price</th><th>Tax (%)</th><th>Amount</th><th title="No Discount">No Disc.</th>
               </tr>
             </thead>
             <tbody>
@@ -1236,8 +1236,9 @@ export function PrepareBillDialog({
                     <input
                       type="checkbox"
                       aria-label={`Exclude ${it.name} from discount`}
+                      title="No discount for this item"
                       disabled={advance}
-                      checked={(it.ids ?? [it.id]).every((id: string) => noDisc.includes(id))}
+                      checked={(it.ids ?? [it.id]).some((id: string) => noDisc.includes(id))}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => {
                         const ids: string[] = it.ids ?? [it.id];
@@ -1469,11 +1470,11 @@ export function PrepareBillDialog({
                             onKeyDown={(e) => {
                               if (e.key !== "Enter") return;
                               e.preventDefault();
-                              if (e.repeat) return;
                               if (advance) {
                                 printRef.current?.focus();
                                 return;
                               }
+                              if (e.repeat) return;
                               if (!validateBillFields()) return;
                               const serviceChargePct = svcPctValue((e.target as HTMLInputElement).value);
                               svcPctDraft.current = String(serviceChargePct);
@@ -1533,8 +1534,8 @@ export function PrepareBillDialog({
       {printChoice && !saving && (
         <ConfirmAsk
           message="Do you want to print bill?"
-          defaultFocus="no"
           ignoreEnterMs={250}
+          allowHeldEnter
           onYes={() => {
             if (savingRef.current) return;
             savingRef.current = true;
@@ -1569,6 +1570,11 @@ export function PrepareBillDialog({
         <div className="confirm-overlay">
           <form className="dialog confirm-dlg" role="dialog" aria-modal="true" aria-label="Master PIN"
             onKeyDown={(e) => {
+              if (e.key === "Enter" && e.repeat) {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+              }
               if (e.key === "Escape" && !saving) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -1632,12 +1638,13 @@ export function SettleDialog({
   const [cardListOpen, setCardListOpen] = useState(false);
   const [cardPick, setCardPick] = useState(0);
   const [cardDrop, setCardDrop] = useState({ top: 0, left: 0, width: 280 });
-  const [bankName, setBankName] = useState(BANK_NAMES[0]);
+  const [bankName, setBankName] = useState<string>(DEFAULT_BANK_PAYMENT_ACCOUNT);
   const [warn, setWarn] = useState("");
   const warnBack = useRef<"amount" | "mode" | "bank" | "card" | "save">("amount");
   const amtRef = useRef<HTMLInputElement>(null);
   const payCardRef = useRef<HTMLInputElement>(null);
   const bankRef = useRef<HTMLSelectElement>(null);
+  const settleRemarkRef = useRef<HTMLInputElement>(null);
   const modeRef = useRef<HTMLSelectElement>(null);
   const saveBtnRef = useRef<HTMLButtonElement>(null);
   const cardDropRef = useRef<HTMLDivElement>(null);
@@ -1830,7 +1837,11 @@ export function SettleDialog({
       } else if (active === bankRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        saveBtnRef.current?.focus();
+        if (!e.repeat) settleRemarkRef.current?.focus();
+      } else if (active === settleRemarkRef.current) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        if (!e.repeat) saveBtnRef.current?.focus();
       } else if (active === payCardRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -1915,7 +1926,7 @@ export function SettleDialog({
       setSnap(result);
       setAmount(rupee(dueOf(result)));
       chooseMode(PAY_MODES[0].id);
-      setBankName(BANK_NAMES[0]);
+      setBankName(DEFAULT_BANK_PAYMENT_ACCOUNT);
     } catch (e) {
       showWarn(insufficientCard(e), method === "MEMBER_CARD" ? "amount" : "save");
     } finally {
@@ -1986,7 +1997,7 @@ export function SettleDialog({
                 <td>
                   <select ref={bankRef} className="win" aria-label="Bank Name" tabIndex={3} value={bankName}
                     onChange={(e) => setBankName(e.target.value)}
-                    onKeyDown={(e) => selectByFirstLetter(e, setBankName)}>
+                    onKeyDown={(e) => moveSelectOption(e, setBankName)}>
                     {BANK_NAMES.map((name) => <option key={name}>{name}</option>)}
                   </select>
                 </td>
@@ -2082,7 +2093,7 @@ export function SettleDialog({
             </tr>
             <tr>
               <td className="lbl">Remark :</td>
-              <td colSpan={3}><input className="win" tabIndex={-1} value={remark} onChange={(e) => setRemark(e.target.value)} /></td>
+              <td colSpan={3}><input ref={settleRemarkRef} className="win" tabIndex={-1} value={remark} onChange={(e) => setRemark(e.target.value)} /></td>
             </tr>
           </tbody>
         </table>
@@ -2360,7 +2371,7 @@ export function TransferDialog({
   outlet: string;
   currentCode: string;
   onClose: () => void;
-  onDone: (fromCode: string, to: Table, printError?: string) => void;
+  onDone: (fromCode: string, to: Table) => void;
   onMessage: (m: string) => void;
 }) {
   /** Destination outlet (New Table). Source table is found across all outlets. */
@@ -2547,8 +2558,8 @@ export function TransferDialog({
         onMessage("Cannot transfer a table to itself");
         return;
       }
-      const result = await api.post<{ printError?: string }>("/api/tables/transfer", { fromTableId: from.id, toTableId: to.id, reason: why });
-      onDone(from.code, to, result.printError);
+      await api.post("/api/tables/transfer", { fromTableId: from.id, toTableId: to.id, reason: why });
+      onDone(from.code, to);
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Transfer failed");
     }

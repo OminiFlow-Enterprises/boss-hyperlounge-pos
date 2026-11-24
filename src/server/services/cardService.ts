@@ -1,11 +1,11 @@
-import { assertPermission } from "../../shared/permissions.js";
+import { assertPermission, hasPermission } from "../../shared/permissions.js";
 import { assertPositiveAmount } from "../../shared/money.js";
 import type { Actor, BlockReason, CardBalances, LedgerType, PaymentMode } from "../../shared/types.js";
 import { AppError, InsufficientBalanceError, PermissionError } from "../lib/errors.js";
 import { audit, enqueueSync } from "../lib/audit.js";
 import type { AppContext } from "../lib/context.js";
 import { businessDayStart, idempotencyKey, nextNumber, nowIso, uuid } from "../lib/ids.js";
-import { dayCloseHour, spendBonusFirst } from "./settingsService.js";
+import { spendBonusFirst } from "./settingsService.js";
 
 export interface CardRow {
   id: string;
@@ -51,7 +51,7 @@ const CARD_SELECT = `
   JOIN card_types ct ON ct.id = c.card_type_id
 `;
 
-export function getCard(ctx: AppContext, cardId: string): CardRow {
+export function getCard(ctx: Pick<AppContext, "db">, cardId: string): CardRow {
   const row = ctx.db.prepare(`${CARD_SELECT} WHERE c.id = ?`).get(cardId) as CardRow | undefined;
   if (!row) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
   return row;
@@ -93,7 +93,7 @@ export function assertOrderCardUsable(ctx: AppContext, orderId: string) {
   if (row?.card_id) assertUsable(getCard(ctx, row.card_id));
 }
 
-export function balancesFromLedger(ctx: AppContext, cardId: string): CardBalances {
+export function balancesFromLedger(ctx: Pick<AppContext, "db">, cardId: string): CardBalances {
   const row = ctx.db
     .prepare(
       `SELECT
@@ -123,8 +123,10 @@ export function assertUsable(card: CardRow): void {
   }
 }
 
-export function expireOvernightBalance(ctx: AppContext, cardId: string, now = new Date()): CardBalances {
-  const cutoff = businessDayStart(now, dayCloseHour(ctx)).toISOString();
+type LedgerContext = Pick<AppContext, "db"> & Partial<Pick<AppContext, "actor">>;
+
+export function expireOvernightBalance(ctx: LedgerContext, cardId: string, now = new Date()): CardBalances {
+  const cutoff = businessDayStart(now).toISOString();
   const already = ctx.db
     .prepare("SELECT id FROM card_ledger WHERE card_id = ? AND type = 'EXPIRY' AND created_at >= ? LIMIT 1")
     .get(cardId, cutoff) as { id: string } | undefined;
@@ -155,6 +157,22 @@ export function expireOvernightBalance(ctx: AppContext, cardId: string, now = ne
   return balancesFromLedger(ctx, cardId);
 }
 
+export function expireStaleCardBalances(ctx: Pick<AppContext, "db">, now = new Date()) {
+  ctx.db.transaction(() => {
+    const rows = ctx.db.prepare(
+      "SELECT id FROM member_cards WHERE paid_balance > 0 OR bonus_balance > 0",
+    ).all() as Array<{ id: string }>;
+    for (const { id } of rows) expireOvernightBalance(ctx, id, now);
+  }).immediate();
+}
+
+export function cardRechargeFee(ctx: AppContext, cardId: string, now = new Date()) {
+  const prior = ctx.db.prepare(
+    "SELECT 1 FROM card_ledger WHERE card_id = ? AND type = 'RECHARGE' AND direction = 'CREDIT' AND created_at >= ? LIMIT 1",
+  ).get(cardId, businessDayStart(now).toISOString());
+  return prior ? 0 : CARD_RECHARGE_FEE;
+}
+
 function mopToMode(mop?: string): PaymentMode {
   const m = (mop || "").trim().toUpperCase();
   if (m === "UPI" || m.startsWith("UPI/") || m.startsWith("UPI ")) return "UPI";
@@ -168,6 +186,28 @@ function bankFromMop(mop?: string) {
   if (slash < 0) return undefined;
   const name = raw.slice(slash + 1).trim();
   return name || undefined;
+}
+
+export function debitCardAdvance(
+  ctx: AppContext,
+  input: { cardNumber: string; amount: number; paymentMode: string; idempotencyKey: string },
+) {
+  if (!hasPermission(ctx.actor.role, "BALANCE_ADJUST")) throw new PermissionError("BALANCE_ADJUST");
+  assertPositiveAmount(input.amount, "Deduction amount");
+  const card = findCardByScan(ctx, input.cardNumber);
+  if (!card) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
+  assertUsable(card);
+  const balance = expireOvernightBalance(ctx, card.id);
+  if (input.amount > balance.paid) throw new InsufficientBalanceError(input.amount, balance.paid);
+  writeLedger(ctx, {
+    cardId: card.id, type: "ADJUSTMENT", direction: "DEBIT",
+    paidAmount: input.amount, bonusAmount: 0, paymentMode: mopToMode(input.paymentMode),
+    referenceNumber: bankFromMop(input.paymentMode), reason: "Advance balance deduction",
+    idempotencyKey: input.idempotencyKey,
+  });
+  const updated = getCard(ctx, card.id);
+  audit(ctx, "ADVANCE_BALANCE_DEBIT", "member_card", card.id, input.paymentMode, balance.paid, updated.paid_balance);
+  return updated;
 }
 
 export function ensureCardAndCreditAdvance(
@@ -221,7 +261,7 @@ export function ensureCardAndCreditAdvance(
   return getCard(ctx, card.id);
 }
 
-export function writeLedger(ctx: AppContext, input: LedgerWrite) {
+export function writeLedger(ctx: LedgerContext, input: LedgerWrite) {
   const existing = ctx.db
     .prepare("SELECT * FROM card_ledger WHERE idempotency_key = ?")
     .get(input.idempotencyKey) as Record<string, unknown> | undefined;
@@ -268,8 +308,8 @@ export function writeLedger(ctx: AppContext, input: LedgerWrite) {
       newPaid,
       newBonus,
       input.paymentMode ?? null,
-      ctx.actor.staffId,
-      ctx.actor.terminalId,
+      ctx.actor?.staffId ?? null,
+      ctx.actor?.terminalId ?? null,
       input.referenceNumber ?? null,
       input.relatedLedgerId ?? null,
       input.relatedInvoiceId ?? null,
@@ -424,14 +464,12 @@ export function rechargeCard(
 ) {
   assertPermission(ctx.actor.role, "RECHARGE");
   assertPositiveAmount(input.amount, "Recharge amount");
-  if (input.amount < CARD_RECHARGE_FEE) throw new AppError("Minimum recharge is Rs. 100.00");
   if (input.paymentMode === "MEMBER_CARD") {
     throw new AppError("Cannot recharge a member card using another member card");
   }
 
   const card = getCard(ctx, input.cardId);
   assertUsable(card);
-  expireOvernightBalance(ctx, card.id);
   const key = input.idempotencyKey ?? idempotencyKey("rch");
 
   const result = ctx.db.transaction(() => {
@@ -440,6 +478,13 @@ export function rechargeCard(
     if (prior && (prior.card_id !== card.id || prior.type !== "RECHARGE")) {
       throw new AppError("Recharge reference is already in use", 409);
     }
+    const now = new Date();
+    expireOvernightBalance(ctx, card.id, now);
+    const fee = prior
+      ? (ctx.db.prepare("SELECT paid_amount FROM card_ledger WHERE idempotency_key = ?")
+          .get(`${key}:fee`) as { paid_amount: number } | undefined)?.paid_amount ?? 0
+      : cardRechargeFee(ctx, card.id, now);
+    if (!prior && input.amount < fee) throw new AppError("Minimum first recharge is Rs. 100.00");
     const rechargeTxn = writeLedger(ctx, {
       cardId: card.id,
       type: "RECHARGE",
@@ -451,11 +496,11 @@ export function rechargeCard(
       idempotencyKey: key,
     });
 
-    if (!prior) writeLedger(ctx, {
+    if (!prior && fee) writeLedger(ctx, {
       cardId: card.id,
       type: "ADJUSTMENT",
       direction: "DEBIT",
-      paidAmount: CARD_RECHARGE_FEE,
+      paidAmount: fee,
       bonusAmount: 0,
       relatedLedgerId: (rechargeTxn as { id: string }).id,
       reason: "Card recharge fee",
@@ -483,8 +528,8 @@ export function rechargeCard(
 
     const updated = getCard(ctx, card.id);
     audit(ctx, "CARD_RECHARGE", "member_card", card.id, input.paymentMode, card.paid_balance, updated.paid_balance);
-    return { card: updated, recharge: rechargeTxn, bonus: bonusTxn, bonusAmount: bonus };
-  })();
+    return { card: updated, recharge: rechargeTxn, bonus: bonusTxn, bonusAmount: bonus, fee };
+  }).immediate();
 
   if (input.printReceipt) {
     void ctx.hardware.receipt.printReceipt({
@@ -494,7 +539,7 @@ export function rechargeCard(
         `Member ${result.card.customer_name}`,
         `Previous ${formatLedgerAmount(card.paid_balance + card.bonus_balance)}`,
         `Recharge ${formatLedgerAmount(input.amount)}`,
-        `Recharge fee ${formatLedgerAmount(CARD_RECHARGE_FEE)}`,
+        result.fee ? `Recharge fee ${formatLedgerAmount(result.fee)}` : "",
         result.bonusAmount ? `Bonus ${formatLedgerAmount(result.bonusAmount)}` : "",
         `New ${formatLedgerAmount(result.card.paid_balance + result.card.bonus_balance)}`,
       ].filter(Boolean),
@@ -801,7 +846,7 @@ export function listCards(ctx: AppContext, status?: string) {
 
 /** Cards that received a recharge during the current business day (6 AM close). */
 export function cardsRechargedToday(ctx: AppContext) {
-  const start = businessDayStart(new Date(), dayCloseHour(ctx)).toISOString();
+  const start = businessDayStart().toISOString();
   const rows = ctx.db
     .prepare(
       `SELECT c.id, c.card_number, cu.name AS customer_name,

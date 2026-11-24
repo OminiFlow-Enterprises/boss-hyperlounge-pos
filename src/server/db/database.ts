@@ -147,6 +147,7 @@ function installBaseline(db: Database.Database): void {
 // Append a numbered step for future schema changes. Keep released steps and schema.sql unchanged.
 const migrations: Array<{ version: number; apply: (db: Database.Database) => void; foreignKeysOff?: boolean }> = [
   { version: 1, apply: installBaseline, foreignKeysOff: true },
+  { version: 2, apply: (db) => db.exec("ALTER TABLE payments ADD COLUMN cashier_id TEXT REFERENCES staff(id)") },
 ];
 
 export function migrate(db: Database.Database): void {

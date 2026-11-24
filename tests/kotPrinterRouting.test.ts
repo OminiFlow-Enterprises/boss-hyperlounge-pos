@@ -26,6 +26,8 @@ it.each(["THE BOSS CLUB", "RESTAURANT"])("routes original and customer KOT copie
   const localHtml = ids
     .filter((id) => (getKotPrintJob(db, id) as { destination: string }).destination === "CONNECTED")
     .map((id) => getKotPrintJob(db, id, "claim"));
+  const heading = outlet === "RESTAURANT" ? "RESTAURANT" : "BAR";
+  for (const job of localHtml) expect(job).toMatchObject({ html: expect.stringContaining(`<h1>${heading}</h1>`) });
   expect(localHtml).toEqual(expect.arrayContaining([
     expect.objectContaining({ deviceName: "", html: expect.stringMatching(/Original Copy[\s\S]*LOCAL DRINK/) }),
     expect.objectContaining({ deviceName: "", html: expect.stringMatching(/Customer Copy[\s\S]*LOCAL DRINK/) }),

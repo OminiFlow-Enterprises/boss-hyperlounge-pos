@@ -3,6 +3,7 @@ declare global {
     bossPrint?: {
       printHtml: (html: string, deviceName?: string) => Promise<{ ok: boolean; error?: string }>;
       exportPdf?: (opts?: { landscape?: boolean }) => Promise<Uint8Array | { data?: number[] }>;
+      printItemWiseSales?: () => Promise<{ ok: boolean; error?: string }>;
     };
     bossWindow?: {
       minimize: () => Promise<{ ok: boolean }>;

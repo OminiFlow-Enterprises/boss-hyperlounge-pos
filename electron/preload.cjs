@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("bossPrint", {
   printHtml: (html, deviceName = "bill") =>
     ipcRenderer.invoke("pos:print-html", { html, deviceName }),
   exportPdf: (opts) => ipcRenderer.invoke("pos:export-pdf", opts || {}),
+  printItemWiseSales: () => ipcRenderer.invoke("pos:print-item-wise-sales"),
 });
 
 contextBridge.exposeInMainWorld("bossWindow", {

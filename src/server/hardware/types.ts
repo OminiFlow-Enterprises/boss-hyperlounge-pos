@@ -86,6 +86,7 @@ export interface KotPrintPayload {
   operatorName?: string;
   reprint: boolean;
   customerCopy?: boolean;
+  heading?: "BAR" | "RESTAURANT";
   tableTransfer?: { outlet: string; fromTable: string; toTable: string };
   /**
    * First KOT on a table/session → NEW ORDER.

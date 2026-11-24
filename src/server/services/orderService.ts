@@ -822,10 +822,16 @@ function routeKot(
     items.push(item);
     jobs.set(destination, items);
   }
-  const slips = Array.from(jobs, ([destination, items]) => ({ ...payload, station: destination, items }));
+  const heading = outlet === "RESTAURANT" ? "RESTAURANT" as const : "BAR" as const;
+  const slips = Array.from(jobs, ([destination, items]) => ({
+    ...payload,
+    station: destination,
+    heading: localOutlet && destination === "CONNECTED" ? heading : undefined,
+    items,
+  }));
   if (localOutlet) {
     const items = payload.items.map(({ productId, ...item }) => item);
-    slips.push({ ...payload, station: "CONNECTED", customerCopy: true, items });
+    slips.push({ ...payload, station: "CONNECTED", heading, customerCopy: true, items });
   }
   return slips;
 }

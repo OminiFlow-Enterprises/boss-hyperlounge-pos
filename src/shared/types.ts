@@ -57,6 +57,7 @@ export interface Actor {
   /** Null until this user is saved from User Master. */
   rights?: Record<string, boolean> | null;
   allowComplementary?: boolean | null;
+  hideEstimate?: boolean | null;
   tableTransfer?: boolean | null;
   itemTransfer?: boolean | null;
 }

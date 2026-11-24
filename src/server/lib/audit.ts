@@ -32,7 +32,7 @@ export function audit(
 }
 
 export function enqueueSync(
-  ctx: AppContext,
+  ctx: Pick<AppContext, "db">,
   entityType: string,
   entityId: string,
   payload: unknown,

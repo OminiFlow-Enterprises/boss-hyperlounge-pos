@@ -200,6 +200,13 @@ export function outletRight(outlet: string): string {
   return "fnb.bar";
 }
 
+export function canViewNcEstimate(actor: {
+  rights?: Record<string, boolean> | null;
+  hideEstimate?: boolean | null;
+} | null | undefined): boolean {
+  return !!actor && !actor.hideEstimate && rightOn(actor.rights, outletRight("NC"));
+}
+
 export function viewRight(view: string, outlet?: string): string | null {
   if (view === "user-master") return "master.user";
   if (view === "gst-report") return "report.gst";

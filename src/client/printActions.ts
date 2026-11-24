@@ -67,6 +67,17 @@ export function printPage() {
   return runPrintJob("page", () => window.print());
 }
 
+export function printItemWiseSales() {
+  const desktopPrint = window.bossPrint?.printItemWiseSales;
+  if (!desktopPrint) return printPage();
+  return runPrintJob("item-wise-sales", async () => {
+    const result = await desktopPrint();
+    if (!result.ok && !/cancel/i.test(result.error ?? "")) {
+      throw new Error(result.error || "Unable to print item wise sales.");
+    }
+  });
+}
+
 export function ignoreRepeatedPrintKey(event: KeyboardEvent<HTMLButtonElement>) {
   if (event.repeat && (event.key === "Enter" || event.key === " ")) event.preventDefault();
 }

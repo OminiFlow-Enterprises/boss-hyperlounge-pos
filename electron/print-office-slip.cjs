@@ -10,7 +10,9 @@ async function captureSlip(win, sharpBill) {
   const zoom = sharpBill ? 2 : 1;
   win.setContentSize(320 * zoom, 800);
   win.webContents.setZoomFactor(zoom);
-  const rect = await win.webContents.executeJavaScript(`document.fonts.ready.then(() => {
+  const rect = await win.webContents.executeJavaScript(`document.fonts.ready
+    .then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+    .then(() => {
     const slip = document.querySelector(".slip") || document.body;
     const bounds = slip.getBoundingClientRect();
     return {

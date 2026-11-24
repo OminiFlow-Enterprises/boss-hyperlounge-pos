@@ -8,13 +8,19 @@ export class ApiError extends Error {
   }
 }
 
+export const sessionExpiredEvent = "pos-session-expired";
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     ...init,
+    headers: { "Content-Type": "application/json", "X-POS-Client": "1", ...(init?.headers ?? {}) },
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    if (res.status === 401 && data.code === "SESSION_REQUIRED") {
+      window.dispatchEvent(new Event(sessionExpiredEvent));
+      throw new ApiError("", res.status);
+    }
     throw new ApiError(data.error ?? "Request failed", res.status, data.details);
   }
   return data as T;

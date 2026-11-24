@@ -479,7 +479,8 @@ async function openPos() {
         if (!posUrl) return app.quit();
       }
       try {
-        await mainWindow.loadURL(posUrl.href);
+        // Revalidate the server's entry page when reopening after an update.
+        await mainWindow.loadURL(posUrl.href, { extraHeaders: "Cache-Control: no-cache\n" });
         fs.writeFileSync(addressFile, posUrl.href, "utf8");
         break;
       } catch {
@@ -535,6 +536,12 @@ ipcMain.handle("pos:export-pdf", async (event, opts) => {
   return pdf;
 });
 
+ipcMain.handle("pos:print-item-wise-sales", (event) => new Promise((resolve) => {
+  event.sender.print({ silent: false, pageSize: "A4" }, (ok, error) => {
+    resolve({ ok, error });
+  });
+}));
+
 ipcMain.handle("pos:print-html", async (_event, { html, deviceName }) => {
   const printer = String(deviceName ?? "bill");
   const win = new BrowserWindow({
@@ -560,7 +567,7 @@ ipcMain.handle("pos:print-html", async (_event, { html, deviceName }) => {
       await win.webContents.executeJavaScript('document.title.startsWith("KOT ")');
     if (connectedKot || (windowsBillQueue && (sharpBill || isOfficePc))) {
       await printOfficeSlip(win, printer, {
-        sharpBill,
+        sharpBill: sharpBill || connectedKot,
         rejectBlank: connectedKot,
         preferredQueue: connectedKot && isOfficePc ? "bill" : "",
       });
@@ -592,7 +599,16 @@ ipcMain.handle("pos:print-html", async (_event, { html, deviceName }) => {
   }
 });
 
-app.whenReady().then(openPos).catch((error) => {
+app.whenReady().then(async () => {
+  if (gotLock && process.platform === "win32" && app.isPackaged && !clientOnly) {
+    try {
+      app.setLoginItemSettings({ openAtLogin: true });
+    } catch (error) {
+      log(`Windows auto-start: ${error.message}`);
+    }
+  }
+  await openPos();
+}).catch((error) => {
   dialog.showErrorBox("THE BOSS POS", error instanceof Error ? error.message : String(error));
   app.quit();
 });

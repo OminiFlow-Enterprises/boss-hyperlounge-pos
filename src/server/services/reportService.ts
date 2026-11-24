@@ -2,7 +2,7 @@ import { assertPermission } from "../../shared/permissions.js";
 import { formatTableNo } from "../../shared/tableLabel.js";
 import { businessDateRange as dateRange } from "../../shared/businessDate.js";
 import type { AppContext } from "../lib/context.js";
-import { AppError } from "../lib/errors.js";
+import { AppError, InsufficientBalanceError } from "../lib/errors.js";
 import { nextSequence, nowIso, todayDate, uuid } from "../lib/ids.js";
 import { audit } from "../lib/audit.js";
 import { buildBillTotalLines, type BillTotalLine } from "../hardware/billTotals.js";
@@ -660,7 +660,7 @@ export function settlementReport(
        FROM payments p
        JOIN invoices i ON i.id = p.invoice_id
        JOIN dining_tables t ON t.id = i.table_id
-       LEFT JOIN staff s ON s.id = i.cashier_id
+       LEFT JOIN staff s ON s.id = COALESCE(p.cashier_id, i.cashier_id)
        LEFT JOIN customers cu ON cu.id = i.customer_id
        LEFT JOIN table_sessions ts ON ts.id = i.session_id
        LEFT JOIN staff w ON w.id = ts.waiter_id
@@ -743,7 +743,7 @@ function applyPaidStatus(ctx: AppContext, invoiceId: string, orderId: string, gr
   ctx.db.prepare("UPDATE orders SET status = 'SETTLING' WHERE id = ? AND status = 'PAID'").run(orderId);
 }
 
-type SettlementPart = { method: string; amount: number; account: string; remark: string };
+type SettlementPart = { method: string; amount: number; account: string; remark: string; cardNumber?: string };
 
 export function updateSettlement(
   ctx: AppContext,
@@ -762,6 +762,7 @@ export function updateSettlement(
       if (row.amount !== original?.amount) {
         throw new AppError("Settlement changed. Reopen it from the report and try again.", 409);
       }
+      if (row.method === "MEMBER_CARD") throw new AppError("Prepaid card settlement amount cannot be changed");
       ctx.db.prepare("UPDATE payments SET amount = ? WHERE id = ?").run(amount, paymentId);
       audit(ctx, "SETTLEMENT_UPDATE", "payment", paymentId, null, row.amount, amount);
       return settlementRow(ctx, paymentId);
@@ -778,7 +779,8 @@ export function updateSettlement(
     if (!Number.isSafeInteger(amount) || amount <= 0) throw new AppError("Enter settle amount");
     const account = String(line.account || "").trim();
     if (method === "CARD" && (!account || account === "Select" || account === "Cash.")) throw new AppError("Select bank name");
-    return { method, amount, account: method === "CASH" ? "Cash." : account, remark: String(line.remark ?? "").trim() };
+    return { method, amount, account: method === "CASH" ? "Cash." : account,
+      remark: String(line.remark ?? "").trim(), cardNumber: String(line.cardNumber ?? "").trim() };
   });
 
   return ctx.db.transaction(() => {
@@ -798,27 +800,40 @@ export function updateSettlement(
         throw new AppError("Prepaid card settlement cannot be changed");
       }
       lines[0].account = String(row.account);
-    } else if (lines.some((line) => line.method === "MEMBER_CARD")) {
-      throw new AppError("Prepaid card settlement cannot be added here");
     }
 
-    const [first, ...remaining] = lines;
-    ctx.db.prepare("UPDATE payments SET method = ?, amount = ?, reference = ?, remark = ? WHERE id = ?")
-      .run(first.method, first.amount, first.account, first.remark, paymentId);
+    const posted = lines.map(({ cardNumber, ...line }) => {
+      if (line.method !== "MEMBER_CARD") return { ...line, cardId: null, ledgerId: null };
+      if (row.method === "MEMBER_CARD") return { ...line, cardId: row.member_card_id, ledgerId: row.ledger_id };
+      if (!cardNumber) throw new AppError("Enter card number");
+      const { card } = cards.checkBalance(ctx, cardNumber, true);
+      try {
+        const { txn } = cards.purchaseOnCard(ctx, { cardId: card.id, amount: line.amount, invoiceId: String(row.invoice_id) });
+        return { ...line, account: "", cardId: card.id, ledgerId: (txn as { id: string }).id };
+      } catch (error) {
+        if (!(error instanceof InsufficientBalanceError)) throw error;
+        const { available } = error.details as { available: number };
+        throw new AppError(`Insufficient amount. Card balance: ${(available / 100).toFixed(2)}`, 409, error.code, error.details);
+      }
+    });
+    const [first, ...remaining] = posted;
+    ctx.db.prepare("UPDATE payments SET method = ?, amount = ?, reference = ?, remark = ?, member_card_id = ?, ledger_id = ? WHERE id = ?")
+      .run(first.method, first.amount, first.account, first.remark, first.cardId, first.ledgerId, paymentId);
     const insert = ctx.db.prepare(
-      "INSERT INTO payments (id, invoice_id, method, amount, reference, remark, receipt_no, voucher_no, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      `INSERT INTO payments (id, invoice_id, method, amount, reference, remark, member_card_id, ledger_id, receipt_no, voucher_no, created_at, cashier_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT cashier_id FROM payments WHERE id = ?))`,
     );
     const addedPayments = remaining.map((line) => {
       const id = uuid();
-      insert.run(id, row.invoice_id, line.method, line.amount, line.account, line.remark,
+      insert.run(id, row.invoice_id, line.method, line.amount, line.account, line.remark, line.cardId, line.ledgerId,
         nextSequence(ctx.db, "settlement_receipt", 32901),
         nextSequence(ctx.db, "settlement_voucher", 47201),
-        row.voucher_date);
+        row.voucher_date, paymentId);
       return { id, ...line };
     });
     audit(ctx, "SETTLEMENT_UPDATE", "payment", paymentId, null, original, { ...first, addedPayments });
     return settlementRow(ctx, paymentId);
-  })();
+  }).immediate();
 }
 
 export function deleteSettlement(ctx: AppContext, paymentId: string) {
@@ -1324,27 +1339,30 @@ export function saveBooking(
     const mop = body.mop?.trim() || "CASH";
     const createdAt = nowIso();
     if (!/^\d{4}$/.test(cardNo)) throw new AppError("Card No must be 4 digits");
-    if (!(advance > 10000)) throw new AppError("Advance must be greater than 100.00");
+    if (!Number.isSafeInteger(advance) || advance === 0) throw new AppError("Enter a non-zero advance amount");
+    const card = advance < 0
+      ? cards.debitCardAdvance(ctx, { cardNumber: cardNo, amount: -advance, paymentMode: mop, idempotencyKey: `adv:${id}` })
+      : cards.ensureCardAndCreditAdvance(ctx, {
+          cardNumber: cardNo,
+          guestName: body.guestName,
+          mobile: body.mobile,
+          amount: advance,
+          paymentMode: mop,
+          idempotencyKey: `adv:${id}`,
+        });
     ctx.db
       .prepare(
         `INSERT INTO bookings (id, reservation_no, mobile, guest_name, card_no, advance, outlet, mop, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, no, body.mobile ?? "", body.guestName ?? "", cardNo, advance, body.outlet ?? "THE BOSS CLUB", mop, createdAt);
-    const card = cards.ensureCardAndCreditAdvance(ctx, {
-      cardNumber: cardNo,
-      guestName: body.guestName,
-      mobile: body.mobile,
-      amount: advance,
-      paymentMode: mop,
-      idempotencyKey: `adv:${id}`,
-    });
+      .run(id, no, body.mobile ?? "", body.guestName?.trim() || card.customer_name || "", cardNo,
+        advance, body.outlet ?? "THE BOSS CLUB", mop, createdAt);
     const booking = ctx.db.prepare("SELECT * FROM bookings WHERE id = ?").get(id) as {
       id: string; reservation_no: number; mobile: string; guest_name: string;
       card_no: string; advance: number; outlet: string; mop: string; created_at: string;
     };
     return { ...booking, card, balances: cards.balancesFromLedger(ctx, card.id) };
-  })();
+  }).immediate();
 }
 
 export function salesReport(ctx: AppContext, date = todayDate()) {

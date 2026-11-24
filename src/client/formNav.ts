@@ -2,6 +2,20 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 const lastSelectInitial = new WeakMap<HTMLSelectElement, string>();
 
+export function moveSelectOption(e: ReactKeyboardEvent<HTMLSelectElement>, onSelect: (value: string) => void) {
+  if (e.key !== "ArrowUp" && e.key !== "ArrowDown") {
+    selectByFirstLetter(e, onSelect);
+    return;
+  }
+  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  const options = Array.from(e.currentTarget.options).filter((option) => !option.disabled);
+  if (!options.length) return;
+  e.preventDefault();
+  const selected = options.findIndex((option) => option.selected);
+  const next = e.key === "ArrowDown" ? selected + 1 : (selected < 0 ? options.length - 1 : selected - 1);
+  if (next >= 0 && next < options.length) onSelect(options[next].value);
+}
+
 export function selectByFirstLetter(e: ReactKeyboardEvent<HTMLSelectElement>, onSelect: (value: string) => void) {
   if (e.altKey || e.ctrlKey || e.metaKey || !/^[a-z]$/i.test(e.key)) return;
   e.preventDefault();

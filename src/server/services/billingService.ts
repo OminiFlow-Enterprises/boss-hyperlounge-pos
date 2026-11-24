@@ -1,4 +1,5 @@
 import { isAdvanceOutlet } from "../../shared/userRights.js";
+import { billDateTime } from "../../shared/businessDate.js";
 import { assertPermission } from "../../shared/permissions.js";
 import { billLineTaxes, formatINR } from "../../shared/money.js";
 import { AppError, InsufficientBalanceError } from "../lib/errors.js";
@@ -45,18 +46,21 @@ export interface BillPreview {
   excludeItemIds: string[];
   roundOff: number;
   invoiceNumber: string;
+  createdAt: string;
 }
 
 export function previewBill(
   ctx: AppContext,
   orderId: string,
   options: {
+    invoiceId?: string;
     discount?: number;
     discountPct?: number;
     /** `amount` uses `discount` paise. Anything else uses `discountPct` on items that are not excluded. */
     discountFrom?: "amount" | "percent";
     /** Order item ids that take no discount. */
     excludeItemIds?: string[];
+    discountCheckboxes?: boolean;
     discountReviewedItemIds?: string[];
     otherCharges?: number;
     serviceChargePct?: number;
@@ -112,7 +116,7 @@ export function previewBill(
       amount,
       tax_rate,
       sales_group: i.product_sales_group ?? "",
-      defaultExcludeDiscount: i.product_discount === 0,
+      defaultExcludeDiscount: options.discountCheckboxes ? i.product_discount !== 0 : i.product_discount === 0,
       tax: 0,
     };
   }));
@@ -177,7 +181,7 @@ export function previewBill(
     totalQty: mapped.reduce((s, i) => s + i.qty, 0),
     grandTotal,
     items: mapped,
-    invoiceNumber: openInvoiceNumber(ctx, orderId),
+    ...billIdentity(ctx, orderId, options.invoiceId),
   };
 }
 
@@ -230,7 +234,7 @@ function groupSameItems<T extends { id: string; ids: string[]; product_id: strin
   return [...groups.values()].filter((line) => line.qty !== 0);
 }
 
-function orderOutlet(ctx: AppContext, orderId: string) {
+export function orderOutlet(ctx: AppContext, orderId: string) {
   const row = ctx.db
     .prepare(
       `SELECT COALESCE(NULLIF(s.outlet, ''), NULLIF(t.outlet, ''), 'BAR') AS outlet
@@ -325,12 +329,15 @@ function reduceSettlements(ctx: AppContext, invoiceId: string, orderId: string, 
   }
 }
 
-function openInvoiceNumber(ctx: AppContext, orderId: string): string {
+function billIdentity(ctx: AppContext, orderId: string, invoiceId?: string) {
   const existing = ctx.db
-    .prepare("SELECT invoice_number FROM invoices WHERE order_id = ? AND status IN ('UNPAID','PARTIAL')")
-    .get(orderId) as { invoice_number: string } | undefined;
-  if (existing) return existing.invoice_number;
-  return peekNextBillNumber(ctx.db);
+    .prepare(`SELECT invoice_number, created_at FROM invoices WHERE order_id = ?
+      AND ((? IS NULL AND status IN ('UNPAID','PARTIAL')) OR (id = ? AND status IN ('UNPAID','PARTIAL','PAID')))
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+    .get(orderId, invoiceId ?? null, invoiceId ?? null) as { invoice_number: string; created_at: string } | undefined;
+  if (existing) return { invoiceNumber: existing.invoice_number, createdAt: existing.created_at };
+  const date = billDateTime();
+  return { invoiceNumber: peekNextBillNumber(ctx.db, date), createdAt: date.toISOString() };
 }
 
 export function generateInvoice(
@@ -489,7 +496,7 @@ export function generateInvoice(
 
   return ctx.db.transaction(() => {
     const id = uuid();
-    const invoiceNumber = nextBillNumber(ctx.db);
+    const invoiceNumber = nextBillNumber(ctx.db, new Date(bill.createdAt));
     ctx.db
       .prepare(
         `INSERT INTO invoices (
@@ -518,7 +525,7 @@ export function generateInvoice(
         bill.grandTotal,
         "UNPAID",
         ctx.actor.staffId,
-        nowIso(),
+        bill.createdAt,
         null,
         comp?.id ?? null,
         comp?.name ?? "",
@@ -811,8 +818,8 @@ export function settleInvoice(
       const account = line.reference ?? (line.method === "CASH" ? "Cash." : null);
       ctx.db
         .prepare(
-          `INSERT INTO payments (id, invoice_id, method, amount, member_card_id, ledger_id, reference, remark, receipt_no, voucher_no, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)`,
+          `INSERT INTO payments (id, invoice_id, method, amount, member_card_id, ledger_id, reference, remark, receipt_no, voucher_no, created_at, cashier_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, (SELECT id FROM staff WHERE id = ?))`,
         )
         .run(
           paymentId,
@@ -825,6 +832,7 @@ export function settleInvoice(
           nextSequence(ctx.db, "settlement_receipt", 32901),
           nextSequence(ctx.db, "settlement_voucher", 47201),
           nowIso(),
+          ctx.actor.staffId,
         );
       paid += line.amount;
       created.push(paymentId);

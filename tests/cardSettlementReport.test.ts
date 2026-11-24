@@ -62,8 +62,8 @@ describe("card settlement report", () => {
     expect(older.remaining_balance).toBe(rupeesToPaise(1900) - invoice.grand_total);
     expect(newer.payment_mode).toBe("BANK TRANSFER / HDFC");
     expect(newer.amount_paid).toBe(rupeesToPaise(1500));
-    expect(newer.card_balance).toBe(rupeesToPaise(1400));
-    expect(newer.remaining_balance).toBe(rupeesToPaise(1900) - invoice.grand_total + rupeesToPaise(1400) - invoice2.grand_total);
+    expect(newer.card_balance).toBe(rupeesToPaise(1500));
+    expect(newer.remaining_balance).toBe(rupeesToPaise(1900) - invoice.grand_total + rupeesToPaise(1500) - invoice2.grand_total);
 
     const firstBills = cardSettlementBills(cashier, String(older.booking_id));
     expect(firstBills.rows).toEqual([

@@ -1,4 +1,5 @@
 import { amountInWords, stewardInitial } from "./escpos.js";
+import { billDateParts } from "../../shared/businessDate.js";
 import { buildBillTotalLines } from "./billTotals.js";
 import { BILL_VENUE_DEFAULTS, type BillReceiptPayload } from "./types.js";
 
@@ -21,18 +22,6 @@ function esc(text: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
-}
-
-function billDateParts(iso: string): { date: string; time: string } {
-  const when = new Date(iso);
-  if (Number.isNaN(when.getTime())) return { date: iso.slice(0, 11), time: "" };
-  const day = String(when.getDate()).padStart(2, "0");
-  const mon = when.toLocaleString("en-GB", { month: "short" });
-  const year = when.getFullYear();
-  const hh = String(when.getHours()).padStart(2, "0");
-  const mm = String(when.getMinutes()).padStart(2, "0");
-  const ss = String(when.getSeconds()).padStart(2, "0");
-  return { date: `${day} ${mon} ${year}`, time: `${hh}:${mm}:${ss}` };
 }
 
 function outletLabel(outlet: string): string {
