@@ -1391,6 +1391,13 @@ table.data tr.grp td { background: #ffc0cb; font-weight: 700; }
 .su-dlg .st-foot .fn {
   font-weight: inherit;
 }
+.su-card-cell { position: relative; }
+.su-card-cell select.win:not([size="1"]) {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 1;
+  height: auto;
+}
 .settle-dlg .alert-dlg {
   position: fixed;
   top: 168px;

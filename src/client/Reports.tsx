@@ -6,7 +6,7 @@ import { createPortal } from "react-dom";
 import { api } from "./api";
 import { parseRupeesInput, rupeesToPaise } from "../shared/money";
 import { billDateParts, businessDate, businessDateRange } from "../shared/businessDate";
-import { BANK_PAYMENT_ACCOUNTS, DEFAULT_BANK_PAYMENT_ACCOUNT } from "../shared/paymentAccounts";
+import { BANK_PAYMENT_ACCOUNTS, cleanPaymentReference, DEFAULT_BANK_PAYMENT_ACCOUNT } from "../shared/paymentAccounts";
 import type { NavView } from "../shared/types";
 import { AlertBox, CapBtns, ConfirmAsk, PrepareBillDialog, SettleDialog } from "./BillDialogs";
 import { cardNoDigits, cardNoReady, moveSelectOption, selectByFirstLetter, stayOnCard } from "./formNav";
@@ -1239,7 +1239,7 @@ function modeLabel(method?: string) {
 
 function mopCell(method?: string, account?: string) {
   const mode = mopName(method);
-  const acct = method === "CASH" ? (account || "Cash").replace(/\.$/, "") : account || "";
+  const acct = method === "CASH" ? (account || "Cash").replace(/\.$/, "") : cleanPaymentReference(method, account);
   return acct ? `${mode} (${acct})` : mode;
 }
 
@@ -1278,6 +1278,7 @@ const REPORT_PAY_MODES = ["CASH", "BANK TRANSFER", "PREPAID CARD"] as const;
 
 type SettlementPart = { method: string; amount: number; account: string; remark: string; cardNumber?: string };
 type SettlementField = "amount" | "mode" | "bank" | "card" | "save" | "remark";
+type SettlementCard = { card_number: string; customer_name: string; available: number };
 
 function SettlementUpdateDialog({
   paymentId,
@@ -1296,6 +1297,9 @@ function SettlementUpdateDialog({
   const [bankName, setBankName] = useState<string>(DEFAULT_BANK_PAYMENT_ACCOUNT);
   const [cardNumber, setCardNumber] = useState("");
   const [cardBalance, setCardBalance] = useState<number | null>(null);
+  const [todayCards, setTodayCards] = useState<SettlementCard[]>([]);
+  const [cardListStatus, setCardListStatus] = useState("");
+  const [cardFocused, setCardFocused] = useState(false);
   const [parts, setParts] = useState<SettlementPart[]>([]);
   const busy = useRef(false);
   const [remark, setRemark] = useState("");
@@ -1305,7 +1309,7 @@ function SettlementUpdateDialog({
   const remarkRef = useRef<HTMLInputElement>(null);
   const modeRef = useRef<HTMLSelectElement>(null);
   const bankRef = useRef<HTMLSelectElement>(null);
-  const cardRef = useRef<HTMLInputElement>(null);
+  const cardRef = useRef<HTMLSelectElement>(null);
   const updateRef = useRef<HTMLButtonElement>(null);
   const close = useRef(onClose);
   close.current = onClose;
@@ -1316,10 +1320,7 @@ function SettlementUpdateDialog({
       amtRef.current?.select();
     } else if (where === "mode") modeRef.current?.focus();
     else if (where === "bank") bankRef.current?.focus();
-    else if (where === "card") {
-      cardRef.current?.focus();
-      cardRef.current?.select();
-    }
+    else if (where === "card") cardRef.current?.focus();
     else if (where === "remark") {
       remarkRef.current?.focus();
       remarkRef.current?.select();
@@ -1353,6 +1354,21 @@ function SettlementUpdateDialog({
     return () => { gone = true; };
   }, [paymentId]);
 
+  useEffect(() => {
+    if (mode !== "PREPAID CARD") return;
+    const request = new AbortController();
+    setTodayCards([]);
+    setCardListStatus("Loading cards…");
+    api.get<SettlementCard[]>("/api/cards/recharged-today", request.signal).then((cards) => {
+      if (request.signal.aborted) return;
+      setTodayCards(cards);
+      setCardListStatus("");
+    }).catch(() => {
+      if (!request.signal.aborted) setCardListStatus("Could not load cards");
+    });
+    return () => request.abort();
+  }, [mode, paymentId]);
+
   useLayoutEffect(() => {
     amtRef.current?.focus();
     amtRef.current?.select();
@@ -1361,15 +1377,28 @@ function SettlementUpdateDialog({
   const remaining = (row?.amount ?? 0) - parts.reduce((sum, part) => sum + part.amount, 0);
   const remainingAfterAmount = Math.max(0, remaining - rupeesToPaise(Number(amount) || 0));
   const prepaid = row?.method === "MEMBER_CARD";
+  const originalCard = prepaid ? row.card_number : "";
+  const stagedOnCard = (number: string) =>
+    parts.reduce((total, part) => part.cardNumber === number ? total + part.amount : total, 0);
+  const availableCards = todayCards.filter((card) => card.available > stagedOnCard(card.card_number));
+  const selectedCard = availableCards.find((card) => card.card_number === cardNumber);
+  const showOriginalCard = originalCard && !availableCards.some((card) => card.card_number === originalCard);
+  const cardListSize = cardFocused ? Math.min(6, 1 + availableCards.length + Number(Boolean(showOriginalCard))) : 1;
+
+  function selectCard(number: string) {
+    if (busy.current) return;
+    setCardNumber(number);
+    setCardBalance(null);
+  }
 
   async function validateCard(paise: number) {
-    if (prepaid && cardNumber && cardNumber === row.card_number) return cardNumber;
-    if (!cardNoReady(cardNumber)) throw new Error("Enter a four-digit card number");
+    if (cardNumber && cardNumber === originalCard) return cardNumber;
+    if (!selectedCard) throw new Error("Select an available prepaid card");
     const params = new URLSearchParams({ q: cardNumber, exact: "1" });
     const result = await api.get<{ card: { card_number: string }; balances: { available: number } }>(`/api/cards/balance/check?${params}`);
     if (prepaid && result.card.card_number === row.card_number) return result.card.card_number;
     const available = result.balances.available;
-    const staged = parts.reduce((total, part) => part.cardNumber === result.card.card_number ? total + part.amount : total, 0);
+    const staged = stagedOnCard(result.card.card_number);
     setCardBalance(available);
     if (available < paise + staged) throw new Error(`Insufficient amount. Card balance: ${rupees(available)}`);
     return result.card.card_number;
@@ -1415,11 +1444,14 @@ function SettlementUpdateDialog({
       if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); if (!busy.current) close.current(); return; }
       if (e.key === "F2") { e.preventDefault(); e.stopImmediatePropagation(); void save(); return; }
       const active = document.activeElement;
-      if (active === modeRef.current && /^[a-z]$/i.test(e.key)) {
+      const cardSelect = cardRef.current;
+      if (cardSelect && active === cardSelect && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        const option = Array.from(modeRef.current.options).find((choice) => choice.text.toLowerCase().startsWith(e.key.toLowerCase()));
-        if (option) setMode(option.value);
+        const cards = Array.from(cardSelect.options).filter((option) => !option.disabled);
+        const current = cards.findIndex((option) => option.selected);
+        const next = e.key === "ArrowDown" ? current + 1 : current < 0 ? cards.length - 1 : current - 1;
+        if (cards[next]) selectCard(cards[next].value);
         return;
       }
       if (e.key !== "Enter") return;
@@ -1436,14 +1468,9 @@ function SettlementUpdateDialog({
       } else if (active === cardRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        if (busy.current) return;
-        let paise: number;
-        try { paise = parseRupeesInput(amount || "0"); } catch { showWarn("Enter settle amount", "amount"); return; }
-        if (paise <= 0) { showWarn("Enter settle amount", "amount"); return; }
-        busy.current = true;
-        void validateCard(paise).then(() => focusField("save")).catch((error) => {
-          showWarn(error.message, "card");
-        }).finally(() => { busy.current = false; });
+        if (busy.current || e.repeat) return;
+        if (cardSelect?.value) focusField("remark");
+        else showWarn("Select an available prepaid card", "card");
       } else if (active === bankRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -1498,7 +1525,8 @@ function SettlementUpdateDialog({
               <td><input className="win num" readOnly tabIndex={-1} value={rupees(row?.allowance)} /></td>
               <td className="lbl">Payment Mode :</td>
               <td>
-                <select ref={modeRef} className="win" tabIndex={2} value={mode} onChange={(e) => setMode(e.target.value)}>
+                <select ref={modeRef} className="win" tabIndex={2} value={mode}
+                  onChange={(e) => setMode(e.target.value)} onKeyDown={(e) => moveSelectOption(e, setMode)}>
                   {REPORT_PAY_MODES.map((choice) => <option key={choice} value={choice}>{formatUiLabel(choice)}</option>)}
                 </select>
               </td>
@@ -1506,17 +1534,27 @@ function SettlementUpdateDialog({
             {mode === "PREPAID CARD" && (
               <tr>
                 <td className="lbl">Card No. :</td>
-                <td><input ref={cardRef} className="win" aria-label="Card number" data-num="card"
-                  inputMode="numeric" maxLength={4} tabIndex={3}
-                  value={cardNumber}
-                  onChange={(e) => {
-                    if (busy.current) return;
-                    setCardNumber(cardNoDigits(e.target.value));
-                    setCardBalance(null);
-                  }} /></td>
+                <td className="su-card-cell">
+                  <select ref={cardRef} className="win" aria-label="Card number" data-cycle="ud" tabIndex={3}
+                    size={cardListSize}
+                    value={selectedCard || cardNumber === originalCard ? cardNumber : ""}
+                    onFocus={() => setCardFocused(true)} onBlur={() => setCardFocused(false)}
+                    onChange={(e) => selectCard(e.target.value)}
+                    onKeyDown={(e) => selectByFirstLetter(e, selectCard)}>
+                    <option value="" disabled>{cardListStatus || (availableCards.length ? "Select card" : "No cards available today")}</option>
+                    {showOriginalCard &&
+                      <option value={originalCard}>{originalCard} (original card)</option>}
+                    {availableCards.map((card) => (
+                      <option key={card.card_number} value={card.card_number}>
+                        {card.card_number} · {card.customer_name} · {inr(card.available - stagedOnCard(card.card_number))}
+                      </option>
+                    ))}
+                  </select>
+                </td>
                 <td className="lbl">Card Balance :</td>
                 <td><input className="win num" aria-label="Card balance" readOnly tabIndex={-1}
-                  value={cardBalance === null ? "" : rupees(cardBalance)} /></td>
+                  value={cardBalance !== null ? rupees(Math.max(0, cardBalance - stagedOnCard(cardNumber)))
+                    : selectedCard ? rupees(selectedCard.available - stagedOnCard(cardNumber)) : ""} /></td>
               </tr>
             )}
             {mode === "BANK TRANSFER" && (
@@ -2814,6 +2852,7 @@ type CardSettleRow = {
   amount_paid: number;
   card_balance: number;
   remaining_balance: number;
+  current_balance: number | null;
 };
 type CardBillRow = {
   invoice_id: string;
@@ -3051,8 +3090,9 @@ export function CardSettlementReport({ onExit, title = "Card Settlement Report" 
               <th>Booking Date</th>
               <th>Payment Mode</th>
               <th>Amount Paid</th>
-              <th>Card Balance</th>
-              <th>Remaining Balance</th>
+              <th>Amount Credited</th>
+              <th>Historical Balance</th>
+              <th>Current Card Balance</th>
               <th />
             </tr>
           </thead>
@@ -3071,6 +3111,7 @@ export function CardSettlementReport({ onExit, title = "Card Settlement Report" 
                 <td className="num">{inr(r.amount_paid)}</td>
                 <td className="num">{inr(r.card_balance)}</td>
                 <td className="num">{inr(r.remaining_balance)}</td>
+                <td className="num">{r.current_balance == null ? "—" : inr(r.current_balance)}</td>
                 <td>
                   <button type="button" className="fn" onClick={() => setOpenId(r.booking_id)}>Show</button>
                 </td>

@@ -138,14 +138,23 @@ describe("item master", () => {
     const order = createOrder(waiter, table.id) as { id: string };
     addItem(waiter, { orderId: order.id, productId: food.id, qty: 1 });
     addItem(waiter, { orderId: order.id, productId: free.id, qty: 2 });
-    const bill = previewBill(cashier, order.id);
+    const bill = previewBill(cashier, order.id, { serviceChargePct: 10, serviceChargeMode: "EXCLUSIVE" });
     const dal = bill.items.find((i) => i.name === "DAL FRY");
     const water = bill.items.find((i) => i.name === "WATER");
     expect(dal?.tax_rate).toBe(18);
     expect(dal?.tax).toBe(rupeesToPaise(18));
     expect(water?.tax_rate).toBe(0);
     expect(water?.tax).toBe(0);
-    expect(bill.tax).toBe(rupeesToPaise(18));
+    expect(bill.serviceCharge).toBe(rupeesToPaise(14));
+    expect(bill.serviceChargeGst).toBe(0);
+    expect(bill.tax).toBe(1800);
+    expect(bill.grandTotal).toBe(17200);
+    const inclusive = previewBill(cashier, order.id, { serviceChargePct: 10, serviceChargeMode: "INCLUSIVE" });
+    expect(inclusive.serviceCharge).toBe(1273);
+    expect(inclusive.serviceChargeGst).toBe(0);
+    expect(inclusive.tax).toBe(1800);
+    expect(inclusive.grandTotal).toBe(15800);
+    expect(previewBill(cashier, order.id, { serviceChargePct: 0 }).tax).toBe(1800);
 
     await sendKot(waiter, order.id);
     const printed = (hardware.kitchen as { logs: Array<{ payload: { items: Array<{ name: string; price?: number }> } }> }).logs.at(-1);

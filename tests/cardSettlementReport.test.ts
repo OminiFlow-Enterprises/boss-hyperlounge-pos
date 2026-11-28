@@ -4,7 +4,7 @@ import { openTable, getTableByCode } from "../src/server/services/tableService.j
 import { addItem, createOrder } from "../src/server/services/orderService.js";
 import { generateInvoice, settleInvoice } from "../src/server/services/billingService.js";
 import { setSetting } from "../src/server/services/settingsService.js";
-import { cardSettlementBills, cardSettlementReport, saveBooking } from "../src/server/services/reportService.js";
+import { cardSettlementBills, cardSettlementReport, gstTaxSummary, saveBooking } from "../src/server/services/reportService.js";
 import { createTestApp } from "./helpers.js";
 
 describe("card settlement report", () => {
@@ -26,7 +26,7 @@ describe("card settlement report", () => {
     addItem(waiter, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
     const invoice = generateInvoice(cashier, order.id) as { id: string; invoice_number: string; grand_total: number };
     expect(invoice.grand_total).toBeLessThan(rupeesToPaise(2000));
-    settleInvoice(cashier, invoice.id, [{ method: "MEMBER_CARD", amount: invoice.grand_total, memberCardId: first.card.id }]);
+    settleInvoice(cashier, invoice.id, [{ method: "MEMBER_CARD", amount: invoice.grand_total, memberCardId: first.card.id, reference: "1001" }]);
 
     const second = saveBooking(cashier, {
       guestName: "Jai",
@@ -39,7 +39,13 @@ describe("card settlement report", () => {
     const order2 = createOrder(waiter, table2.id) as { id: string };
     addItem(waiter, { orderId: order2.id, productId: seeded.products["FOOD-PZ"], qty: 1 });
     const invoice2 = generateInvoice(cashier, order2.id) as { id: string; invoice_number: string; grand_total: number };
-    settleInvoice(cashier, invoice2.id, [{ method: "MEMBER_CARD", amount: invoice2.grand_total, memberCardId: second.card.id }]);
+    settleInvoice(cashier, invoice2.id, [{ method: "MEMBER_CARD", amount: invoice2.grand_total, memberCardId: second.card.id, reference: "\\" }]);
+    expect(cashier.db.prepare("SELECT reference FROM payments WHERE invoice_id = ?").get(invoice2.id))
+      .toEqual({ reference: null });
+
+    expect(gstTaxSummary(cashier).particulars.filter((row) => row.label === "PREPAID CARD")).toEqual([
+      { label: "PREPAID CARD", amount: invoice.grand_total + invoice2.grand_total },
+    ]);
 
     saveBooking(cashier, { guestName: "Other", cardNo: "1002", advance: rupeesToPaise(500), mop: "CASH" });
 
@@ -64,6 +70,8 @@ describe("card settlement report", () => {
     expect(newer.amount_paid).toBe(rupeesToPaise(1500));
     expect(newer.card_balance).toBe(rupeesToPaise(1500));
     expect(newer.remaining_balance).toBe(rupeesToPaise(1900) - invoice.grand_total + rupeesToPaise(1500) - invoice2.grand_total);
+    expect(older.current_balance).toBe(newer.remaining_balance);
+    expect(newer.current_balance).toBe(newer.remaining_balance);
 
     const firstBills = cardSettlementBills(cashier, String(older.booking_id));
     expect(firstBills.rows).toEqual([

@@ -554,13 +554,8 @@ export function createApp(options: CreateAppOptions) {
   }));
   app.get("/api/tables/:id/items", wrap((req, res) => res.json(tables.listTableItems(req.ctx, req.params.id))));
   app.post("/api/tables/item-transfer", wrap((req, res) => {
-    res.json(tables.transferItems(
-      req.ctx,
-      req.body.fromTableId,
-      req.body.toTableId,
-      req.body.itemIds ?? [],
-      req.body.reason,
-    ));
+    const { fromTableId, toTableId, toTableCode, itemIds, reason } = req.body;
+    res.json(tables.transferItems(req.ctx, fromTableId, toTableId || { code: toTableCode }, itemIds ?? [], reason));
   }));
   app.post("/api/tables/merge", wrap((req, res) => {
     res.json(tables.mergeTables(req.ctx, req.body.sourceTableId, req.body.targetTableId));
@@ -698,7 +693,8 @@ export function createApp(options: CreateAppOptions) {
   app.post("/api/invoices/generate", wrap((req, res) => {
     const { orderId, invoiceId, edits = [], masterPin, ...billOptions } = req.body;
     const admin = isAdminActor(sessionActor(req));
-    if (!admin && masterPin && !settings.verifyMasterPin(req.ctx, masterPin)) {
+    const nc = billing.orderOutlet(req.ctx, orderId) === "NC";
+    if (!admin && !nc && masterPin && !settings.verifyMasterPin(req.ctx, masterPin)) {
       throw new AppError("Incorrect master PIN", 403);
     }
     const invoice = req.ctx.db.transaction(() => {
@@ -769,10 +765,10 @@ export function createApp(options: CreateAppOptions) {
         excludeItemIds: finalOptions.excludeItemIds ?? savedFields.excludeItemIds,
       }) !== billApprovalFields(savedFields);
       if (needsApproval) {
-        if (!remark && billing.orderOutlet(req.ctx, orderId) !== "NC") {
+        if (!admin && !nc && !remark) {
           throw new AppError("Enter a remark to update this bill", 403, "BILL_REMARK_REQUIRED", "billRemark");
         }
-        if (!admin && !masterPin) {
+        if (!admin && !nc && !masterPin) {
           throw new AppError("Enter the master PIN to update this bill", 403);
         }
       }

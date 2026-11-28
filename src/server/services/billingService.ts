@@ -1,6 +1,7 @@
 import { isAdvanceOutlet } from "../../shared/userRights.js";
 import { billDateTime } from "../../shared/businessDate.js";
 import { assertPermission } from "../../shared/permissions.js";
+import { cleanPaymentReference } from "../../shared/paymentAccounts.js";
 import { billLineTaxes, formatINR } from "../../shared/money.js";
 import { AppError, InsufficientBalanceError } from "../lib/errors.js";
 import { audit, enqueueSync } from "../lib/audit.js";
@@ -25,6 +26,7 @@ export interface BillPreview {
   drinksTotal: number;
   tax: number;
   serviceCharge: number;
+  serviceChargeGst: number;
   serviceChargePct: number;
   serviceChargeMode: ServiceChargeMode;
   discount: number;
@@ -152,11 +154,11 @@ export function previewBill(
     excluded: line.ids.some((id) => excluded.has(id)),
   })), discount, discountable);
   mapped.forEach((line, index) => { line.tax = taxes[index]; });
-  const tax = mapped.reduce((s, i) => s + i.tax, 0);
   const otherCharges = options.otherCharges ?? 0;
   const afterDiscount = Math.max(0, subtotal - discount);
   const serviceCharge =
     mode === "INCLUSIVE" ? Math.round(afterDiscount - afterDiscount / (1 + pct / 100)) : Math.round((afterDiscount * pct) / 100);
+  const tax = mapped.reduce((s, i) => s + i.tax, 0);
   const unrounded =
     mode === "INCLUSIVE" ? afterDiscount + tax + otherCharges : afterDiscount + serviceCharge + tax + otherCharges;
   const grandTotal = Math.round(unrounded / 100) * 100;
@@ -171,6 +173,7 @@ export function previewBill(
     drinksTotal,
     tax,
     serviceCharge,
+    serviceChargeGst: 0,
     serviceChargePct: pct,
     serviceChargeMode: mode,
     discount,
@@ -261,6 +264,7 @@ function zeroComplimentaryBill(bill: BillPreview) {
   bill.foodTotal = 0;
   bill.drinksTotal = 0;
   bill.serviceCharge = 0;
+  bill.serviceChargeGst = 0;
   bill.serviceChargePct = 0;
   bill.discount = 0;
   bill.discountPct = 0;
@@ -433,7 +437,7 @@ export function generateInvoice(
         .prepare(
           `UPDATE invoices SET
              food_total = ?, drinks_total = ?, service_charge = ?, service_charge_mode = ?, service_charge_pct = ?,
-             discount = ?, tax = ?, other_charges = ?, grand_total = ?,
+             discount = ?, tax = ?, service_charge_gst = ?, other_charges = ?, grand_total = ?,
              complimentary_account_id = ?, complimentary_name = ?,
              customer_display_name = COALESCE(?, customer_display_name), customer_gstin = COALESCE(?, customer_gstin),
              bill_details = ?
@@ -447,6 +451,7 @@ export function generateInvoice(
           bill.serviceChargePct,
           bill.discount,
           bill.tax,
+          bill.serviceChargeGst,
           bill.otherCharges,
           bill.grandTotal,
           comp?.id ?? null,
@@ -502,9 +507,9 @@ export function generateInvoice(
         `INSERT INTO invoices (
            id, invoice_number, session_id, order_id, table_id, customer_id, card_id,
            food_total, drinks_total, service_charge, service_charge_mode, service_charge_pct,
-           discount, tax, other_charges, grand_total, status, cashier_id, created_at, paid_at,
+           discount, tax, service_charge_gst, other_charges, grand_total, status, cashier_id, created_at, paid_at,
            complimentary_account_id, complimentary_name, customer_display_name, customer_gstin, bill_details
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -521,6 +526,7 @@ export function generateInvoice(
         bill.serviceChargePct,
         bill.discount,
         bill.tax,
+        bill.serviceChargeGst,
         bill.otherCharges,
         bill.grandTotal,
         "UNPAID",
@@ -815,7 +821,7 @@ export function settleInvoice(
         }
       }
       const paymentId = uuid();
-      const account = line.reference ?? (line.method === "CASH" ? "Cash." : null);
+      const account = cleanPaymentReference(line.method, line.reference) ?? (line.method === "CASH" ? "Cash." : null);
       ctx.db
         .prepare(
           `INSERT INTO payments (id, invoice_id, method, amount, member_card_id, ledger_id, reference, remark, receipt_no, voucher_no, created_at, cashier_id)
@@ -871,6 +877,7 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
     customer_id: string | null;
     customer_display_name: string;
     customer_gstin: string;
+    service_charge_gst: number;
     food_total: number;
     drinks_total: number;
     service_charge: number;
@@ -979,6 +986,7 @@ export async function printReceipt(ctx: AppContext, invoiceId: string) {
     serviceCharge: invoice.service_charge,
     serviceChargePct: invoice.service_charge_pct ?? 0,
     serviceChargeInclusive: inclusive,
+    serviceChargeGst: invoice.service_charge_gst,
     otherCharges: invoice.other_charges,
     roundOff,
     taxTotal: invoice.tax,

@@ -10,10 +10,9 @@ import { createTable, getTableByCode, openTable } from "../src/server/services/t
 import { flagsPreset } from "../src/shared/userRights.js";
 import { createApiClient, createTestApp } from "./helpers.js";
 
-it("shows NC estimates by permission and lets Admin save an NC bill without a remark or PIN", async () => {
+it("shows NC estimates by permission and lets a cashier save an NC bill without a remark or PIN", async () => {
   const { ctx, db, hardware, seeded } = createTestApp();
   const manager = ctx("manager");
-  createStaff(manager, { username: "ncadmin", password: "4242", userRole: "ADMIN" });
   createStaff(manager, {
     username: "nchidden", password: "4242", userRole: "ADMIN",
     flags: { ...flagsPreset("ADMIN"), hideEstimate: true },
@@ -42,10 +41,6 @@ it("shows NC estimates by permission and lets Admin save an NC bill without a re
     expect((await request(`orders/${order.id}/estimate`, { items: [] })).status).toBe(403);
     expect((await login("nccashier")).status).toBe(200);
     expect((await listedTable()).net_total).toBeGreaterThan(0);
-    const denied = await request("invoices/generate", bill);
-    expect(denied.status).toBe(403);
-    expect(await denied.json()).toMatchObject({ error: expect.stringContaining("master PIN") });
-    expect((await login("ncadmin")).status).toBe(200);
     const saved = await request("invoices/generate", bill);
     expect(saved.status).toBe(200);
     expect(await saved.json()).toMatchObject({ status: "PAID", grand_total: 0 });
@@ -264,6 +259,9 @@ it("lets Cashier users edit printed and settled bills with approval while blocki
 
     const adminLogin = await request("auth/login", { username: "pinadmin", password: "4242" });
     expect(await adminLogin.json()).toMatchObject({ userGroup: "ADMIN", rights: { "master.user": true } });
+    const adminUpdate = await request("invoices/generate", { orderId, invoiceId, discountPct: 6 });
+    expect(adminUpdate.status).toBe(200);
+    expect(await adminUpdate.json()).toMatchObject({ id: invoiceId });
     expect((await request("settings/master-pin", { currentPin: newPin, newPin }, "PUT")).status).toBe(403);
     expect((await request("settings/master-pin", { currentPin: masterPin, newPin }, "PUT")).status).toBe(200);
     expect(await (await request("settings")).json()).not.toHaveProperty("master_pin_hash");

@@ -1,4 +1,5 @@
 import { assertPermission } from "../../shared/permissions.js";
+import { cleanPaymentReference } from "../../shared/paymentAccounts.js";
 import { formatTableNo } from "../../shared/tableLabel.js";
 import { businessDateRange as dateRange } from "../../shared/businessDate.js";
 import type { AppContext } from "../lib/context.js";
@@ -340,7 +341,8 @@ export function gstTaxSummary(
 
   const payRows = ctx.db
     .prepare(
-      `SELECT p.method AS method, COALESCE(NULLIF(p.reference, ''), '') AS account,
+      `SELECT p.method AS method,
+              CASE WHEN p.method = 'MEMBER_CARD' THEN '' ELSE COALESCE(p.reference, '') END AS account,
               COALESCE(SUM(p.amount), 0) AS amount
        FROM payments p
        JOIN invoices i ON i.id = p.invoice_id
@@ -441,7 +443,7 @@ export function gstBillWise(
   const invoices = ctx.db
     .prepare(
       `SELECT i.id AS invoice_id, i.invoice_number AS bill_no, i.created_at, i.discount,
-              i.food_total, i.drinks_total, i.service_charge, i.service_charge_pct, i.tax,
+              i.food_total, i.drinks_total, i.service_charge, i.service_charge_pct, i.tax, i.service_charge_gst,
               i.other_charges, i.grand_total,
               COALESCE(NULLIF(i.customer_display_name, ''), cu.name, '') AS client_name,
               COALESCE(i.customer_gstin, '') AS customer_gstin
@@ -486,6 +488,7 @@ export function gstBillWise(
       discount: Number(inv.discount) || 0,
       discountPct: 0,
       serviceCharge: Number(inv.service_charge) || 0,
+      serviceChargeGst: Number(inv.service_charge_gst) || 0,
       serviceChargePct:
         Number(inv.service_charge_pct ?? 0) !== 0 || Number(inv.service_charge) === 0
           ? Number(inv.service_charge_pct ?? 0)
@@ -832,7 +835,12 @@ export function updateSettlement(
 
     const posted = lines.map(({ cardNumber, ...line }) => {
       if (line.method !== "MEMBER_CARD") return { ...line, cardId: null, ledgerId: null };
-      if (sameCard) return { ...line, account: String(row.account), cardId: row.member_card_id, ledgerId: row.ledger_id };
+      if (sameCard) return {
+        ...line,
+        account: cleanPaymentReference(line.method, String(row.account)) ?? "",
+        cardId: row.member_card_id,
+        ledgerId: row.ledger_id,
+      };
       if (!cardNumber) throw new AppError("Enter card number");
       const { card } = cards.checkBalance(ctx, cardNumber, true);
       try {
@@ -1280,6 +1288,7 @@ export function cardSettlementReport(ctx: AppContext, from?: string, to?: string
               b.created_at AS booking_date,
               COALESCE(NULLIF(TRIM(b.mop), ''), recharge.payment_mode) AS payment_mode,
               b.advance AS amount_paid,
+              mc.paid_balance + mc.bonus_balance AS current_balance,
               b.advance - COALESCE((
                 SELECT fee.paid_amount FROM card_ledger fee
                 WHERE fee.idempotency_key = 'adv:' || b.id || ':fee'

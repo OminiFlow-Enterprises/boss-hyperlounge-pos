@@ -312,7 +312,7 @@ export function PrepareBillDialog({
       compRef.current?.focus();
       return false;
     }
-    if (outlet !== "NC" && needsApproval() && !remark.trim()) {
+    if (!admin && outlet !== "NC" && needsApproval() && !remark.trim()) {
       highlightRemark();
       return false;
     }
@@ -896,7 +896,7 @@ export function PrepareBillDialog({
       }
       if (!validateBillFields()) return;
       const hasChanges = needsApproval();
-      if (hasChanges && !admin && !pin) {
+      if (hasChanges && !admin && !nc && !pin) {
         setAsk(action);
         setPinOpen(true);
         return;
@@ -1501,7 +1501,7 @@ export function PrepareBillDialog({
                         </div>
                       </td>
                     </tr>
-                    <tr><td className="lbl">Tax Amount :</td><td><input className="win" readOnly value={rupee(shown.tax)} /></td></tr>
+                    <tr><td className="lbl">Total Tax :</td><td><input className="win" readOnly value={rupee(shown.tax)} /></td></tr>
                     <tr><td className="lbl">Delivery Charge :</td><td><input className="win" data-num="dec" readOnly={isComplimentary || advance} value={isComplimentary ? "0" : delivery} onChange={(e) => { if (!isComplimentary) setDelivery(numText(e.target.value)); }} onBlur={() => { if (!isComplimentary) void load(); }} /></td></tr>
                     <tr><td className="lbl">Round Off :</td><td><input className="win" readOnly value={rupee(shown.roundOff)} /></td></tr>
                     <tr><td className="lbl">Net Amount :</td><td><input className="win" readOnly value={isComplimentary ? 0 : Math.round(shown.grand / 100)} /></td></tr>
@@ -1572,11 +1572,7 @@ export function PrepareBillDialog({
         <ConfirmAsk
           message={needsApproval() ? "Do you want to update bill?" : "Do you want to save?"}
           allowHeldEnter={ask === "print" && printedWithEnter.current}
-          onYes={() => {
-            if (!validateBillFields()) return;
-            if (needsApproval()) setPinOpen(true);
-            else void finishAction(ask);
-          }}
+          onYes={() => void finishAction(ask)}
           onNo={closeApproval}
         />
       )}
@@ -1647,10 +1643,11 @@ export function SettleDialog({
   const [amount, setAmount] = useState("");
   const [remark, setRemark] = useState("");
   const [payCard, setPayCard] = useState(cardNoDigits(cardNo));
+  const [cardQuery, setCardQuery] = useState("");
   const [payBal, setPayBal] = useState("");
   const [todayCards, setTodayCards] = useState<TodayCard[]>([]);
   const [cardListOpen, setCardListOpen] = useState(false);
-  const [cardPick, setCardPick] = useState(0);
+  const [cardPick, setCardPick] = useState(-1);
   const [cardDrop, setCardDrop] = useState({ top: 0, left: 0, width: 280 });
   const [bankName, setBankName] = useState<string>(DEFAULT_BANK_PAYMENT_ACCOUNT);
   const [warn, setWarn] = useState("");
@@ -1665,23 +1662,16 @@ export function SettleDialog({
   const methodRef = useRef<PaymentMode>("CASH");
   const busy = useRef(false);
   const cardListOpenRef = useRef(false);
-  const cardPickRef = useRef(0);
-  const cardPickedRef = useRef(false);
+  const cardPickRef = useRef(-1);
   const skipCardOpenRef = useRef(false);
   const payCardRefValue = useRef(cardNo);
   payCardRefValue.current = payCard;
   cardListOpenRef.current = cardListOpen;
   cardPickRef.current = cardPick;
 
-  function cardSuggestReady(value = payCardRefValue.current) {
-    return value.trim().length >= 4;
-  }
-
   const cardMatches = useMemo(() => {
-    const q = payCard.trim().toLowerCase();
-    if (q.length < 4) return [];
-    return todayCards.filter((c) => c.card_number.toLowerCase().startsWith(q));
-  }, [payCard, todayCards]);
+    return todayCards.filter((c) => (c.available ?? c.usable) > 0 && cardNoDigits(c.card_number).startsWith(cardQuery));
+  }, [cardQuery, todayCards]);
   const cardMatchesRef = useRef(cardMatches);
   cardMatchesRef.current = cardMatches;
 
@@ -1714,7 +1704,7 @@ export function SettleDialog({
     else if (mode === "MEMBER_CARD") window.setTimeout(() => {
       payCardRef.current?.focus();
       payCardRef.current?.select();
-      setCardListOpen(cardSuggestReady());
+      setCardListOpen(true);
     }, 0);
     else window.setTimeout(() => saveBtnRef.current?.focus(), 0);
   }
@@ -1749,7 +1739,6 @@ export function SettleDialog({
     api.get<TodayCard[]>(`/api/cards/recharged-today${q}`).then((rows) => {
       if (gone) return;
       setTodayCards(rows);
-      if (document.activeElement === payCardRef.current && cardSuggestReady()) setCardListOpen(true);
     }).catch(() => { if (!gone) setTodayCards([]); });
     return () => { gone = true; };
   }, [method, holdExcept]);
@@ -1775,34 +1764,23 @@ export function SettleDialog({
 
   function chosenCardNumber() {
     const typed = payCardRefValue.current.trim();
-    if (!cardSuggestReady(typed)) return typed;
     const list = cardMatchesRef.current;
-    const exact = list.find((c) => c.card_number.toLowerCase() === typed.toLowerCase());
-    if (exact) return exact.card_number;
-    if (!typed) {
-      if (cardListOpenRef.current && list.length) {
-        return list[Math.min(cardPickRef.current, list.length - 1)]?.card_number ?? "";
-      }
-      return "";
-    }
-    if (cardListOpenRef.current && list.length) {
-      return list[Math.min(Math.max(0, cardPickRef.current), list.length - 1)]?.card_number ?? typed;
+    if (cardListOpenRef.current && cardPickRef.current >= 0 && list[cardPickRef.current]) {
+      return list[cardPickRef.current].card_number;
     }
     return typed;
   }
 
   function moveCardPick(dir: 1 | -1) {
-    if (!cardSuggestReady()) return;
     const list = cardMatchesRef.current;
     if (!list.length) return;
     if (!cardListOpenRef.current) {
       setCardListOpen(true);
-      setCardPick(0);
-      cardPickedRef.current = true;
-      return;
     }
-    setCardPick((cur) => Math.min(list.length - 1, Math.max(0, cur + dir)));
-    cardPickedRef.current = true;
+    setCardPick((cur) => {
+      if (cur < 0 && dir === -1) return list.length - 1;
+      return Math.min(list.length - 1, Math.max(0, cur + dir));
+    });
   }
 
   useEffect(() => {
@@ -1823,16 +1801,9 @@ export function SettleDialog({
       if (e.key === "F2") { e.preventDefault(); e.stopImmediatePropagation(); void save(); return; }
       if (e.key === "F4") { e.preventDefault(); e.stopImmediatePropagation(); onClose(); return; }
       const active = document.activeElement;
-      if (active === modeRef.current && /^[a-z]$/i.test(e.key)) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        const choice = PAY_MODES.find((mode) => mode.label.toLowerCase().startsWith(e.key.toLowerCase()));
-        if (choice) chooseMode(choice.id);
-        return;
-      }
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         const dir = e.key === "ArrowDown" ? 1 : -1;
-        if (active === payCardRef.current && cardMatchesRef.current.length) {
+        if (active === payCardRef.current) {
           e.preventDefault();
           e.stopImmediatePropagation();
           moveCardPick(dir);
@@ -1847,7 +1818,7 @@ export function SettleDialog({
       } else if (active === modeRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        afterMode();
+        if (!e.repeat) afterMode();
       } else if (active === bankRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -1859,7 +1830,7 @@ export function SettleDialog({
       } else if (active === payCardRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        void acceptCard();
+        if (!e.repeat) acceptCard(chosenCardNumber());
       } else if (active === saveBtnRef.current) {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -1870,7 +1841,7 @@ export function SettleDialog({
     return () => window.removeEventListener("keydown", keys, true);
   });
 
-  async function save(cardOverride?: string) {
+  async function save() {
     if (busy.current || !snap) return;
     const due = dueOf(snap);
     if (due === 0) {
@@ -1885,7 +1856,7 @@ export function SettleDialog({
       showWarn("Select bank name", "bank");
       return;
     }
-    let cardRaw = (cardOverride ?? (method === "MEMBER_CARD" ? chosenCardNumber() : payCard)).trim();
+    let cardRaw = payCard.trim();
     if (!cardNoReady(cardRaw)) cardRaw = cardNoDigits(cardRaw);
     if (method === "MEMBER_CARD" && !cardNoReady(cardRaw)) {
       stayOnCard(payCardRef.current);
@@ -1948,13 +1919,14 @@ export function SettleDialog({
     }
   }
 
-  async function acceptCard() {
-    let number = chosenCardNumber().trim();
-    if (!cardNoReady(number)) number = cardNoDigits(number);
-    if (!cardNoReady(number)) { stayOnCard(payCardRef.current); return; }
+  function acceptCard(cardNumber: string) {
+    const number = cardNoDigits(cardNumber);
+    if (!cardNoReady(number)) { showWarn("Select an available prepaid card or enter a four-digit card number", "card"); return; }
     setCardListOpen(false);
-    if (number !== payCardRefValue.current) setPayCard(number);
-    await save(number);
+    setPayCard(number);
+    const card = todayCards.find((candidate) => candidate.card_number === cardNumber);
+    setPayBal(card ? rupee(card.available ?? card.usable) : "");
+    settleRemarkRef.current?.focus();
   }
 
   const inv = snap?.invoice;
@@ -1999,7 +1971,8 @@ export function SettleDialog({
               <td className="lbl">Payment Mode :</td>
               <td>
                 <select ref={modeRef} className="win" tabIndex={2} value={method}
-                  onChange={(e) => chooseMode(e.target.value as PaymentMode)}>
+                  onChange={(e) => chooseMode(e.target.value as PaymentMode)}
+                  onKeyDown={(e) => moveSelectOption(e, (value) => chooseMode(value as PaymentMode))}>
                   {PAY_MODES.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
                 </select>
               </td>
@@ -2029,6 +2002,8 @@ export function SettleDialog({
                         className="win green"
                         tabIndex={3}
                         autoComplete="off"
+                        aria-label="Card number"
+                        data-cycle="ud"
                         data-num="card"
                         inputMode="numeric"
                         maxLength={4}
@@ -2036,9 +2011,9 @@ export function SettleDialog({
                         onChange={(e) => {
                           const next = cardNoDigits(e.target.value);
                           setPayCard(next);
-                          setCardPick(0);
-                          cardPickedRef.current = false;
-                          setCardListOpen(cardSuggestReady(next));
+                          setCardQuery(next);
+                          setCardPick(-1);
+                          setCardListOpen(true);
                           setPayBal("");
                         }}
                         onFocus={() => {
@@ -2046,7 +2021,9 @@ export function SettleDialog({
                             skipCardOpenRef.current = false;
                             return;
                           }
-                          setCardListOpen(cardSuggestReady());
+                          setCardQuery("");
+                          setCardPick(-1);
+                          setCardListOpen(true);
                         }}
                         onBlur={() => window.setTimeout(() => {
                           if (document.activeElement === payCardRef.current) return;
@@ -2065,11 +2042,6 @@ export function SettleDialog({
                         aria-label="Cards recharged today"
                         onMouseDown={(e) => {
                           e.preventDefault();
-                          if (!cardSuggestReady()) {
-                            setCardListOpen(false);
-                            payCardRef.current?.focus();
-                            return;
-                          }
                           setCardListOpen((open) => {
                             if (open) skipCardOpenRef.current = true;
                             return !open;
@@ -2135,12 +2107,7 @@ export function SettleDialog({
               onMouseEnter={() => setCardPick(i)}
               onMouseDown={(e) => {
                 e.preventDefault();
-                cardPickedRef.current = true;
-                const picked = cardNoDigits(c.card_number);
-                setPayCard(picked);
-                setCardListOpen(false);
-                if (!cardNoReady(picked)) { stayOnCard(payCardRef.current); return; }
-                void save(picked);
+                acceptCard(c.card_number);
               }}
             >
               <span className="no">{c.card_number}</span>
@@ -2376,6 +2343,7 @@ export function TransferDialog({
   tables,
   outlet,
   currentCode,
+  currentTableId,
   onClose,
   onDone,
   onMessage,
@@ -2384,13 +2352,17 @@ export function TransferDialog({
   tables: Table[];
   outlet: string;
   currentCode: string;
+  currentTableId: string;
   onClose: () => void;
-  onDone: (fromCode: string, to: Table) => void;
+  onDone: (from: Table, to: Table) => void;
   onMessage: (m: string) => void;
 }) {
   /** Destination outlet (New Table). Source table is found across all outlets. */
   const [dept, setDept] = useState(outlet === "THE BOSS CLUB" ? "THE BOSS CLUB" : outlet || "BAR");
-  const [fromCode, setFromCode] = useState(currentCode);
+  const [fromCode, setFromCode] = useState(() => {
+    const current = tables.find((t) => t.id === currentTableId && t.code === currentCode);
+    return current ? shownTableNo(current) : currentCode;
+  });
   const [toCode, setToCode] = useState("");
   const [reason, setReason] = useState("");
   const [reasonNeed, setReasonNeed] = useState(false);
@@ -2427,7 +2399,9 @@ export function TransferDialog({
   }
 
   useEffect(() => {
-    const running = currentCode && occupiedAll.some((t) => t.code.toLowerCase() === currentCode.trim().toLowerCase());
+    const running = fromCode && occupiedAll.some((t) =>
+      t.code.toLowerCase() === fromCode.trim().toLowerCase()
+      || shownTableNo(t).toLowerCase() === fromCode.trim().toLowerCase());
     const el = running ? outletRef.current : fromRef.current;
     el?.focus();
     el?.select();
@@ -2493,15 +2467,6 @@ export function TransferDialog({
     }
   }
 
-  /** Find running source table: prefer current billing outlet, else any outlet. */
-  function findRunning(code: string) {
-    const raw = code.trim().toLowerCase();
-    if (!raw) return undefined;
-    const matches = occupiedAll.filter((t) => t.code.toLowerCase() === raw);
-    if (!matches.length) return undefined;
-    return matches.find((t) => (t.outlet || "BAR") === outlet) ?? matches[0];
-  }
-
   function acceptCurrent() {
     if (!fromCode.trim()) {
       onMessage("Enter Current Table No");
@@ -2509,8 +2474,15 @@ export function TransferDialog({
       return undefined;
     }
     const raw = fromCode.trim().toLowerCase();
-    const matches = tables.filter((t) => t.code.toLowerCase() === raw);
-    const source = matches.find((t) => (t.outlet || "BAR") === outlet) ?? matches[0];
+    const matches = tables.filter((t) => t.code.toLowerCase() === raw || shownTableNo(t).toLowerCase() === raw);
+    const preferred = matches.filter((t) => (t.outlet || "BAR") === outlet);
+    const candidates = preferred.length ? preferred : matches;
+    const source = candidates[0];
+    if (source?.outlet === "THE BOSS CLUB" && candidates.filter((t) => t.outlet === source.outlet).length > 1) {
+      onMessage("Enter Card No/Table No for the current table");
+      fromRef.current?.focus();
+      return undefined;
+    }
     if (source?.status === "PAYMENT_PENDING") {
       onMessage(SETTLEMENT_PENDING_TRANSFER_MESSAGE);
       fromRef.current?.focus();
@@ -2536,13 +2508,20 @@ export function TransferDialog({
       return false;
     }
     const sameOutlet = (from.outlet || "BAR") === dept;
-    const destination = tables.find((t) => (t.outlet || "BAR") === dept && t.code.toLowerCase() === toRaw.toLowerCase());
+    const matches = tables.filter((t) => (t.outlet || "BAR") === dept
+      && (t.code.toLowerCase() === toRaw.toLowerCase() || shownTableNo(t).toLowerCase() === toRaw.toLowerCase()));
+    if (dept === "THE BOSS CLUB" && matches.length > 1) {
+      onMessage("Enter Card No/Table No for the destination table");
+      toRef.current?.focus();
+      return false;
+    }
+    const destination = matches[0];
     if (destination?.status === "PAYMENT_PENDING") {
       onMessage(SETTLEMENT_PENDING_TRANSFER_MESSAGE);
       toRef.current?.focus();
       return false;
     }
-    if (sameOutlet && from.code.toLowerCase() === toRaw.toLowerCase()) {
+    if (sameOutlet && (destination?.id === from.id || from.code.toLowerCase() === toRaw.toLowerCase())) {
       onMessage("Cannot transfer a table to itself");
       toRef.current?.focus();
       toRef.current?.select();
@@ -2566,14 +2545,15 @@ export function TransferDialog({
     setReasonNeed(false);
     const toRaw = toCode.trim();
     try {
-      let to = tables.find((t) => t.code.toLowerCase() === toRaw.toLowerCase() && (t.outlet || "BAR") === dept);
+      let to = tables.find((t) => (t.outlet || "BAR") === dept
+        && (t.code.toLowerCase() === toRaw.toLowerCase() || shownTableNo(t).toLowerCase() === toRaw.toLowerCase()));
       if (!to) to = await api.post<Table>("/api/tables", { code: toRaw, name: `Table ${toRaw}`, outlet: dept });
       if (to.id === from.id) {
         onMessage("Cannot transfer a table to itself");
         return;
       }
       await api.post("/api/tables/transfer", { fromTableId: from.id, toTableId: to.id, reason: why });
-      onDone(from.code, to);
+      onDone(from, to);
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Transfer failed");
     }
@@ -2668,23 +2648,30 @@ type XferItem = {
 
 export function ItemTransferDialog({
   tables,
+  runningTables,
   outlet,
-  currentCode,
+  currentTableId,
   onClose,
   onDone,
   onMessage,
 }: {
   tables: Table[];
+  runningTables: Table[];
   outlet: string;
-  currentCode: string;
+  currentTableId: string;
   onClose: () => void;
   onDone: (fromCode: string, to: Table, sourceClosed: boolean) => void;
   onMessage: (m: string) => void;
 }) {
-  const [fromCode, setFromCode] = useState(currentCode);
+  const eligibleSources = runningTables.filter((t) => (t.outlet || "BAR") === outlet
+    && (t.status === "OCCUPIED" || t.status === "BILL_REQUESTED"));
+  const [fromCode, setFromCode] = useState(() => {
+    const current = eligibleSources.find((t) => t.id === currentTableId);
+    return current ? shownTableNo(current, outlet) : "";
+  });
   const [toCode, setToCode] = useState("");
   const [reason, setReason] = useState("");
-  const [rows, setRows] = useState<XferItem[]>([]);
+  const [loadedItems, setLoadedItems] = useState<{ tableId: string; rows: XferItem[] } | null>(null);
   const [checked, setChecked] = useState<Record<string, boolean>>({});
   const [sel, setSel] = useState(0);
   const fromRef = useRef<HTMLInputElement>(null);
@@ -2693,70 +2680,63 @@ export function ItemTransferDialog({
   const xferRef = useRef<HTMLButtonElement>(null);
   const busy = useRef(false);
   const outletTables = tables.filter((t) => (t.outlet || "BAR") === outlet);
-  const openTables = outletTables.filter((t) => t.status === "OCCUPIED" || t.status === "BILL_REQUESTED");
   const destinations = outletTables.filter((t) =>
-    t.status === "AVAILABLE" || t.status === "OCCUPIED" || t.status === "BILL_REQUESTED",
+    t.status === "AVAILABLE" || eligibleSources.includes(t),
   );
 
   function findTable(candidates: Table[], code: string) {
     const raw = code.trim().toLowerCase();
     if (!raw) return undefined;
-    const exact = candidates.find((t) => t.code.toLowerCase() === raw || shownTableNo(t, outlet).toLowerCase() === raw);
+    const matchesByCode = candidates.filter((t) => t.code.toLowerCase() === raw);
+    const exact = candidates.find((t) => shownTableNo(t, outlet).toLowerCase() === raw && t.code.toLowerCase() !== raw)
+      ?? (matchesByCode.length === 1 ? matchesByCode[0] : undefined);
     if (exact || !/^\d+$/.test(raw)) return exact;
     const normalized = raw.replace(/^0+(?=\d)/, "");
     const matches = candidates.filter((t) => t.code.replace(/^0+(?=\d)/, "") === normalized);
     return matches.length === 1 ? matches[0] : undefined;
   }
 
-  async function loadItems(code: string) {
-    const from = findTable(openTables, code);
-    if (!from) {
-      setRows([]);
-      setChecked({});
-      setSel(0);
-      return false;
-    }
-    try {
-      const list = await api.get<XferItem[]>(`/api/tables/${from.id}/items`);
-      setRows(list);
-      setChecked({});
-      setSel(0);
-      return true;
-    } catch (e) {
-      onMessage(e instanceof Error ? e.message : "Could not load items");
-      return false;
-    }
-  }
+  const enteredSource = findTable(outletTables, fromCode);
+  const source = enteredSource && eligibleSources.includes(enteredSource) ? enteredSource : undefined;
+  const sourceId = source?.id;
+  const rows = loadedItems && loadedItems.tableId === sourceId ? loadedItems.rows : [];
 
-  function acceptCurrent(reloadItems = true) {
+  function acceptCurrent() {
     if (!fromCode.trim()) {
       onMessage("Enter Current Table No");
       fromRef.current?.focus();
       return undefined;
     }
-    const from = findTable(outletTables, fromCode);
-    if (!from || !openTables.includes(from)) {
-      onMessage(from?.status === "PAYMENT_PENDING" ? SETTLEMENT_PENDING_TRANSFER_MESSAGE : "Table No not found");
+    if (!source) {
+      onMessage(enteredSource?.status === "PAYMENT_PENDING" ? SETTLEMENT_PENDING_TRANSFER_MESSAGE : "Select a table with a running order");
       fromRef.current?.focus();
       fromRef.current?.select();
-      setRows([]);
-      setChecked({});
-      setSel(0);
       return undefined;
     }
     onMessage("");
-    if (reloadItems) void loadItems(from.code);
-    return from;
+    return source;
   }
 
   useEffect(() => {
-    const running = currentCode && findTable(openTables, currentCode);
-    const el = running ? toRef.current : fromRef.current;
+    const el = sourceId ? toRef.current : fromRef.current;
     el?.focus();
     el?.select();
-    if (running) void loadItems(currentCode);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentCode]);
+  }, []);
+
+  useEffect(() => {
+    setLoadedItems(null);
+    setChecked({});
+    setSel(0);
+    if (!sourceId) return;
+    const controller = new AbortController();
+    api.get<XferItem[]>(`/api/tables/${sourceId}/items`, controller.signal).then((items) => {
+      if (!controller.signal.aborted) setLoadedItems({ tableId: sourceId, rows: items });
+    }).catch((e) => {
+      if (!controller.signal.aborted) onMessage(e instanceof Error ? e.message : "Could not load items");
+    });
+    return () => controller.abort();
+  }, [sourceId, onMessage]);
 
   useEffect(() => {
     function keys(e: KeyboardEvent) {
@@ -2766,6 +2746,7 @@ export function ItemTransferDialog({
         onClose();
         return;
       }
+      if (document.activeElement === fromRef.current || document.activeElement === toRef.current) return;
       if (e.key === "ArrowDown" && rows.length) {
         e.preventDefault();
         setSel((i) => Math.min(rows.length - 1, i + 1));
@@ -2801,18 +2782,23 @@ export function ItemTransferDialog({
 
   async function transfer() {
     if (busy.current) return;
-    const from = acceptCurrent(false);
+    const from = acceptCurrent();
     if (!from) return;
     const toRaw = toCode.trim();
     if (!toRaw) { onMessage("Enter New Table No"); toRef.current?.focus(); return; }
+    if (outlet === "THE BOSS CLUB" && outletTables.filter((t) => t.code.toLowerCase() === toRaw.toLowerCase()).length > 1) {
+      onMessage("Enter Card No/Table No for the destination table");
+      toRef.current?.focus();
+      return;
+    }
     const to = findTable(outletTables, toRaw);
     if (to?.status === "PAYMENT_PENDING") {
       onMessage(SETTLEMENT_PENDING_TRANSFER_MESSAGE);
       toRef.current?.focus();
       return;
     }
-    if (!to || to.id === from.id || !destinations.includes(to)) {
-      onMessage(!to ? "New Table No not found in this outlet" : to.id === from.id
+    if (to && (to.id === from.id || !destinations.includes(to))) {
+      onMessage(to.id === from.id
         ? "Cannot transfer items to the same table"
         : "New Table No must be available or have a running order");
       toRef.current?.focus();
@@ -2823,13 +2809,13 @@ export function ItemTransferDialog({
     if (!itemIds.length) { onMessage("Select items to transfer"); return; }
     busy.current = true;
     try {
-      const result = await api.post<{ sourceClosed: boolean }>("/api/tables/item-transfer", {
+      const result = await api.post<{ to: Table; sourceClosed: boolean }>("/api/tables/item-transfer", {
         fromTableId: from.id,
-        toTableId: to.id,
+        ...(to ? { toTableId: to.id } : { toTableCode: toRaw }),
         itemIds,
         reason: reason.trim() || undefined,
       });
-      onDone(from.code, to, !!result.sourceClosed);
+      onDone(from.code, result.to, result.sourceClosed);
     } catch (e) {
       busy.current = false;
       onMessage(e instanceof Error ? e.message : "Item transfer failed");
@@ -2852,11 +2838,11 @@ export function ItemTransferDialog({
               className="win green"
               list="item-xfer-from"
               value={fromCode}
-              onChange={(e) => { setFromCode(e.target.value); void loadItems(e.target.value); }}
+              onChange={(e) => setFromCode(e.target.value)}
               onKeyDown={onEnter(() => { if (acceptCurrent()) toRef.current?.focus(); })}
             />
             <datalist id="item-xfer-from">
-              {openTables.map((t) => <option key={t.id} value={t.code} label={shownTableNo(t, outlet)} />)}
+              {eligibleSources.map((t) => <option key={t.id} value={t.code} label={shownTableNo(t, outlet)} />)}
             </datalist>
             <span>New Table No :</span>
             <input
@@ -2868,8 +2854,8 @@ export function ItemTransferDialog({
               onKeyDown={onEnter(() => reasonRef.current?.focus())}
             />
             <datalist id="item-xfer-to">
-              {destinations
-                .filter((t) => t.id !== findTable(openTables, fromCode)?.id)
+              {eligibleSources
+                .filter((t) => t.id !== sourceId)
                 .map((t) => <option key={t.id} value={t.code} label={shownTableNo(t, outlet)} />)}
             </datalist>
           </div>

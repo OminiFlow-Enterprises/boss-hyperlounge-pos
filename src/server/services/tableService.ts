@@ -135,35 +135,61 @@ export function getTableByCode(ctx: AppContext, code: string, outlet?: string) {
   return row;
 }
 
-export function createTable(
-  ctx: AppContext,
-  input: { code: string; name?: string; floorId?: string; capacity?: number; outlet?: string },
-) {
+type CreateTableInput = { code: string; name?: string; floorId?: string; capacity?: number; outlet?: string; cardNumber?: string };
+
+export function createTable(ctx: AppContext, input: CreateTableInput) {
   assertPermission(ctx.actor.role, "CREATE_ORDER");
   const code = typeof input.code === "string" ? input.code.trim() : "";
   if (!code) throw new AppError("Table code is required");
   const outlet = input.outlet?.trim() || "BAR";
   if (outlet.toUpperCase() === "CAFE") throw new AppError("Cafe outlet is unavailable");
+  if (outlet === "THE BOSS CLUB" && input.cardNumber !== undefined) {
+    return openClubTableByCard(ctx, input, code);
+  }
   const existing = findTableByCode(ctx, code, outlet);
   if (existing) return getTable(ctx, existing.id);
+  try {
+    return insertTable(ctx, input, code, outlet);
+  } catch (error) {
+    const same = findTableByCode(ctx, code, outlet);
+    if (same) return getTable(ctx, same.id);
+    throw error;
+  }
+}
+
+function insertTable(ctx: AppContext, input: CreateTableInput, code: string, outlet: string) {
   const floor =
     (input.floorId && (ctx.db.prepare("SELECT id FROM floors WHERE id = ?").get(input.floorId) as { id: string } | undefined)) ||
     (ctx.db.prepare("SELECT id FROM floors ORDER BY sort_order, name LIMIT 1").get() as { id: string } | undefined);
   if (!floor) throw new AppError("No floor configured");
   const id = uuid();
-  try {
-    ctx.db
-      .prepare(
-        "INSERT INTO dining_tables (id, floor_id, code, name, capacity, status, outlet) VALUES (?, ?, ?, ?, ?, 'AVAILABLE', ?)",
-      )
-      .run(id, floor.id, code, input.name?.trim() || `Table ${code}`, input.capacity ?? 4, outlet);
-  } catch {
-    const same = findTableByCode(ctx, code, outlet);
-    if (same) return getTable(ctx, same.id);
-    throw new AppError(`Could not create table ${code}`);
-  }
+  ctx.db
+    .prepare(
+      "INSERT INTO dining_tables (id, floor_id, code, name, capacity, status, outlet) VALUES (?, ?, ?, ?, ?, 'AVAILABLE', ?)",
+    )
+    .run(id, floor.id, code, input.name?.trim() || `Table ${code}`, input.capacity ?? 4, outlet);
   audit(ctx, "TABLE_CREATE", "dining_table", id, null, null, { code, outlet });
   return getTable(ctx, id);
+}
+
+function openClubTableByCard(ctx: AppContext, input: CreateTableInput, code: string) {
+  const number = typeof input.cardNumber === "string" ? input.cardNumber.trim() : "";
+  return ctx.db.transaction(() => {
+    const card = ctx.db.prepare("SELECT id FROM member_cards WHERE card_number = ?").get(number) as { id: string } | undefined;
+    if (!card) throw new AppError("Card not found", 404, "CARD_NOT_FOUND");
+    const table = ctx.db.prepare(`
+      SELECT t.id, t.status
+      FROM dining_tables t
+      LEFT JOIN table_sessions s ON s.id = t.current_session_id
+      WHERE t.outlet = 'THE BOSS CLUB' AND lower(t.code) = lower(?)
+        AND (s.card_id = ? OR t.status = 'AVAILABLE' OR (t.status = 'RESERVED' AND s.id IS NULL))
+      ORDER BY CASE WHEN s.card_id = ? THEN 0 ELSE 1 END, t.id
+      LIMIT 1
+    `).get(code, card.id, card.id) as { id: string; status: TableStatus } | undefined;
+    if (table && table.status !== "AVAILABLE" && table.status !== "RESERVED") return getTable(ctx, table.id);
+    const tableId = table?.id ?? insertTable(ctx, input, code, "THE BOSS CLUB").id;
+    return openTable(ctx, { tableId, cardId: card.id, customerId: getCard(ctx, card.id).customer_id }).table;
+  }).immediate();
 }
 
 export function getTable(ctx: AppContext, tableId: string) {
@@ -442,6 +468,22 @@ function openOrderOnTable(ctx: AppContext, tableId: string) {
 export function transferItems(
   ctx: AppContext,
   fromTableId: string,
+  destination: string | { code: string },
+  itemIds: string[],
+  reason?: string,
+) {
+  return ctx.db.transaction(() => {
+    const toTableId = typeof destination === "string" ? destination : createTable(ctx, {
+      code: destination.code,
+      outlet: getTable(ctx, fromTableId).outlet || "BAR",
+    }).id;
+    return moveItems(ctx, fromTableId, toTableId, itemIds, reason);
+  })();
+}
+
+function moveItems(
+  ctx: AppContext,
+  fromTableId: string,
   toTableId: string,
   itemIds: string[],
   reason?: string,
@@ -466,9 +508,10 @@ export function transferItems(
       .prepare(
         `SELECT oi.id, oi.kot_id FROM order_items oi
            JOIN orders o ON o.id = oi.order_id
-          WHERE oi.id = ? AND o.table_id = ? AND oi.voided = 0`,
+          WHERE oi.id = ? AND o.table_id = ? AND o.session_id = ?
+            AND o.status IN ('OPEN','BILL_REQUESTED','SETTLING') AND oi.voided = 0`,
       )
-      .get(itemId, from.id) as { id: string; kot_id: string | null } | undefined;
+      .get(itemId, from.id, from.current_session_id) as { id: string; kot_id: string | null } | undefined;
     if (!row) throw new AppError("Item is not on the current table");
     ctx.db.prepare("UPDATE order_items SET order_id = ? WHERE id = ?").run(destOrder.id, itemId);
     if (row.kot_id) movedKots.add(row.kot_id);
@@ -491,9 +534,10 @@ export function transferItems(
     .prepare(
       `SELECT COUNT(*) AS n FROM order_items oi
          JOIN orders o ON o.id = oi.order_id
-        WHERE o.table_id = ? AND o.status IN ('OPEN','BILL_REQUESTED','SETTLING') AND oi.voided = 0`,
+        WHERE o.table_id = ? AND o.session_id = ?
+          AND o.status IN ('OPEN','BILL_REQUESTED','SETTLING') AND oi.voided = 0`,
     )
-    .get(from.id) as { n: number };
+    .get(from.id, from.current_session_id) as { n: number };
   if (!remaining.n) closeTable(ctx, from.id);
   audit(ctx, "ITEM_TRANSFER", "dining_table", from.id, reason ?? null, from.code, { to: to.code, itemIds: ids });
   return {

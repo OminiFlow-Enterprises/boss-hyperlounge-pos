@@ -21,7 +21,10 @@ export function openDatabase(options: OpenDbOptions = {}): Database.Database {
     db.pragma("foreign_keys = ON");
     db.pragma("journal_mode = WAL");
     db.pragma("busy_timeout = 5000");
-    if (!options.existingOnly) migrate(db);
+    if (options.existingOnly && !hasColumn(db, "invoices", "id")) {
+      throw new Error("The existing POS database is missing its invoices table. Restore the database before starting.");
+    }
+    migrate(db);
     return db;
   } catch (error) {
     db.close();
@@ -148,6 +151,34 @@ function installBaseline(db: Database.Database): void {
 const migrations: Array<{ version: number; apply: (db: Database.Database) => void; foreignKeysOff?: boolean }> = [
   { version: 1, apply: installBaseline, foreignKeysOff: true },
   { version: 2, apply: (db) => db.exec("ALTER TABLE payments ADD COLUMN cashier_id TEXT REFERENCES staff(id)") },
+  { version: 3, apply: (db) => db.exec("ALTER TABLE invoices ADD COLUMN service_charge_gst INTEGER NOT NULL DEFAULT 0") },
+  {
+    version: 4,
+    foreignKeysOff: true,
+    apply: (db) => db.exec(`
+      CREATE TABLE dining_tables_new (
+        id TEXT PRIMARY KEY,
+        floor_id TEXT NOT NULL REFERENCES floors(id),
+        code TEXT NOT NULL,
+        name TEXT NOT NULL,
+        capacity INTEGER NOT NULL DEFAULT 4,
+        status TEXT NOT NULL DEFAULT 'AVAILABLE',
+        current_session_id TEXT,
+        merged_into_table_id TEXT,
+        outlet TEXT NOT NULL DEFAULT 'BAR'
+      );
+      INSERT INTO dining_tables_new
+        (id, floor_id, code, name, capacity, status, current_session_id, merged_into_table_id, outlet)
+      SELECT id, floor_id, code, name, capacity, status, current_session_id, merged_into_table_id, outlet
+      FROM dining_tables;
+      DROP TABLE dining_tables;
+      ALTER TABLE dining_tables_new RENAME TO dining_tables;
+      CREATE UNIQUE INDEX dining_tables_outlet_code ON dining_tables(outlet, code)
+        WHERE outlet <> 'THE BOSS CLUB';
+      CREATE INDEX dining_tables_club_code ON dining_tables(lower(code))
+        WHERE outlet = 'THE BOSS CLUB';
+    `),
+  },
 ];
 
 export function migrate(db: Database.Database): void {

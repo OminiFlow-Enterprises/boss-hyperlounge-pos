@@ -130,6 +130,24 @@ describe("tables, KOT and billing", () => {
     expect(getOrderDetail(waiter, destOrder.id).items as Array<{ id: string }>).toHaveLength(2);
   });
 
+  it("transfers items to a new table code and rolls back a rejected transfer", () => {
+    const { ctx, seeded } = createTestApp();
+    const manager = ctx("manager");
+    const source = createTable(manager, { code: "XFER-SOURCE", outlet: "RESTAURANT" });
+    openTable(manager, { tableId: source.id });
+    const order = createOrder(manager, source.id) as { id: string };
+    const item = addItem(manager, { orderId: order.id, productId: seeded.products["FOOD-PZ"], qty: 1 }) as { id: string };
+    const destination = { code: "XFER-NEW" };
+    expect(() => transferItems(manager, source.id, destination, [item.id, "missing"])).toThrow("Item is not on the current table");
+    expect(() => getTableByCode(manager, destination.code, "RESTAURANT")).toThrow();
+    expect(getOrderDetail(manager, order.id).items).toMatchObject([{ id: item.id }]);
+
+    const result = transferItems(manager, source.id, destination, [item.id]);
+    expect(result).toMatchObject({ sourceClosed: true, to: { code: destination.code, outlet: "RESTAURANT", status: "OCCUPIED" } });
+    const destOrder = createOrder(manager, result.to.id) as { id: string };
+    expect(getOrderDetail(manager, destOrder.id).items).toMatchObject([{ id: item.id }]);
+  });
+
   it("requires settlement before moving a printed bill's table or items in either direction", async () => {
     const { seeded, ctx } = createTestApp();
     const waiter = ctx("waiter");
@@ -435,6 +453,28 @@ describe("tables, KOT and billing", () => {
     expect(checkBalance(cashier, "1002").balances.usable).toBe(rupeesToPaise(1900) - net1);
     setBillLineQty(cashier, clubOrder.id, [line.id], 0);
     expect(checkBalance(cashier, "1002").balances.usable).toBe(rupeesToPaise(1900));
+  });
+
+  it("reuses a Boss Club table by card and table number together", () => {
+    const { ctx } = createTestApp();
+    const cashier = ctx("cashier");
+    for (const number of ["1001", "1002"]) {
+      issueCard(cashier, {
+        customer: { name: `Guest ${number}`, mobile: `900000${number}` },
+        cardNumber: number,
+        cardTypeCode: "REGULAR",
+      });
+    }
+    const input = { code: "Club-1", outlet: "THE BOSS CLUB" };
+    const first = createTable(cashier, { ...input, cardNumber: "1001" });
+    const second = createTable(cashier, { ...input, cardNumber: "1002" });
+    expect(second.id).not.toBe(first.id);
+    expect(second.code).toBe(first.code);
+    expect(createTable(cashier, { ...input, code: "club-1", cardNumber: "1001" }).id).toBe(first.id);
+    expect(createTable(cashier, { ...input, cardNumber: "1002" }).id).toBe(second.id);
+    const rows = listTables(cashier);
+    expect(rows.find((row) => row.id === first.id)?.card_number).toBe("1001");
+    expect(rows.find((row) => row.id === second.id)?.card_number).toBe("1002");
   });
 
   it("creates a new table from a typed code and reuses the same code", () => {

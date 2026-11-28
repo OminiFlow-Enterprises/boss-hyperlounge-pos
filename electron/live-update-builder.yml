@@ -6,7 +6,6 @@ directories:
   output: release/live-update/server
 files:
   - dist/**/*
-  - "!dist/server/db/schema.sql"
   - electron/**/*
   - package.json
 extraResources: []

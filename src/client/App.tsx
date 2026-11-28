@@ -389,10 +389,10 @@ export function App() {
     };
   }, [bootstrapAttempt]);
 
-  function notify(m: string, after?: () => void) {
+  const notify = useCallback((m: string, after?: () => void) => {
     alertAfterRef.current = after ?? null;
     setAlertText(m.trim());
-  }
+  }, []);
 
   useEffect(() => watchKotPrintJobs((message) => {
     setAlertText((current) => current ? `${current}\n\n${message}` : message);
@@ -706,7 +706,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   const [noteItem, setNoteItem] = useState<OrderItem | null>(null);
   /** Punch grid only — not written to DB until Print KOT. */
   const [draftItems, setDraftItems] = useState<OrderItem[]>([]);
-  const [draftEstimate, setDraftEstimate] = useState<{ key: string; total: number | null }>();
+  const [draftEstimate, setDraftEstimate] = useState<{ key: string; total: number | null; alreadyPunched: number | null }>();
   const draftSeq = useRef(0);
   const [waiter, setWaiter] = useState("A");
   const [itemQuery, setItemQuery] = useState("");
@@ -836,15 +836,16 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       .reduce((s, it) => s + it.qty, 0);
   }
 
-  async function selectTable(id: string, code?: string, cardOverride?: string) {
+  async function selectTable(id: string, code?: string, clubTable?: Table) {
     setOrderId(null);
     setTableId(id);
     setSidebarTableId(id);
     if (code) setTableCode(code);
-    const t = tables.find((x) => x.id === id);
+    const t = clubTable ?? tables.find((x) => x.id === id);
     const existingCard = (t?.card_number || "").trim();
-    const typedCard = (cardOverride ?? (clubMode ? clubCard : "")).trim();
-    const clubCardNo = existingCard || (clubMode ? typedCard : "");
+    const typedCard = clubMode ? clubCard.trim() : "";
+    const useTableCardDetails = !clubTable;
+    const clubCardNo = useTableCardDetails ? existingCard || (clubMode ? typedCard : "") : "";
     if (clubMode && clubCardNo) setClubCard(cardNoDigits(clubCardNo));
     try {
       if (!t || t.status === "AVAILABLE" || t.status === "RESERVED") {
@@ -852,7 +853,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           outlet: deptOutlet(dept),
           cardNumber: typedCard || undefined,
         });
-      } else if (typedCard && !existingCard) {
+      } else if (!clubTable && typedCard && !existingCard) {
         await api.post(`/api/tables/${id}/card`, { cardNumber: typedCard });
       }
       const order = await api.post<any>("/api/orders", { tableId: id });
@@ -868,9 +869,9 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       setSel(-1);
       await clearServerUnsent(order.id);
       setOrderId(order.id);
-      if (t?.customer_name) setGuest(t.customer_name);
+      if (useTableCardDetails && t?.customer_name) setGuest(t.customer_name);
       if (clubMode && clubCardNo) void loadCard(cardNoDigits(clubCardNo), true);
-      else if (existingCard) setCheckCard(cardNoDigits(existingCard));
+      else if (useTableCardDetails && existingCard) setCheckCard(cardNoDigits(existingCard));
       onRefresh();
       focusInput(itemRef.current);
     } catch (e) {
@@ -889,10 +890,8 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         setSidebarTableId("");
         setItemListSel(0);
         setListOpen(false);
-        focusTableNo();
-      } else {
-        focusDept(next);
       }
+      focusDept(next);
       return;
     }
     setDept(next);
@@ -914,8 +913,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setItemListSel(0);
     setSel(-1);
     onOpenView("billing", deptOutlet(next));
-    if (showTableList) focusTableNo();
-    else focusDept(next);
+    focusDept(next);
   }
 
   function stepDept(dir: -1 | 1) {
@@ -966,10 +964,13 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     });
   }
 
-  async function ensureOpenByCode(code: string) {
+  async function ensureOpenByCode(code: string, sidebarSelection?: Table) {
     const raw = code.trim();
     const out = barOnly ? "BAR" : deptOutlet(dept);
-    const known = tables.find((x) => x.code.toLowerCase() === raw.toLowerCase() && (x.outlet || "BAR") === out);
+    const useEnteredCard = clubMode && !sidebarSelection;
+    const known = sidebarSelection ?? (useEnteredCard ? undefined : tables.find(
+      (x) => x.code.toLowerCase() === raw.toLowerCase() && (x.outlet || "BAR") === out,
+    ));
     const cardOnTable = (known?.card_number || "").trim();
     const running = Boolean(known && known.status !== "AVAILABLE");
     if (!raw) {
@@ -977,17 +978,26 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       focusTableNo();
       return null;
     }
-    if (clubMode && !cardNoReady(clubCard) && !cardOnTable && !running) {
+    if (clubMode && !cardNoReady(clubCard) && (useEnteredCard || (!cardOnTable && !running))) {
       stayOnCard(clubCardRef.current);
       return null;
     }
-    if (clubMode && cardOnTable) setClubCard(cardNoDigits(cardOnTable));
+    if (clubMode && !useEnteredCard && cardOnTable) setClubCard(cardNoDigits(cardOnTable));
     const current = tables.find((x) => x.id === tableId);
-    if (orderId && current && (!barOnly || current.status !== "PAYMENT_PENDING") && current.code.toLowerCase() === raw.toLowerCase() && (current.outlet || "BAR") === out) {
+    if (!useEnteredCard && orderId && current && (!sidebarSelection || current.id === sidebarSelection.id) && (!barOnly || current.status !== "PAYMENT_PENDING") && current.code.toLowerCase() === raw.toLowerCase() && (current.outlet || "BAR") === out) {
       focusInput(itemRef.current);
       return current;
     }
     try {
+      if (useEnteredCard) {
+        const t = await api.post<Table>("/api/tables", { code: raw, outlet: out, cardNumber: clubCard });
+        if (orderId && t.id === tableId && t.current_session_id === current?.current_session_id) {
+          focusInput(itemRef.current);
+        } else {
+          await selectTable(t.id, t.code, t);
+        }
+        return t;
+      }
       let t = known;
       if (barOnly && t?.status === "PAYMENT_PENDING") {
         onMessage("Bill already printed");
@@ -996,7 +1006,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       if (!t) {
         t = await api.post<Table>("/api/tables", { code: raw, name: `Table ${raw}`, outlet: out });
       }
-      await selectTable(t.id, t.code, clubMode ? (cardOnTable || clubCard.trim()) : undefined);
+      await selectTable(t.id, t.code);
       return t;
     } catch (e) {
       onMessage(e instanceof Error ? e.message : "Could not open table");
@@ -1600,7 +1610,7 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
     setItemListSel(0);
     if (table.status !== "PAYMENT_PENDING") {
       setTableCode(table.code);
-      void ensureOpenByCode(table.code);
+      void ensureOpenByCode(table.code, table);
     } else if ((table.outlet || "BAR") === "BAR" && (!tableId || tableId === table.id)) {
       setTableCode(table.code);
     }
@@ -2019,8 +2029,6 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   const estimateFor = (t: Table) => t.net_total ?? t.running_total ?? 0;
   const showTableEstimate = !advance && (dept !== "NC" || showNcEstimate);
   const listTotal = estimateRows.reduce((s, t) => s + estimateFor(t), 0);
-  const clubDraftNet = draftItems.reduce((s, it) => s + netOf(it), 0);
-  const clubRemain = clubBalPaise - clubDraftNet;
   const pendingQty = pending ? parseQty(qtyStr) : null;
   const estimateItems = draftItems
     .filter((item) => !(pending && pendingQty != null && item.id === editingId))
@@ -2032,20 +2040,39 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
   const requestBody = (!barOnly || barPunchEstimate) && orderId && dept !== "NC" && estimateItems.length
     ? JSON.stringify({ items: estimateItems, outlet: deptOutlet(dept) })
     : "";
-  const estimateKey = JSON.stringify([orderId, requestBody]);
+  const hasClubPunches = clubMode && servedItems.length > 0;
+  const estimateKey = JSON.stringify([orderId, requestBody, hasClubPunches]);
   useEffect(() => {
     if (!orderId || !requestBody) return;
     let current = true;
-    api.post<{ grandTotal: number }>(`/api/orders/${orderId}/estimate`, JSON.parse(requestBody))
-      .then(({ grandTotal }) => { if (current) setDraftEstimate({ key: estimateKey, total: grandTotal }); })
-      .catch(() => { if (current) setDraftEstimate({ key: estimateKey, total: null }); });
+    const url = `/api/orders/${orderId}/estimate`;
+    const alreadyPunched = hasClubPunches
+      ? api.post<{ grandTotal: number }>(url, { items: [] }).then(({ grandTotal }) => grandTotal, () => null)
+      : Promise.resolve(0);
+    Promise.all([api.post<{ grandTotal: number }>(url, JSON.parse(requestBody)), alreadyPunched])
+      .then(([{ grandTotal }, punched]) => {
+        if (current) setDraftEstimate({ key: estimateKey, total: grandTotal, alreadyPunched: punched });
+      })
+      .catch(() => {
+        if (current) setDraftEstimate({ key: estimateKey, total: null, alreadyPunched: null });
+      });
     return () => { current = false; };
-  }, [orderId, requestBody, estimateKey]);
+  }, [orderId, requestBody, estimateKey, hasClubPunches]);
 
   const showTableItems = Boolean(tableId);
+  const currentEstimate = draftEstimate?.key === estimateKey ? draftEstimate : undefined;
   const estimateNet = requestBody
-    ? (draftEstimate?.key === estimateKey ? draftEstimate.total : null)
+    ? currentEstimate?.total ?? null
     : table ? estimateFor(table) : 0;
+  const sidebarEstimate = sidebarTable
+    ? (sidebarTable.id === tableId ? estimateNet : null) ?? estimateFor(sidebarTable)
+    : null;
+  // Card Bal is the ledger balance after previous Club KOT charges.
+  const clubEstimate = !estimateItems.length ? 0
+    : currentEstimate?.total != null && currentEstimate.alreadyPunched != null
+      ? currentEstimate.total - currentEstimate.alreadyPunched
+      : null;
+  const clubRemain = clubEstimate == null ? null : clubBalPaise - clubEstimate;
   const sidebarItemSummary = sidebarTable && (
     <>
       <div className="estimate-head">Table {sidebarTable.code} Items</div>
@@ -2074,9 +2101,9 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
         </table>
       </div>
       <div className="estimate-fill" />
-      {(dept !== "NC" || showNcEstimate) && <div className="estimate-total">Total Estimate: {amt(
-        sidebarTable.id === tableId ? estimateNet ?? estimateFor(sidebarTable) : estimateFor(sidebarTable),
-      )}</div>}
+      {sidebarEstimate != null && (dept !== "NC" || showNcEstimate) && (
+        <div className="estimate-total">Total Estimate: {amt(sidebarEstimate)}</div>
+      )}
     </>
   );
 
@@ -2361,11 +2388,11 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
               <span className="lbl">Card Bal</span>
               <span className="num">{amt(clubBalPaise)}</span>
               <span className="op">−</span>
-              <span className="lbl">Unsent Item Net</span>
-              <span className="num">{amt(clubDraftNet)}</span>
+              <span className="lbl">New KOT Estimate</span>
+              <span className="num">{clubEstimate == null ? "—" : amt(clubEstimate)}</span>
               <span className="op">=</span>
               <span className="lbl">Remain</span>
-              <span className="num">{amt(clubRemain)}</span>
+              <span className="num">{clubRemain == null ? "—" : amt(clubRemain)}</span>
             </div>
           ) : null}
         </div>
@@ -2506,13 +2533,14 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
           tables={tables}
           outlet={deptOutlet(dept)}
           currentCode={tableCode}
+          currentTableId={tableId || sidebarTableId}
           onClose={() => setXferOpen(false)}
-          onDone={(fromCode, to) => {
+          onDone={(from, to) => {
             setXferOpen(false);
             onRefresh();
             const toOutlet = to.outlet || "BAR";
-            onMessage(`Transferred ${fromCode} to ${to.code} (${toOutlet})`);
-            if (tableCode.toLowerCase() === fromCode.toLowerCase()) {
+            onMessage(`Transferred ${from.code} to ${to.code} (${toOutlet})`);
+            if (from.id === (tableId || sidebarTableId)) {
               setTableId(to.id);
               setTableCode(to.code);
               void selectTable(to.id, to.code);
@@ -2524,8 +2552,10 @@ function BillingScreen({ tables, products, outlet, onRefresh, onCatalog, onInvoi
       {itemXferOpen && (
         <ItemTransferDialog
           tables={tables}
+          runningTables={tables.filter((t) => isCurrentSidebarTable(t)
+            && (t.has_running_order ?? Number(t.running_total) > 0))}
           outlet={deptOutlet(dept)}
-          currentCode={tableCode}
+          currentTableId={tableId || sidebarTableId}
           onClose={() => setItemXferOpen(false)}
           onDone={(_fromCode, to) => {
             onMessage(`Items transferred to ${to.code}`);

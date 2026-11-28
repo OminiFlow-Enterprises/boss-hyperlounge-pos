@@ -88,6 +88,7 @@ export function buildBillTotalLines(input: {
   serviceCharge: number;
   serviceChargePct: number;
   serviceChargeInclusive?: boolean;
+  serviceChargeGst?: number;
   otherCharges: number;
   roundOff: number;
   /** Prefer invoice tax total when present (keeps print aligned with settled bill). */
@@ -134,14 +135,16 @@ export function buildBillTotalLines(input: {
     else addAcc(otherByRate, rate, base, tax);
   }
 
-  if (input.taxTotal != null && input.taxTotal > 0) {
+  const serviceGst = input.serviceChargeGst ?? 0;
+  const itemTaxTotal = input.taxTotal == null ? undefined : input.taxTotal - serviceGst;
+  if (itemTaxTotal != null && itemTaxTotal > 0) {
     const buckets = [...vatByRate.values(), ...gstByRate.values(), ...otherByRate.values()];
     const computed = buckets.reduce((s, v) => s + v.tax, 0);
-    if (computed > 0 && computed !== input.taxTotal) {
-      const factor = input.taxTotal / computed;
+    if (computed > 0 && computed !== itemTaxTotal) {
+      const factor = itemTaxTotal / computed;
       for (const v of buckets) v.tax = Math.round(v.tax * factor);
       let sum = buckets.reduce((s, v) => s + v.tax, 0);
-      const drift = input.taxTotal - sum;
+      const drift = itemTaxTotal - sum;
       if (drift !== 0) {
         const prefer = [...buckets].sort((a, b) => b.tax - a.tax)[0];
         if (prefer) prefer.tax += drift;
@@ -171,16 +174,17 @@ export function buildBillTotalLines(input: {
 
   // No per-line rates available: still print CGST/SGST with % from the invoice tax total
   if (
-    input.taxTotal != null &&
-    input.taxTotal > 0 &&
+    itemTaxTotal != null &&
+    itemTaxTotal > 0 &&
     vatByRate.size === 0 &&
     gstByRate.size === 0 &&
     otherByRate.size === 0
   ) {
-    const half = Math.floor(input.taxTotal / 2);
-    gstOddPaise += input.taxTotal - half * 2;
-    rows.push({ label: "CGST 9.0%", amount: half });
-    rows.push({ label: "SGST 9.0%", amount: half });
+    addAcc(gstByRate, 18, 0, itemTaxTotal);
+  }
+
+  if (serviceGst > 0) {
+    addAcc(gstByRate, 18, input.serviceCharge, serviceGst);
   }
 
   for (const g of [...gstByRate.values()].sort((a, b) => a.rate - b.rate)) {
@@ -190,12 +194,12 @@ export function buildBillTotalLines(input: {
     gstOddPaise += g.tax - half * 2;
     rows.push({
       label: `CGST ${fmtPct(halfRate, 1)}%`,
-      base: g.base,
+      base: g.base || undefined,
       amount: half,
     });
     rows.push({
       label: `SGST ${fmtPct(halfRate, 1)}%`,
-      base: g.base,
+      base: g.base || undefined,
       amount: half,
     });
   }
